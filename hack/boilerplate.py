@@ -42,6 +42,7 @@ COMMENT_STYLES = {
     ".go": ("// ", None, None),
     ".sh": ("# ", None, None),
     ".py": ("# ", None, None),
+    ".toml": ("# ", None, None),
     ".js": ("// ", None, None),
     ".ts": ("// ", None, None),
     ".java": ("// ", None, None),
@@ -111,7 +112,7 @@ def file_extension_magic(file_path):
                 return ".py"
             if "bash" in first_line or "sh" in first_line:
                 return ".sh"
-            print((f"unknown shebang in {file_path}: {first_line}"))
+            print(f"unknown shebang in {file_path}: {first_line}")
     return None
 
 def get_comment_style(file_extension):
