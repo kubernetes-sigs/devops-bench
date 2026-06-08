@@ -1,0 +1,19 @@
+# Top-most EditorConfig file
+root = true
+
+# Standard settings for all files - default to 2 spaces indent
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# Specific overrides for Python (must use 4 spaces indent)
+[*.py]
+indent_size = 4
+
+# Specific overrides for Markdown (trailing whitespace can be significant for line breaks)
+[*.md]
+trim_trailing_whitespace = false
