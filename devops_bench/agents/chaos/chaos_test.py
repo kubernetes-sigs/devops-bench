@@ -64,7 +64,7 @@ class TestChaosAgent(unittest.TestCase):
     mock_chat.send_message.assert_called_once()
     goal_sent = mock_chat.send_message.call_args[0][0]
     self.assertIn(
-        "execute the following GKE planned chaos engineering disruption action",
+        "execute the following planned chaos engineering disruption action",
         goal_sent,
     )
     self.assertIn("generate_load", goal_sent)
