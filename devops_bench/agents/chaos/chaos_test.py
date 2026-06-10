@@ -1,3 +1,17 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 import unittest
 from unittest import mock
@@ -106,7 +120,7 @@ class TestChaosAgent(unittest.TestCase):
     self.assertIn("Stdout:\nstdout output", result)
     self.assertIn("Stderr:\nstderr output", result)
     mock_run.assert_called_once_with(
-        "echo hello", shell=True, capture_output=True, text=True, timeout=40
+        ["echo", "hello"], capture_output=True, text=True, timeout=40
     )
 
   @mock.patch("subprocess.run")
@@ -133,7 +147,7 @@ class TestChaosAgent(unittest.TestCase):
     mock_event.reset_mock()
 
     # Should NOT signal when "fortio load" is NOT in command
-    agent._run_command("kubectl get pods")
+    agent._run_command("echo not-a-load")
     mock_event.set.assert_not_called()
 
   def test_run_command_blocked(self):

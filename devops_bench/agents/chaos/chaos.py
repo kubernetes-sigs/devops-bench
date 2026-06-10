@@ -1,3 +1,17 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import os
 import subprocess
@@ -25,7 +39,7 @@ class ChaosAgent:
         binary = parts[0]
         binary_name = os.path.basename(binary)
         
-        allowed_binaries = {"fortio", "kubectl", "echo", "sleep", "gcloud"}
+        allowed_binaries = {"fortio", "echo", "sleep"}
         if binary_name not in allowed_binaries:
             log(f"[ChaosAgent/Tool] Blocked unsafe command: {command}")
             return f"Error: Command '{binary_name}' is not allowed. Allowed commands are: {', '.join(sorted(allowed_binaries))}"
@@ -36,13 +50,13 @@ class ChaosAgent:
             log("[ChaosAgent/Tool] Load spike detected. Signaling main thread...")
             self._chaos_active_event.set()
             
-        res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=40)
+        res = subprocess.run(parts, capture_output=True, text=True, timeout=40)
         return f"Stdout:\n{res.stdout}\nStderr:\n{res.stderr}"
     except Exception as e:
         return f"Error: {e}"
 
   def inject_fault(self, spec: dict):
-    self._chaos_active_event = getattr(self, "chaos_active_event", None)
+    self._chaos_active_event = getattr(self, "chaos_active_event", self._chaos_active_event)
     
     action_type = spec.get("type")
     
@@ -58,12 +72,13 @@ class ChaosAgent:
         f"Guidelines for execution:\n"
         f"1. Use the 'fortio' tool to inject traffic into the workload.\n"
         f"2. Note: The service target URLs (like *.svc.cluster.local) are port-forwarded to 'http://localhost:8080' on the host, so run fortio against http://localhost:8080 instead.\n"
-        f"Use your run_command tool to execute this disruption safely and effectively."
+        f"Use your _run_command tool to execute this disruption safely and effectively."
     )
     
     api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+       raise RuntimeError("GEMINI_API_KEY must be set to use ChaosAgent")
     client = genai.Client(api_key=api_key)
-    
     model_name = os.environ.get("JUDGE_MODEL", "gemini-3-flash-preview")
     system_instruction = (
         "You are a professional Site Reliability Engineer (SRE) and Chaos Engineering Expert.\n"
@@ -101,4 +116,4 @@ class ChaosAgent:
         log(f"Agent Final Output:\n{response.text}")
     except Exception as e:
         log(f"[ChaosAgent] Error during LLM chaos execution: {e}")
-        raise e
+        raise
