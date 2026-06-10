@@ -34,6 +34,16 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-mock",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [tool.hatch.version]
 path = "devops_bench/__init__.py"
 
