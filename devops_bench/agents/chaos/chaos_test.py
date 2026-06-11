@@ -13,20 +13,21 @@
 # limitations under the License.
 
 import os
-import unittest
 from unittest import mock
+
+import pytest
 
 from devops_bench.agents.chaos.chaos import ChaosAgent
 
 
-class TestChaosAgent(unittest.TestCase):
+class TestChaosAgent:
 
   @mock.patch("devops_bench.agents.chaos.chaos.genai.Client")
   @mock.patch("subprocess.run")
-  @mock.patch.dict(
-      os.environ, {"GEMINI_API_KEY": "fake-key"}
-  )
-  def test_inject_fault_generate_load_success(self, mock_run, mock_genai_client):
+  @mock.patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"})
+  def test_inject_fault_generate_load_success(
+      self, mock_run, mock_genai_client
+  ):
     # Setup mock run
     mock_run.return_value = mock.MagicMock(
         stdout="mock stdout", stderr="mock stderr", returncode=0
@@ -67,21 +68,29 @@ class TestChaosAgent(unittest.TestCase):
     )
     # Deep compare config
     config = mock_client.chats.create.call_args[1]["config"]
-    self.assertEqual(config.temperature, 0.0)
-    self.assertEqual(config.tools, [agent._run_command])
-    self.assertIn(
-        "You are a professional Site Reliability Engineer",
-        config.system_instruction,
+    assert config.temperature == 0.0
+    assert config.tools == [agent.run_command]
+    assert (
+        "You are a professional Site Reliability Engineer"
+        in config.system_instruction
     )
 
     # Verify send_message was called with the goal
     mock_chat.send_message.assert_called_once()
     goal_sent = mock_chat.send_message.call_args[0][0]
-    self.assertIn(
-        "execute the following planned chaos engineering disruption action",
-        goal_sent,
+    assert (
+        "execute the following planned chaos engineering disruption action"
+        in goal_sent
     )
-    self.assertIn("generate_load", goal_sent)
+    assert "generate_load" in goal_sent
+
+  @mock.patch.dict(os.environ, {}, clear=True)
+  def test_inject_fault_missing_api_key(self):
+    agent = ChaosAgent()
+    action_spec = {"type": "generate_load"}
+    with pytest.raises(ValueError) as excinfo:
+      agent.inject_fault(action_spec)
+    assert "GEMINI_API_KEY environment variable is required" in str(excinfo.value)
 
   @mock.patch("devops_bench.agents.chaos.chaos.genai.Client")
   def test_inject_fault_unsupported_type(self, mock_genai_client):
@@ -94,6 +103,7 @@ class TestChaosAgent(unittest.TestCase):
     mock_genai_client.assert_not_called()
 
   @mock.patch("devops_bench.agents.chaos.chaos.genai.Client")
+  @mock.patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"})
   def test_inject_fault_failure_propagates(self, mock_genai_client):
     # Setup mock GenAI client to raise exception
     mock_client = mock.MagicMock()
@@ -103,10 +113,10 @@ class TestChaosAgent(unittest.TestCase):
     agent = ChaosAgent()
     action_spec = {"type": "generate_load"}
 
-    with self.assertRaises(Exception) as context:
+    with pytest.raises(Exception) as excinfo:
       agent.inject_fault(action_spec)
 
-    self.assertIn("API Error", str(context.exception))
+    assert "API Error" in str(excinfo.value)
 
   @mock.patch("subprocess.run")
   def test_run_command_success(self, mock_run):
@@ -115,12 +125,15 @@ class TestChaosAgent(unittest.TestCase):
     )
 
     agent = ChaosAgent()
-    result = agent._run_command("echo hello")
+    result = agent.run_command("echo hello")
 
-    self.assertIn("Stdout:\nstdout output", result)
-    self.assertIn("Stderr:\nstderr output", result)
+    assert "Stdout:\nstdout output" in result
+    assert "Stderr:\nstderr output" in result
     mock_run.assert_called_once_with(
-        ["echo", "hello"], capture_output=True, text=True, timeout=40
+        ["echo", "hello"],
+        capture_output=True,
+        text=True,
+        timeout=40,
     )
 
   @mock.patch("subprocess.run")
@@ -128,9 +141,9 @@ class TestChaosAgent(unittest.TestCase):
     mock_run.side_effect = Exception("command failed")
 
     agent = ChaosAgent()
-    result = agent._run_command("echo hello")
+    result = agent.run_command("echo hello")
 
-    self.assertEqual(result, "Error: command failed")
+    assert result == "Error: command failed"
 
   @mock.patch("subprocess.run")
   def test_run_command_load_spike_signaling(self, mock_run):
@@ -141,21 +154,19 @@ class TestChaosAgent(unittest.TestCase):
     agent._chaos_active_event = mock_event
 
     # Should signal when "fortio load" is in command
-    agent._run_command("fortio load -qps 10")
+    agent.run_command("fortio load -qps 10")
     mock_event.set.assert_called_once()
 
     mock_event.reset_mock()
 
     # Should NOT signal when "fortio load" is NOT in command
-    agent._run_command("echo not-a-load")
+    agent.run_command("echo not-a-load")
     mock_event.set.assert_not_called()
 
   def test_run_command_blocked(self):
     agent = ChaosAgent()
     # rm is not in the safelist
-    result = agent._run_command("rm -rf /")
-    self.assertIn("Command 'rm' is not allowed", result)
+    result = agent.run_command("rm -rf /")
+    assert "Command 'rm' is not allowed" in result
 
 
-if __name__ == "__main__":
-  unittest.main()
