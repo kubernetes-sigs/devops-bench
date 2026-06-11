@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        stages: [pre-commit]
+
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check
+        language: system
+        types: [python]
+        stages: [pre-commit]
+
+      - id: uv-lock-check
+        name: uv-lock-check
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: license-header-check
+        name: license-header-check
+        entry: uv run python hack/boilerplate.py --dry-run
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
