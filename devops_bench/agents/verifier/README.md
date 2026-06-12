@@ -81,3 +81,33 @@ Adding a new check is extremely simple and fully adheres to the **Open-Closed Pr
 1. Create a new file under `devops_bench/agents/verifier/verifiers/<new_check_name>_verifier.py`.
 2. Define a verifier class inheriting from `BaseVerifier` with `type: Literal["<new_check_name>"]` and implement `verify(self, timeout_sec: int) -> VerificationResult`.
 3. Register your new class in the `SingleVerificationSpec` union inside `devops_bench/agents/verifier/spec.py`.
+
+---
+
+## 5. Event-Driven Watcher Architecture (kubewatch)
+
+The verifier agent uses an event-driven architecture powered by **[robusta-dev/kubewatch](https://github.com/robusta-dev/kubewatch)** instead of active polling loops.
+
+### How it Works
+1. **Local Webhook Receiver**: When checking a condition, `KubeWatchService` starts a temporary local HTTP server on an ephemeral random port.
+2. **Isolated Daemon Instance**: It constructs an isolated, temporary `.kubewatch.yaml` configuration in a temporary directory and starts the local `kubewatch` daemon process. This ensures your global `~/.kubewatch.yaml` is never modified.
+3. **Structured JSON Events**: `kubewatch` tracks cluster state changes and posts structured JSON payloads (representing creations, updates, or deletions of pods and deployments) directly to our local HTTP server.
+4. **Instant Event Dispatch**: Upon receiving an event, the HTTP handler sets a thread-safe `threading.Event`, immediately waking up the verifier thread to run a precise check via `kubectl get`.
+5. **Teardown**: When the verification succeeds or times out, the local daemon process is terminated, the web server is closed, and all temporary configurations are cleaned up.
+
+### Installation & Prerequisites
+
+To use the event-driven watcher, the `kubewatch` binary must be installed.
+
+1. **Install kubewatch**:
+   ```bash
+   # Build and install the latest binary using the Makefile target
+   make install-kubewatch
+   ```
+2. **Add to Path or Environment**:
+   - Ensure your `$GOPATH/bin` (typically `~/go/bin`) is in your shell `PATH`.
+   - Alternatively, you can configure the exact path to the binary using the `KUBEWATCH_BIN` environment variable:
+     ```bash
+     export KUBEWATCH_BIN="/path/to/go/bin/kubewatch"
+     ```
+

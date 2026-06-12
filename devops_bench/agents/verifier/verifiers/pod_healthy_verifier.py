@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import subprocess
-import time
 import json
+import threading
 from typing import Literal, Optional
 from devops_bench.agents.verifier.base import BaseVerifier, VerificationResult
+from devops_bench.agents.verifier.watcher import KubeWatchService
 from devops_bench.agents.verifier.utils import Timer, KUBECTL_DEFAULT_TIMEOUT
 
 class PodHealthyVerifier(BaseVerifier):
@@ -26,61 +27,57 @@ class PodHealthyVerifier(BaseVerifier):
 
     def verify(self, timeout_sec: int) -> VerificationResult:
         timer = Timer()
-        delay = 1
-        max_delay = 5
-        last_details = {}
+        event_received = threading.Event()
+        
+        def on_event(event: dict):
+            # If the event targets a pod, signal the verifier to check status
+            if event.get("kind") == "pod":
+                if self.namespace and event.get("namespace") != self.namespace:
+                    return
+                event_received.set()
 
-        while timer.elapsed < timeout_sec:
-            remaining = timeout_sec - timer.elapsed
-            if remaining <= 0:
-                break
-
-            # Try using kubectl wait
-            cmd = [
-                "kubectl",
-                "wait",
-                "--for=condition=Ready",
-                "pod",
-                "-l",
-                self.selector,
-                f"--timeout={int(remaining)}s",
-            ]
-            if self.namespace:
-                cmd.extend(["-n", self.namespace])
-
-            try:
-                # Add Python-level timeout of remaining + 5 to prevent indefinite hanging
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, check=True, timeout=remaining + 5
-                )
+        watcher = KubeWatchService(on_event)
+        try:
+            watcher.start()
+            
+            # Initial check to see if condition is already satisfied
+            details = self._get_pods_details()
+            if self._check_pods_status(details):
                 return VerificationResult(
                     success=True,
                     elapsed_time=timer.elapsed,
-                    reason="Condition met via kubectl wait",
-                    details={"output": result.stdout.strip()},
+                    reason="All pods are healthy and ready (initial check)",
+                    details=details,
                 )
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                # Catch timeout or error and fallback to polling check
-                # Check status details
-                details = self._get_pods_details(timeout=max(1.0, remaining))
-                last_details = details
-                if self._check_pods_status(details):
-                    return VerificationResult(
-                        success=True,
-                        elapsed_time=timer.elapsed,
-                        reason="Condition met via polling fallback",
-                        details=details,
-                    )
+            # Block and wait for event-driven updates
+            while timer.elapsed < timeout_sec:
+                remaining = timeout_sec - timer.elapsed
+                if remaining <= 0:
+                    break
                 
-                # Sleep a bit and retry
-                sleep_time = min(delay, timeout_sec - timer.elapsed)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                delay = min(delay + 1, max_delay)
-
-        # Last check on timeout
-        remaining = timeout_sec - timer.elapsed
-        details = self._get_pods_details(timeout=max(1.0, remaining))
+                # Sleep efficiently until notified of a pod event
+                if event_received.wait(timeout=remaining):
+                    event_received.clear()
+                    details = self._get_pods_details()
+                    if self._check_pods_status(details):
+                        return VerificationResult(
+                            success=True,
+                            elapsed_time=timer.elapsed,
+                            reason="All pods are healthy and ready (event-driven)",
+                            details=details,
+                        )
+        except Exception as e:
+            return VerificationResult(
+                success=False,
+                elapsed_time=timer.elapsed,
+                reason=f"Error during kubewatch: {str(e)}",
+                details={"error": str(e)},
+            )
+        finally:
+            watcher.stop()
+            
+        # Final fallback status check on timeout
+        details = self._get_pods_details()
         success = self._check_pods_status(details)
         return VerificationResult(
             success=success,

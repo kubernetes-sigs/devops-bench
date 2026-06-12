@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import subprocess
-import time
 import json
+import threading
 from typing import Literal, Optional
 from devops_bench.agents.verifier.base import BaseVerifier, VerificationResult
+from devops_bench.agents.verifier.watcher import KubeWatchService
 from devops_bench.agents.verifier.utils import Timer, KUBECTL_DEFAULT_TIMEOUT
 
 class ScalingCompleteVerifier(BaseVerifier):
@@ -27,29 +28,58 @@ class ScalingCompleteVerifier(BaseVerifier):
 
     def verify(self, timeout_sec: int) -> VerificationResult:
         timer = Timer()
-        delay = 2
+        event_received = threading.Event()
+        
+        def on_event(event: dict):
+            # Check if event targets our deployment name
+            if event.get("kind") == "deployment" and event.get("name") == self.deployment:
+                if self.namespace and event.get("namespace") != self.namespace:
+                    return
+                event_received.set()
 
-        while timer.elapsed < timeout_sec:
-            remaining = timeout_sec - timer.elapsed
-            if remaining <= 0:
-                break
-
-            success, details = self._check_scaling(timeout=min(KUBECTL_DEFAULT_TIMEOUT, remaining))
+        watcher = KubeWatchService(on_event)
+        try:
+            watcher.start()
+            
+            # Initial check
+            success, details = self._check_scaling()
             if success:
                 return VerificationResult(
                     success=True,
                     elapsed_time=timer.elapsed,
-                    reason=f"Scaling complete: {details.get('reason')}",
+                    reason=f"Scaling complete: {details.get('reason')} (initial check)",
                     details=details,
                 )
-            
-            sleep_time = min(delay, timeout_sec - timer.elapsed)
-            if sleep_time > 0:
-                time.sleep(sleep_time)
 
-        # Last check on timeout
-        remaining = timeout_sec - timer.elapsed
-        success, details = self._check_scaling(timeout=max(1.0, remaining))
+            # Event-driven waiting loop
+            while timer.elapsed < timeout_sec:
+                remaining = timeout_sec - timer.elapsed
+                if remaining <= 0:
+                    break
+                
+                # Sleep efficiently until deployment event is received
+                if event_received.wait(timeout=remaining):
+                    event_received.clear()
+                    success, details = self._check_scaling()
+                    if success:
+                        return VerificationResult(
+                            success=True,
+                            elapsed_time=timer.elapsed,
+                            reason=f"Scaling complete: {details.get('reason')} (event-driven)",
+                            details=details,
+                        )
+        except Exception as e:
+            return VerificationResult(
+                success=False,
+                elapsed_time=timer.elapsed,
+                reason=f"Error during kubewatch: {str(e)}",
+                details={"error": str(e)},
+            )
+        finally:
+            watcher.stop()
+            
+        # Final fallback check on timeout
+        success, details = self._check_scaling()
         return VerificationResult(
             success=success,
             elapsed_time=timer.elapsed,
