@@ -15,9 +15,8 @@
 import os
 from unittest import mock
 
-import pytest
-
 from devops_bench.agents.chaos.chaos import ChaosAgent
+import pytest
 
 
 class TestChaosAgent:
@@ -90,7 +89,9 @@ class TestChaosAgent:
     action_spec = {"type": "generate_load"}
     with pytest.raises(ValueError) as excinfo:
       agent.inject_fault(action_spec)
-    assert "GEMINI_API_KEY environment variable is required" in str(excinfo.value)
+    assert "GEMINI_API_KEY environment variable is required" in str(
+        excinfo.value
+    )
 
   @mock.patch("devops_bench.agents.chaos.chaos.genai.Client")
   def test_inject_fault_unsupported_type(self, mock_genai_client):
@@ -168,5 +169,3 @@ class TestChaosAgent:
     # rm is not in the safelist
     result = agent.run_command("rm -rf /")
     assert "Command 'rm' is not allowed" in result
-
-
