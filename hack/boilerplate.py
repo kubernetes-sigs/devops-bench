@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import fnmatch
 import argparse
 import datetime
+import fnmatch
+import os
 import sys
 
 # The license header to apply
@@ -64,6 +64,7 @@ DEFAULT_EXCLUDES = [
     "__pycache__/**",
     "node_modules/**",
     "vendor/**",
+    ".venv/**",
     "**/*.yaml",
     "**/*.yml",
     "**/LICENSE",
@@ -91,6 +92,7 @@ DEFAULT_EXCLUDES = [
     "*.DS_Store",
 ]
 
+
 def file_extension_magic(file_path):
     """Tries to determine the file type, as encoded by a typical extension."""
     # Default to the file extension
@@ -98,7 +100,7 @@ def file_extension_magic(file_path):
     if ext:
         return ext
     # Look for a shebang line
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(file_path, encoding="utf-8") as f:
         # Read the first 4k of the file, which should be enough for any header.
         try:
             content = f.read(4096)
@@ -106,7 +108,7 @@ def file_extension_magic(file_path):
             # Likely a binary file
             return None
         # First line is shebang (e.g., #!/usr/bin/env python)
-        first_line = content.split('\n', 1)[0]
+        first_line = content.split("\n", 1)[0]
         if first_line.startswith("#!"):
             if "python" in first_line:
                 return ".py"
@@ -115,29 +117,34 @@ def file_extension_magic(file_path):
             print(f"unknown shebang in {file_path}: {first_line}")
     return None
 
+
 def get_comment_style(file_extension):
     """Gets the comment style for a file based on its extension."""
     return COMMENT_STYLES.get(file_extension)
+
 
 def format_header(header_text, style):
     """Formats the header text with the correct comment style."""
     line_prefix, block_start, block_end = style
 
     # Add a space for line prefixes if they don't have one
-    if line_prefix and not line_prefix.endswith(' '):
-        line_prefix += ' '
+    if line_prefix and not line_prefix.endswith(" "):
+        line_prefix += " "
 
-    header_lines = header_text.strip().split('\n')
+    header_lines = header_text.strip().split("\n")
 
     if line_prefix:
         # Handle empty lines in header correctly
-        formatted_lines = [f"{line_prefix}{line}".rstrip() if line else line_prefix.rstrip() for line in header_lines]
-        return '\n'.join(formatted_lines) + '\n\n'
+        formatted_lines = [
+            f"{line_prefix}{line}".rstrip() if line else line_prefix.rstrip()
+            for line in header_lines
+        ]
+        return "\n".join(formatted_lines) + "\n\n"
 
     if block_start and block_end:
         # Handle block comments
         formatted_header = f"{block_start}\n"
-        formatted_header += '\n'.join(f" {line}".rstrip() if line else "" for line in header_lines)
+        formatted_header += "\n".join(f" {line}".rstrip() if line else "" for line in header_lines)
         formatted_header += f"\n{block_end}\n\n"
         return formatted_header
 
@@ -147,17 +154,16 @@ def format_header(header_text, style):
 def has_license_header(file_path):
     """Checks if a file already has an Apache license header."""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, encoding="utf-8") as f:
             # Read the first 4k of the file, which should be enough for any header.
             content = f.read(4096)
-            if not "Licensed under the Apache License, Version 2.0" in content:
-                return False
-            if not "The Kubernetes Authors" in content:
-                return False
-            return True
-    except Exception as e:
+            return (
+                "Licensed under the Apache License, Version 2.0" in content
+                and "The Kubernetes Authors" in content
+            )
+    except Exception:
         # print(f"Could not read file {file_path}: {e}")
-        return True # Skip file on error
+        return True  # Skip file on error
 
 
 def apply_license_header(file_path, header_text, dry_run=False):
@@ -167,7 +173,6 @@ def apply_license_header(file_path, header_text, dry_run=False):
     if not file_extension:
         # print(f"Skipping (unknown file type): {file_path}")
         return False
-
 
     if has_license_header(file_path):
         # print(f"Skipping (header exists): {file_path}")
@@ -188,15 +193,15 @@ def apply_license_header(file_path, header_text, dry_run=False):
     else:
         print(f"Applying header to: {file_path}")
         try:
-            with open(file_path, 'r+', encoding='utf-8') as f:
+            with open(file_path, "r+", encoding="utf-8") as f:
                 content = f.read()
                 f.seek(0, 0)
                 # Handle shebangs (e.g., #!/usr/bin/env python)
                 if content.startswith("#!"):
-                    lines = content.split('\n', 1)
+                    lines = content.split("\n", 1)
                     shebang = lines[0]
                     rest_of_content = lines[1] if len(lines) > 1 else ""
-                    f.write(shebang + '\n' + formatted_header + rest_of_content)
+                    f.write(shebang + "\n" + formatted_header + rest_of_content)
                 else:
                     f.write(formatted_header + content)
         except Exception as e:
@@ -210,10 +215,10 @@ def _match_path_parts(path_parts, pattern_parts):
     if not pattern_parts:
         return not path_parts
     if not path_parts:
-        return pattern_parts == ['**'] or all(p == '' for p in pattern_parts)
+        return pattern_parts == ["**"] or all(p == "" for p in pattern_parts)
 
     p_part = pattern_parts[0]
-    if p_part == '**':
+    if p_part == "**":
         if len(pattern_parts) == 1:
             return True  # `/**` at the end matches everything remaining
         # `/**/` can match zero or more directories.
@@ -226,20 +231,21 @@ def _match_path_parts(path_parts, pattern_parts):
             return _match_path_parts(path_parts[1:], pattern_parts[1:])
         return False
 
+
 def is_path_excluded(relative_path, exclude_patterns):
     """Checks if a relative path matches any of the .gitignore-style exclude patterns."""
-    relative_path = relative_path.replace(os.path.sep, '/')
-    path_parts = relative_path.split('/')
+    relative_path = relative_path.replace(os.path.sep, "/")
+    path_parts = relative_path.split("/")
 
     for pattern in exclude_patterns:
-        pattern = pattern.replace(os.path.sep, '/')
-        if '/' not in pattern:
+        pattern = pattern.replace(os.path.sep, "/")
+        if "/" not in pattern:
             # If no slash, match against any component of the path
             if any(fnmatch.fnmatch(part, pattern) for part in path_parts):
                 return True
         else:
             # If slash is present, match from the root
-            pattern_parts = pattern.split('/')
+            pattern_parts = pattern.split("/")
             if _match_path_parts(path_parts, pattern_parts):
                 return True
     return False
@@ -259,8 +265,8 @@ def apply_headers_to_tree(root_dir, excludes=None, dry_run=False):
     missing_count = 0
     for root, dirs, files in os.walk(root_dir, topdown=True):
         rel_root = os.path.relpath(root, root_dir)
-        if rel_root == '.':
-            rel_root = ''
+        if rel_root == ".":
+            rel_root = ""
 
         # Filter dirs in-place so os.walk doesn't recurse into them
         dirs[:] = [d for d in dirs if not is_path_excluded(os.path.join(rel_root, d), all_excludes)]
@@ -275,15 +281,20 @@ def apply_headers_to_tree(root_dir, excludes=None, dry_run=False):
                 missing_count += 1
     return missing_count
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apply or verify license headers in the repo.")
-    parser.add_argument('--dry-run', action='store_true', help="Check for files missing headers without applying them.")
-    parser.add_argument('--exclude', action='append', help="Extra path glob patterns to exclude.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Check for files missing headers without applying them.",
+    )
+    parser.add_argument("--exclude", action="append", help="Extra path glob patterns to exclude.")
     args = parser.parse_args()
 
     # The script sits in the `hack/` directory, so root is one level up
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
     missing_count = apply_headers_to_tree(root_dir, excludes=args.exclude, dry_run=args.dry_run)
     if args.dry_run and missing_count > 0:
         print(f"Error: {missing_count} file(s) are missing the Apache 2.0 license header.")
