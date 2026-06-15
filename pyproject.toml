@@ -32,7 +32,9 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
-dependencies = []
+dependencies = [
+    "google-genai>=2.8.0",
+]
 
 [tool.hatch.version]
 path = "devops_bench/__init__.py"
@@ -81,4 +83,3 @@ ignore = [
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
-
