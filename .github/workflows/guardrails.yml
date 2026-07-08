@@ -1,0 +1,44 @@
+# CI guardrail: uv sync, ruff lint + format, unit tests.
+name: guardrails
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor is requires-python (>=3.12); 3.14 is the dev default in .python-version.
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Sync (build + install, strict library mode)
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        # ruff is pinned exactly (==) in pyproject so this check cannot drift
+        # with formatter style changes across ruff releases.
+        run: uv run ruff format --check .
+
+      - name: Unit tests
+        run: uv run pytest tests/unit -q
