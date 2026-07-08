@@ -63,7 +63,14 @@ def _docstring_node_ids(tree: ast.AST) -> set[int]:
     return docstring_ids
 
 
-def test_agents_package_has_no_gke_specific_runtime_strings():
+def test_agents_package_has_no_gke_specific_runtime_strings() -> None:
+    """Assert no runtime code in agents/ references forbidden GKE tokens.
+
+    Walks every ``.py`` file under ``devops_bench/agents/``, parses its AST,
+    and fails if any string literal, identifier, attribute, function/class
+    name, parameter, import alias, keyword argument, or global/nonlocal
+    declaration contains a forbidden token.
+    """
     root = pathlib.Path(_agents_pkg.__file__).parent
     hits: list[tuple[pathlib.Path, int, str]] = []
     for src in root.rglob("*.py"):
@@ -88,6 +95,25 @@ def test_agents_package_has_no_gke_specific_runtime_strings():
                 lowered = node.attr.lower()
                 if any(tok in lowered for tok in _FORBIDDEN_TOKENS):
                     hits.append((src.relative_to(root.parent), node.lineno, node.attr))
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                lowered = node.name.lower()
+                if any(tok in lowered for tok in _FORBIDDEN_TOKENS):
+                    hits.append((src.relative_to(root.parent), node.lineno, node.name))
+            elif isinstance(node, ast.arg):
+                lowered = node.arg.lower()
+                if any(tok in lowered for tok in _FORBIDDEN_TOKENS):
+                    hits.append((src.relative_to(root.parent), node.lineno, node.arg))
+            elif isinstance(node, ast.alias):
+                for value in (node.name, node.asname):
+                    if value and any(tok in value.lower() for tok in _FORBIDDEN_TOKENS):
+                        hits.append((src.relative_to(root.parent), node.lineno, value))
+            elif isinstance(node, ast.keyword):
+                if node.arg and any(tok in node.arg.lower() for tok in _FORBIDDEN_TOKENS):
+                    hits.append((src.relative_to(root.parent), node.lineno, node.arg))
+            elif isinstance(node, ast.Global | ast.Nonlocal):
+                for name in node.names:
+                    if any(tok in name.lower() for tok in _FORBIDDEN_TOKENS):
+                        hits.append((src.relative_to(root.parent), node.lineno, name))
 
     assert not hits, (
         "agents/ must carry no GKE-specific runtime literals (catalog lives "

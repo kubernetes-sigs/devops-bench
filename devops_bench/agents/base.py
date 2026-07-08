@@ -90,17 +90,16 @@ class AgentHarness(ABC):
         start = time.monotonic()
         try:
             result = traced(prompt)
+            elapsed = time.monotonic() - start
+            # Trust _execute when it already stamped latency (e.g. it has finer
+            # timing for a sub-step it wants surfaced); only fill in when zero.
+            if not result.latency:
+                result.latency = elapsed
+            return result
         except Exception as exc:  # noqa: BLE001 - safety net for the whole benchmark
             elapsed = time.monotonic() - start
             _log.exception("agent _execute raised; converting to errored result")
             return AgentResult.errored(f"{type(exc).__name__}: {exc}", latency=elapsed)
-
-        elapsed = time.monotonic() - start
-        # Trust _execute when it already stamped latency (e.g. it has finer
-        # timing for a sub-step it wants surfaced); only fill in when zero.
-        if not result.latency:
-            result.latency = elapsed
-        return result
 
     @abstractmethod
     def _execute(self, prompt: str) -> AgentResult:

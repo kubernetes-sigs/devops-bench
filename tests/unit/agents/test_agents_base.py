@@ -66,6 +66,17 @@ def test_safety_net_converts_unexpected_exception_to_errored_result():
     assert result.latency >= 0.0
 
 
+def test_safety_net_covers_a_none_result_from_execute():
+    class _Forgetful(AgentHarness):
+        def _execute(self, prompt: str) -> AgentResult:
+            return None  # type: ignore[return-value]  # subclass bug: forgot to return
+
+    result = _Forgetful().run("hi")
+    assert isinstance(result, AgentResult)
+    assert result.has_errors()
+    assert "AttributeError" in result.errors[0]
+
+
 def test_config_default_is_a_fresh_agent_config():
     class _Stub(AgentHarness):
         def _execute(self, prompt: str) -> AgentResult:
