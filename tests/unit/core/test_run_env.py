@@ -14,6 +14,8 @@
 
 """Unit tests for devops_bench.core.run_env."""
 
+import os
+
 from devops_bench.core.run_env import RunEnv
 
 
@@ -28,9 +30,9 @@ def test_passthrough_when_not_parallel(monkeypatch):
     assert run_env.isolated is False
     assert run_env.cluster_name("my-cluster") == "my-cluster"
     # No env mutation when isolation is off.
-    assert "KUBECONFIG" not in __import__("os").environ
-    assert "CLOUDSDK_CONFIG" not in __import__("os").environ
-    assert "TF_DATA_DIR" not in __import__("os").environ
+    assert "KUBECONFIG" not in os.environ
+    assert "CLOUDSDK_CONFIG" not in os.environ
+    assert "TF_DATA_DIR" not in os.environ
 
 
 def test_explicit_run_id_preferred_over_env(monkeypatch):
@@ -44,11 +46,12 @@ def test_run_id_falls_back_to_env(monkeypatch):
 
 
 def test_apply_sets_isolated_env_and_creates_dirs(monkeypatch, tmp_path):
+    # Swap in a copy so apply()'s mutations never touch the real environment.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("KUBECONFIG", raising=False)
+
     run_env = RunEnv.create(parallel=True, run_id="run-1", state_root=tmp_path)
     run_env.apply()
-
-    import os
 
     expected_dir = tmp_path / "run-1"
     assert run_env.isolated is True
