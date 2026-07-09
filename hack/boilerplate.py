@@ -64,6 +64,7 @@ DEFAULT_EXCLUDES = [
     "__pycache__/**",
     "node_modules/**",
     "vendor/**",
+    "third_party/**",
     ".venv/**",
     "**/*.yaml",
     "**/*.yml",
