@@ -96,5 +96,11 @@ resource "google_compute_instance" "bastion" {
     scopes = ["cloud-platform"]
   }
 
+  # Block project-wide SSH keys so access relies solely on instance-level keys
+  # injected via IAP/OS Login, limiting blast radius if project keys leak.
+  metadata = {
+    block-project-ssh-keys = "true"
+  }
+
   metadata_startup_script = file("${path.module}/startup.sh")
 }

@@ -59,11 +59,11 @@ resource "null_resource" "duplicate_context" {
   }
 
   provisioner "local-exec" {
-    command = "kubectl --kubeconfig=${self.triggers.kubeconfig} config set-context ${self.triggers.gke_context} --cluster=${self.triggers.kind_cluster} --user=${self.triggers.kind_user}"
+    command = "kubectl --kubeconfig='${self.triggers.kubeconfig}' config set-context '${self.triggers.gke_context}' --cluster='${self.triggers.kind_cluster}' --user='${self.triggers.kind_user}'"
   }
 
   provisioner "local-exec" {
     when    = destroy
-    command = "kubectl --kubeconfig=${self.triggers.kubeconfig} config delete-context ${self.triggers.gke_context} || true"
+    command = "kubectl --kubeconfig='${self.triggers.kubeconfig}' config delete-context '${self.triggers.gke_context}' || true"
   }
 }

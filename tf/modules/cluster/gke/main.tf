@@ -70,7 +70,8 @@ resource "google_compute_firewall" "allow_iap_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = ["35.235.240.0/20"]
+  source_ranges           = ["35.235.240.0/20"]
+  target_service_accounts = [google_service_account.gke_nodes.email]
 }
 
 resource "google_container_cluster" "primary" {
@@ -104,8 +105,8 @@ locals {
     "a2" = "nvidia-tesla-a100"
   }
 
-  is_g2 = length(regexall("^g2-", var.machine_type)) > 0
-  is_a2 = length(regexall("^a2-", var.machine_type)) > 0
+  is_g2 = startswith(var.machine_type, "g2-")
+  is_a2 = startswith(var.machine_type, "a2-")
 
   # Determine final GPU attachment parameters
   enable_gpu = var.gpu_type != "" || local.is_g2 || local.is_a2

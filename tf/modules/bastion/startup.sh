@@ -49,12 +49,18 @@ apt-get install -y --no-install-recommends \
 
 echo "==> OpenTofu ${TOFU_VERSION}"
 ARCH="$(dpkg --print-architecture)" # amd64 / arm64
-wget -q "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_${ARCH}.zip" -O /tmp/tofu.zip
-unzip -o /tmp/tofu.zip -d /usr/local/bin/
-rm -f /tmp/tofu.zip
+tmp_tofu="$(mktemp)"
+wget -q "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_${ARCH}.zip" -O "$tmp_tofu"
+unzip -o "$tmp_tofu" -d /usr/local/bin/
+rm -f "$tmp_tofu"
 
 echo "==> Node.js ${NODE_MAJOR} (openclaw requires >=22)"
-curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+# Download to a file first, then execute: a dropped `curl | bash` can run a
+# truncated script if the connection drops mid-transfer.
+tmp_node="$(mktemp)"
+curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$tmp_node"
+bash "$tmp_node"
+rm -f "$tmp_node"
 apt-get install -y --no-install-recommends nodejs
 
 echo "==> Google Cloud SDK + gke-gcloud-auth-plugin + kubectl"
@@ -73,17 +79,19 @@ echo "==> gke-mcp (GKE MCP server for the agent's MCP capability)"
 # Official prebuilt installer drops an arch-matched binary on PATH (no Go build).
 # Download to a file first, then execute: piping ``curl | bash`` can run a
 # truncated script if the connection drops mid-transfer.
+tmp_mcp="$(mktemp)"
 curl -fsSL https://raw.githubusercontent.com/GoogleCloudPlatform/gke-mcp/main/install.sh \
-  -o /tmp/gke-mcp-install.sh
-bash /tmp/gke-mcp-install.sh
-rm -f /tmp/gke-mcp-install.sh
+  -o "$tmp_mcp"
+bash "$tmp_mcp"
+rm -f "$tmp_mcp"
 
 echo "==> uv (Python package/venv manager used by the harness setup)"
 # Install system-wide so every user's vm-setup.sh can run `uv sync`. Download to
 # a file first (a dropped `curl | sh` can execute a truncated installer).
-curl -fsSL https://astral.sh/uv/install.sh -o /tmp/uv-install.sh
-env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh /tmp/uv-install.sh
-rm -f /tmp/uv-install.sh
+tmp_uv="$(mktemp)"
+curl -fsSL https://astral.sh/uv/install.sh -o "$tmp_uv"
+env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh "$tmp_uv"
+rm -f "$tmp_uv"
 
 echo "==> versions"
 tofu version || true
