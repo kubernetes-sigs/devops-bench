@@ -228,7 +228,7 @@ def test_port_forward_builds_argv_and_terminates_on_exit(mocker: MockerFixture) 
     proc.kill.assert_not_called()
 
 
-def test_port_forward_defaults_remote_port_to_local(mocker: MockerFixture) -> None:
+def test_port_forward_uses_explicit_remote_port(mocker: MockerFixture) -> None:
     mock_popen = mocker.patch("devops_bench.k8s.kubectl.subprocess.Popen")
     mock_popen.return_value.poll.return_value = None
     mocker.patch("devops_bench.k8s.kubectl.time.sleep")
