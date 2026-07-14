@@ -23,7 +23,7 @@ from devops_bench.agents.capabilities import (
 from devops_bench.agents.config import AgentConfig
 
 
-def test_default_construction_uses_safe_defaults():
+def test_default_construction_uses_safe_defaults() -> None:
     cfg = AgentConfig()
     assert cfg.model is None
     assert cfg.provider is None
@@ -43,7 +43,7 @@ def test_default_construction_uses_safe_defaults():
     assert dict(cfg.extra_env) == {}
 
 
-def test_from_env_maps_each_field():
+def test_from_env_maps_each_field() -> None:
     env = {
         "AGENT_MODEL": "gemini-2.5-pro",
         "AGENT_PROVIDER": "gemini",
@@ -76,7 +76,7 @@ def test_from_env_maps_each_field():
     assert cfg.capabilities.rules == AgentRules(text="be careful")
 
 
-def test_from_env_treats_unset_as_defaults():
+def test_from_env_treats_unset_as_defaults() -> None:
     cfg = AgentConfig.from_env({})
     assert cfg.model is None
     assert cfg.provider is None
@@ -85,14 +85,14 @@ def test_from_env_treats_unset_as_defaults():
     assert cfg.capabilities == AllCapabilities()
 
 
-def test_from_env_blank_allowed_tools_yields_empty_tuple():
+def test_from_env_blank_allowed_tools_yields_empty_tuple() -> None:
     cfg = AgentConfig.from_env({"AGENT_ALLOWED_TOOLS": ""})
     assert cfg.capabilities.mcp_servers == ()  # blank → no binding at all
     cfg = AgentConfig.from_env({"AGENT_ALLOWED_TOOLS": " , , "})
     assert cfg.capabilities.mcp_servers == ()
 
 
-def test_from_env_allowed_tools_only_builds_mcp_binding_with_empty_command():
+def test_from_env_allowed_tools_only_builds_mcp_binding_with_empty_command() -> None:
     """A CLI agent (Gemini) gets an MCP binding with no launch command — the
     binary launches MCP in-process — but still carries the tools allow-list."""
     cfg = AgentConfig.from_env({"AGENT_ALLOWED_TOOLS": "alpha,beta"})
@@ -103,7 +103,7 @@ def test_from_env_allowed_tools_only_builds_mcp_binding_with_empty_command():
     assert cfg.capabilities.tools_enabled is True
 
 
-def test_from_env_mcp_server_only_builds_binding_with_no_tools():
+def test_from_env_mcp_server_only_builds_binding_with_no_tools() -> None:
     """The API agent path: a server command but no pre-approved tool list."""
     cfg = AgentConfig.from_env({"AGENT_MCP_SERVER": "/usr/local/bin/mcp-gke"})
     assert cfg.capabilities.mcp_servers == (
@@ -112,18 +112,18 @@ def test_from_env_mcp_server_only_builds_binding_with_no_tools():
     assert cfg.capabilities.allowed_tools == ()
 
 
-def test_from_env_skips_mcp_binding_when_neither_command_nor_tools_set():
+def test_from_env_skips_mcp_binding_when_neither_command_nor_tools_set() -> None:
     """No MCP env at all → ``mcp_servers`` stays empty (default capabilities)."""
     cfg = AgentConfig.from_env({"AGENT_MODEL": "x"})
     assert cfg.capabilities.mcp_servers == ()
 
 
-def test_from_env_blank_rules_text_yields_default_rules():
+def test_from_env_blank_rules_text_yields_default_rules() -> None:
     cfg = AgentConfig.from_env({"AGENT_RULES_TEXT": ""})
     assert cfg.capabilities.rules == AgentRules()
 
 
-def test_capabilities_constructor_is_harness_friendly():
+def test_capabilities_constructor_is_harness_friendly() -> None:
     """The harness builds ``AllCapabilities`` directly with named bindings —
     not via env reads — and passes it to ``AgentConfig(capabilities=...)``."""
     caps = AllCapabilities(

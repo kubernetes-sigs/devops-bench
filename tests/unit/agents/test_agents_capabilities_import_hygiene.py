@@ -21,7 +21,7 @@ import sys
 import textwrap
 
 
-def test_capabilities_import_pulls_no_sdk_or_mcp():
+def test_capabilities_import_pulls_no_sdk_or_mcp() -> None:
     """Spawn a fresh interpreter so prior tests' imports do not contaminate."""
     script = textwrap.dedent(
         """

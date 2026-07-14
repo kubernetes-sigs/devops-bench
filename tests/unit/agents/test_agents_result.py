@@ -17,7 +17,7 @@
 from devops_bench.agents.result import AgentResult, ToolCall
 
 
-def test_tool_call_to_dict_round_trip():
+def test_tool_call_to_dict_round_trip() -> None:
     call = ToolCall(name="k", args={"a": 1}, result="ok", status="completed")
     assert call.to_dict() == {
         "name": "k",
@@ -27,13 +27,13 @@ def test_tool_call_to_dict_round_trip():
     }
 
 
-def test_tool_call_defaults():
+def test_tool_call_defaults() -> None:
     call = ToolCall(name="x", args={})
     assert call.result is None
     assert call.status == "called"
 
 
-def test_agent_result_defaults_to_empty_collections():
+def test_agent_result_defaults_to_empty_collections() -> None:
     result = AgentResult(output="hi", trajectory=[])
     assert result.tokens == {}
     assert result.errors == []
@@ -42,7 +42,7 @@ def test_agent_result_defaults_to_empty_collections():
     assert not result.has_errors()
 
 
-def test_agent_result_to_dict_is_serializable_copies():
+def test_agent_result_to_dict_is_serializable_copies() -> None:
     trajectory = [ToolCall(name="t", args={}).to_dict()]
     result = AgentResult(
         output="done",
@@ -73,7 +73,7 @@ def test_agent_result_to_dict_is_serializable_copies():
     assert result.metadata == {"k": 1}
 
 
-def test_agent_result_errored_classmethod_populates_errors():
+def test_agent_result_errored_classmethod_populates_errors() -> None:
     result = AgentResult.errored("boom", latency=1.25)
     assert result.output == "Error: boom"
     assert result.trajectory == []
@@ -82,7 +82,7 @@ def test_agent_result_errored_classmethod_populates_errors():
     assert result.has_errors()
 
 
-def test_agent_result_has_errors_is_false_on_clean_run():
+def test_agent_result_has_errors_is_false_on_clean_run() -> None:
     result = AgentResult(output="ok", trajectory=[])
     assert result.has_errors() is False
     result.errors.append("late")

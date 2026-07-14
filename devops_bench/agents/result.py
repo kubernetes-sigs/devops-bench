@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = ["ToolCall", "AgentResult"]
 
@@ -35,11 +36,11 @@ class ToolCall:
     """
 
     name: str
-    args: dict
+    args: dict[str, Any]
     result: str | None = None
     status: str = "called"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping the harness writes to disk."""
         return {
             "name": self.name,
@@ -70,13 +71,13 @@ class AgentResult:
     """
 
     output: str
-    trajectory: list[dict]
-    tokens: dict = field(default_factory=dict)
+    trajectory: list[dict[str, Any]]
+    tokens: dict[str, Any] = field(default_factory=dict)
     latency: float = 0.0
     errors: list[str] = field(default_factory=list)
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping consumed by the harness.
 
         Container fields are shallow copies: mutating the returned dict's lists

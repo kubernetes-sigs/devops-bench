@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult
@@ -86,9 +87,9 @@ class AgentHarness(ABC):
             An :class:`AgentResult` with ``latency`` always populated. A
             subclass crash produces ``AgentResult.errored(msg)``.
         """
-        traced = _maybe_observe(self._execute)
         start = time.monotonic()
         try:
+            traced = _maybe_observe(self._execute)
             result = traced(prompt)
             elapsed = time.monotonic() - start
             # Trust _execute when it already stamped latency (e.g. it has finer
@@ -120,7 +121,7 @@ class AgentHarness(ABC):
         """
 
 
-def _maybe_observe(func):
+def _maybe_observe(func: Callable[[str], AgentResult]) -> Callable[[str], AgentResult]:
     """Return ``func`` wrapped in ``deepeval.tracing.observe`` when available.
 
     The wrap is performed once per ``run()`` call rather than at import time so

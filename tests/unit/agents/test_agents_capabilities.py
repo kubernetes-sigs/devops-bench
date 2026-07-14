@@ -35,28 +35,28 @@ from devops_bench.agents.capabilities import (
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_binding_defaults_to_empty_command_and_tools():
+def test_mcp_binding_defaults_to_empty_command_and_tools() -> None:
     binding = McpBinding()
     assert binding.name == ""
     assert binding.command == ()
     assert binding.tools == ()
 
 
-def test_mcp_binding_is_frozen():
+def test_mcp_binding_is_frozen() -> None:
     """Frozen so a binding can be shared safely across agents in a run."""
     binding = McpBinding(name="gke", command=("/bin/mcp",), tools=("list",))
     with pytest.raises(dataclasses.FrozenInstanceError):
         binding.name = "other"  # type: ignore[misc]
 
 
-def test_skill_binding_defaults_to_empty_paths_and_is_frozen():
+def test_skill_binding_defaults_to_empty_paths_and_is_frozen() -> None:
     binding = SkillBinding()
     assert binding.paths == ()
     with pytest.raises(dataclasses.FrozenInstanceError):
         binding.paths = ("/x",)  # type: ignore[misc]
 
 
-def test_agent_rules_defaults_to_empty_text_and_is_frozen():
+def test_agent_rules_defaults_to_empty_text_and_is_frozen() -> None:
     rules = AgentRules()
     assert rules.text == ""
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -68,7 +68,7 @@ def test_agent_rules_defaults_to_empty_text_and_is_frozen():
 # ---------------------------------------------------------------------------
 
 
-def test_agent_capabilities_defaults_are_empty_bindings():
+def test_agent_capabilities_defaults_are_empty_bindings() -> None:
     caps = AllCapabilities()
     assert caps.mcp_servers == ()
     assert caps.skills == SkillBinding()
@@ -78,7 +78,7 @@ def test_agent_capabilities_defaults_are_empty_bindings():
     assert caps.mcp is None
 
 
-def test_agent_capabilities_aggregates_allowed_tools_across_servers():
+def test_agent_capabilities_aggregates_allowed_tools_across_servers() -> None:
     caps = AllCapabilities(
         mcp_servers=(
             McpBinding(name="a", tools=("t1", "t2")),
@@ -91,14 +91,14 @@ def test_agent_capabilities_aggregates_allowed_tools_across_servers():
     assert caps.mcp is not None and caps.mcp.name == "a"
 
 
-def test_agent_capabilities_tools_enabled_reflects_any_mcp_binding():
+def test_agent_capabilities_tools_enabled_reflects_any_mcp_binding() -> None:
     """A binding with no tools still counts — the agent has *some* MCP."""
     caps = AllCapabilities(mcp_servers=(McpBinding(name="x"),))
     assert caps.tools_enabled is True
     assert caps.allowed_tools == ()
 
 
-def test_agent_capabilities_is_frozen():
+def test_agent_capabilities_is_frozen() -> None:
     caps = AllCapabilities()
     with pytest.raises(dataclasses.FrozenInstanceError):
         caps.mcp_servers = (McpBinding(),)  # type: ignore[misc]
@@ -123,23 +123,23 @@ class _OnlyRules:
     rules = AgentRules()
 
 
-def test_mcp_attribute_grants_supports_mcp():
+def test_mcp_attribute_grants_supports_mcp() -> None:
     assert isinstance(_OnlyMcp(), SupportsMcp)
     assert not isinstance(_OnlyMcp(), SupportsSkills)
     assert not isinstance(_OnlyMcp(), SupportsRules)
 
 
-def test_skills_attribute_grants_supports_skills():
+def test_skills_attribute_grants_supports_skills() -> None:
     assert isinstance(_OnlySkills(), SupportsSkills)
     assert not isinstance(_OnlySkills(), SupportsMcp)
 
 
-def test_rules_attribute_grants_supports_rules():
+def test_rules_attribute_grants_supports_rules() -> None:
     assert isinstance(_OnlyRules(), SupportsRules)
     assert not isinstance(_OnlyRules(), SupportsMcp)
 
 
-def test_protocols_accept_duck_typed_classes():
+def test_protocols_accept_duck_typed_classes() -> None:
     """Structural typing — any class exposing the attribute satisfies the
     Protocol, no inheritance required."""
 
@@ -154,7 +154,7 @@ def test_protocols_accept_duck_typed_classes():
     assert isinstance(duck, SupportsRules)
 
 
-def test_defaults_keep_a_fresh_agent_disabled():
+def test_defaults_keep_a_fresh_agent_disabled() -> None:
     """A class exposing the attribute without bindings reports the defaults
     (empty tuple) — the harness's structural check still passes but the agent
     runs with no capability granted."""

@@ -21,17 +21,17 @@ from devops_bench.core import Registry
 from devops_bench.core.errors import AlreadyRegisteredError, NotRegisteredError
 
 
-def test_agents_registry_is_a_core_registry():
+def test_agents_registry_is_a_core_registry() -> None:
     assert isinstance(AGENTS, Registry)
     assert AGENTS.name == "agents"
 
 
-def test_abstract_base_cannot_be_instantiated():
+def test_abstract_base_cannot_be_instantiated() -> None:
     with pytest.raises(TypeError):
         AgentHarness()  # type: ignore[abstract]
 
 
-def test_subclass_run_returns_typed_result_with_latency():
+def test_subclass_run_returns_typed_result_with_latency() -> None:
     class _Stub(AgentHarness):
         def _execute(self, prompt: str) -> AgentResult:
             return AgentResult(output=f"echo:{prompt}", trajectory=[])
@@ -42,7 +42,7 @@ def test_subclass_run_returns_typed_result_with_latency():
     assert result.latency > 0.0
 
 
-def test_subclass_can_self_stamp_latency():
+def test_subclass_can_self_stamp_latency() -> None:
     class _Stub(AgentHarness):
         def _execute(self, prompt: str) -> AgentResult:
             # Subclasses with finer-grained timing may pre-fill latency; the
@@ -52,7 +52,7 @@ def test_subclass_can_self_stamp_latency():
     assert _Stub().run("hi").latency == 99.0
 
 
-def test_safety_net_converts_unexpected_exception_to_errored_result():
+def test_safety_net_converts_unexpected_exception_to_errored_result() -> None:
     class _Boom(AgentHarness):
         def _execute(self, prompt: str) -> AgentResult:
             raise RuntimeError("kaboom")
@@ -66,7 +66,7 @@ def test_safety_net_converts_unexpected_exception_to_errored_result():
     assert result.latency >= 0.0
 
 
-def test_safety_net_covers_a_none_result_from_execute():
+def test_safety_net_covers_a_none_result_from_execute() -> None:
     class _Forgetful(AgentHarness):
         def _execute(self, prompt: str) -> AgentResult:
             return None  # type: ignore[return-value]  # subclass bug: forgot to return
@@ -77,7 +77,7 @@ def test_safety_net_covers_a_none_result_from_execute():
     assert "AttributeError" in result.errors[0]
 
 
-def test_config_default_is_a_fresh_agent_config():
+def test_config_default_is_a_fresh_agent_config() -> None:
     class _Stub(AgentHarness):
         def _execute(self, prompt: str) -> AgentResult:
             return AgentResult(output="", trajectory=[])
@@ -88,7 +88,7 @@ def test_config_default_is_a_fresh_agent_config():
     assert a.config is not b.config
 
 
-def test_third_party_can_register_with_no_central_edit():
+def test_third_party_can_register_with_no_central_edit() -> None:
     """A dummy agent registers via @AGENTS.register and resolves via .get."""
 
     class _Dummy(AgentHarness):
@@ -109,6 +109,6 @@ def test_third_party_can_register_with_no_central_edit():
         AGENTS._items.pop("dummy-extension", None)
 
 
-def test_registry_miss_raises_not_registered():
+def test_registry_miss_raises_not_registered() -> None:
     with pytest.raises(NotRegisteredError):
         AGENTS.get("definitely-not-registered")
