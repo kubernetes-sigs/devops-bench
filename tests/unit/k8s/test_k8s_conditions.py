@@ -36,7 +36,7 @@ class FakeClock:
         self.now += seconds
 
 
-def test_poll_until_returns_true_immediately_without_sleeping():
+def test_poll_until_returns_true_immediately_without_sleeping() -> None:
     clock = FakeClock()
 
     result = conditions.poll_until(
@@ -50,7 +50,7 @@ def test_poll_until_returns_true_immediately_without_sleeping():
     assert clock.sleeps == []
 
 
-def test_poll_until_succeeds_after_a_few_attempts():
+def test_poll_until_succeeds_after_a_few_attempts() -> None:
     clock = FakeClock()
     calls = {"n": 0}
 
@@ -70,7 +70,7 @@ def test_poll_until_succeeds_after_a_few_attempts():
     assert clock.sleeps == [1.0, 2.0]
 
 
-def test_poll_until_backoff_sequence_is_capped():
+def test_poll_until_backoff_sequence_is_capped() -> None:
     clock = FakeClock()
 
     # Always false; deadline large enough to exercise the cap, but the fake
@@ -89,7 +89,7 @@ def test_poll_until_backoff_sequence_is_capped():
     assert clock.sleeps == [1.0, 2.0, 4.0, 8.0, 10.0, 10.0, 5.0]
 
 
-def test_poll_until_respects_custom_delays():
+def test_poll_until_respects_custom_delays() -> None:
     clock = FakeClock()
 
     result = conditions.poll_until(
@@ -107,7 +107,7 @@ def test_poll_until_respects_custom_delays():
     assert clock.sleeps == [2.0, 4.0, 5.0, 5.0, 4.0]
 
 
-def test_poll_until_timeout_returns_false():
+def test_poll_until_timeout_returns_false() -> None:
     clock = FakeClock()
 
     result = conditions.poll_until(
@@ -122,7 +122,7 @@ def test_poll_until_timeout_returns_false():
     assert clock.sleeps == []
 
 
-def test_poll_until_catches_success_on_next_check_after_sleep():
+def test_poll_until_catches_success_on_next_check_after_sleep() -> None:
     clock = FakeClock()
     calls = {"n": 0}
 
