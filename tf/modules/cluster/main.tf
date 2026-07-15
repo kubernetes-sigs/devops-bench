@@ -12,18 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-terraform {
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = ">= 5.0.0"
-    }
-    kind = {
-      source  = "tehcyx/kind"
-      version = ">= 0.5.0"
-    }
-  }
-}
+# This dispatch module instantiates only one concrete cluster sub-module and
+# declares no concrete-provider requirements of its own: each sub-module owns
+# its provider (google in ./gke, tehcyx/kind in ./kind), so a KinD-only run does
+# not pull in the GCP provider plugin.
 
 module "gke" {
   source                   = "./gke"

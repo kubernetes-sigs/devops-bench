@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = ">= 5.0.0"
+    }
+  }
+}
+
 # account_id is capped at 30 chars, so we can't fit a long cluster name. Truncating
 # the name alone is unsafe: names that share a prefix but differ only in a suffix past
 # the cutoff (e.g. "<base>-east" vs "<base>-west" when <base> is long) would collapse to
