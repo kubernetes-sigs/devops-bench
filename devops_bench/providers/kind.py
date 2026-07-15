@@ -49,7 +49,9 @@ class KindProvider(Provider):
             The cluster's :class:`~devops_bench.core.ClusterInfo`; ``project``
             falls back to ``local-kind`` when none is set.
         """
-        project = variables.get("project_id") or get_env("GCP_PROJECT_ID") or _LOCAL_PROJECT
+        # Stays cloud-vendor neutral: no GCP-specific env vars here. The project
+        # comes from the stack variables, else the local placeholder.
+        project = variables.get("project_id") or _LOCAL_PROJECT
         return ClusterInfo.from_dict(
             {
                 "name": cluster_name,
