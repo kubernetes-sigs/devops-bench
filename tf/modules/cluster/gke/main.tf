@@ -26,8 +26,16 @@ terraform {
 # the cutoff (e.g. "<base>-east" vs "<base>-west" when <base> is long) would collapse to
 # the same account_id and collide. Append a short hash of the *full* cluster name so the
 # id stays unique per cluster regardless of where the readable part is truncated.
+locals {
+  # A GCP IAM account_id must be lowercase letters, digits, and hyphens. Lowercase
+  # the cluster name and collapse any other characters (uppercase, underscores,
+  # dots) into hyphens before slicing so the readable part is always valid. The
+  # md5 hash below is over the *original* name, so distinct names still differ.
+  gke_nodes_name_slug = trim(substr(replace(lower(var.cluster_name), "/[^a-z0-9]+/", "-"), 0, 9), "-")
+}
+
 resource "google_service_account" "gke_nodes" {
-  account_id   = "gke-nodes-${trim(substr(var.cluster_name, 0, 9), "-")}-${substr(md5(var.cluster_name), 0, 6)}"
+  account_id   = "gke-nodes-${local.gke_nodes_name_slug}-${substr(md5(var.cluster_name), 0, 6)}"
   display_name = "GKE Node Service Account for ${var.cluster_name}"
 }
 
