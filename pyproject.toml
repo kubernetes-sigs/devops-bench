@@ -35,6 +35,7 @@ classifiers = [
 dependencies = [
     "google-genai>=2.8.0",
     "pydantic>=2.0",
+    "ruamel.yaml>=0.18.0",
 ]
 
 [tool.hatch.version]
