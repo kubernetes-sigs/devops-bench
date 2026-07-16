@@ -12,4 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Package for chaos agent.
+"""Cloud providers selecting credentials and OpenTofu variables per cloud."""
+
+from __future__ import annotations
+
+# Import for their registration side effects so the registry is populated.
+from devops_bench.providers import gcp as _gcp  # noqa: F401
+from devops_bench.providers import kind as _kind  # noqa: F401
+from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
+
+__all__ = ["PROVIDERS", "Provider", "ResolveContext"]

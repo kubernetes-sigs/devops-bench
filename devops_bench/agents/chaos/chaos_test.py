@@ -15,8 +15,9 @@
 import os
 from unittest import mock
 
-from devops_bench.agents.chaos.chaos import ChaosAgent
 import pytest
+
+from devops_bench.agents.chaos.chaos import ChaosAgent
 
 
 class TestChaosAgent:

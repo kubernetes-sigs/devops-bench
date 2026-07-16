@@ -12,4 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Package for chaos agent.
+"""LLM provider clients and the provider-selection factory.
+
+Adapter modules are named by model family and register themselves in
+``MODELS`` on import. A provider's SDK is imported only when its adapter is
+constructed, so a missing SDK surfaces as :class:`MissingDependencyError` at
+construction time, not on import.
+"""
+
+from __future__ import annotations
+
+from devops_bench.models.base import MODELS, LLMClient, get_model
+
+__all__ = ["LLMClient", "MODELS", "get_model"]

@@ -12,4 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Package for chaos agent.
+"""Task contracts: the typed schema and loaders for benchmark tasks."""
+
+from devops_bench.tasks.loader import FileSystemTaskLoader, TaskLoader
+from devops_bench.tasks.schema import Constraint, DocumentationEntry, Task
+
+__all__ = [
+    "Task",
+    "Constraint",
+    "DocumentationEntry",
+    "TaskLoader",
+    "FileSystemTaskLoader",
+]

@@ -12,4 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Package for chaos agent.
+"""Model-layer utilities shared across agents and chaos.
+
+Importing this package pulls no provider SDK; submodules keep their own imports
+light so callers can depend on a single primitive without the full models chain.
+"""
