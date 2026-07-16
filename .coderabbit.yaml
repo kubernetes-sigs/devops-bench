@@ -43,7 +43,7 @@ reviews:
       instructions: |
         Focus on container deployment workflows, infrastructure automation scripts, error recovery, and security parameters.
 
-    - path: "docs/**/*.md"
+    - path: "**/*.md"
       instructions: |
         Focus on technical accuracy, clarity, and markdown formatting.
 
