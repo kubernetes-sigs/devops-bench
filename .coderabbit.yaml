@@ -17,7 +17,7 @@ reviews:
   path_instructions:
     - path: "devops_bench/**/*.py"
       instructions: |
-        Review against Python 3.10+ idioms. All Python code must include type hints. Ensure docstrings are provided for public classes and functions. Enforce `uv` for dependency/environment management and `ruff` for linting and formatting. Ensure Apache 2.0 license headers are present on all new source files.
+        Review against Python 3.12+ idioms. All Python code must include type hints. Ensure docstrings are provided for public classes and functions. Enforce `uv` for dependency/environment management and `ruff` for linting and formatting. Ensure Apache 2.0 license headers are present on all new source files.
 
     - path: "tests/**/*.py"
       instructions: |
@@ -27,15 +27,19 @@ reviews:
       instructions: |
         Focus on utility logic correctness, argument handling, file/process management, and compliance with project license header checks.
 
-    - path: "tasks/**"
+    - path: "devops_bench/tasks/**"
       instructions: |
         Focus on benchmarking task definition schema validity, clarity of task descriptions, reproducible setup/teardown steps, and evaluation completeness.
 
-    - path: "skills/**"
+    - path: "devops_bench/skills/**"
       instructions: |
         Focus on clear prompt engineering, explicit tool invocation expectations, and structured guidelines for benchmarked agents.
 
-    - path: "deployers/**"
+    - path: ".agents/skills/**"
+      instructions: |
+        Focus on agent skill definition conventions, clear prompt instructions, and tool schemas.
+
+    - path: "devops_bench/deployers/**"
       instructions: |
         Focus on container deployment workflows, infrastructure automation scripts, error recovery, and security parameters.
 
