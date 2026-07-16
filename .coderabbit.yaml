@@ -31,15 +31,17 @@ reviews:
       instructions: |
         Focus on benchmarking task definition schema validity, clarity of task descriptions, reproducible setup/teardown steps, and evaluation completeness.
 
+    # TODO: Update paths to devops_bench/skills/** and .agents/skills/** when top-level skills are refactored
+    - path: "skills/**"
+      instructions: |
+        Focus on clear prompt engineering, explicit tool invocation expectations, and structured guidelines for benchmarked agents.
+
     - path: "devops_bench/skills/**"
       instructions: |
         Focus on clear prompt engineering, explicit tool invocation expectations, and structured guidelines for benchmarked agents.
 
-    - path: ".agents/skills/**"
-      instructions: |
-        Focus on agent skill definition conventions, clear prompt instructions, and tool schemas.
-
-    - path: "devops_bench/deployers/**"
+    # TODO: Update path to devops_bench/deployers/** when deployers folder refactor lands
+    - path: "deployers/**"
       instructions: |
         Focus on container deployment workflows, infrastructure automation scripts, error recovery, and security parameters.
 
