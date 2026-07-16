@@ -92,7 +92,10 @@ class AgentConfig:
             this — its MCP server command rides on ``capabilities.mcp.command``.
         timeout_sec: Wall-clock seconds before an external call is aborted; the
             base harness threads this into every subprocess invocation. ``None``
-            disables the timeout (use only for tests / local debug).
+            disables the timeout, reachable only via direct construction (use
+            only for tests / local debug) — :meth:`from_env` always falls back
+            to the 600s default since ``AGENT_TIMEOUT_SEC`` has no sentinel for
+            "disabled".
         max_turns: Safety cap on the API agent's tool-use loop turns; flows from
             ``AGENT_MAX_TURNS``. ``None`` uses the agent's built-in default.
         capabilities: Aggregate of the MCP / skills / rules bindings granted
