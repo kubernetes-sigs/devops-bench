@@ -105,9 +105,9 @@ def test_from_env_allowed_tools_only_builds_mcp_binding_with_empty_command() -> 
 
 def test_from_env_mcp_server_only_builds_binding_with_no_tools() -> None:
     """The API agent path: a server command but no pre-approved tool list."""
-    cfg = AgentConfig.from_env({"AGENT_MCP_SERVER": "/usr/local/bin/mcp-gke"})
+    cfg = AgentConfig.from_env({"AGENT_MCP_SERVER": "/usr/local/bin/mcp-server"})
     assert cfg.capabilities.mcp_servers == (
-        McpBinding(name="default", command=("/usr/local/bin/mcp-gke",), tools=()),
+        McpBinding(name="default", command=("/usr/local/bin/mcp-server",), tools=()),
     )
     assert cfg.capabilities.allowed_tools == ()
 
@@ -127,13 +127,13 @@ def test_capabilities_constructor_is_harness_friendly() -> None:
     """The harness builds ``AllCapabilities`` directly with named bindings —
     not via env reads — and passes it to ``AgentConfig(capabilities=...)``."""
     caps = AllCapabilities(
-        mcp_servers=(McpBinding(name="gke", command=("/bin/mcp",), tools=("list",)),),
+        mcp_servers=(McpBinding(name="k8s", command=("/bin/mcp",), tools=("list",)),),
         skills=SkillBinding(paths=("/opt/skills",)),
         rules=AgentRules(text="you are a sre"),
     )
     cfg = AgentConfig(model="m", provider="p", capabilities=caps)
     assert cfg.capabilities is caps
-    assert cfg.capabilities.mcp.name == "gke"
+    assert cfg.capabilities.mcp.name == "k8s"
     assert cfg.capabilities.mcp.command == ("/bin/mcp",)
     assert cfg.capabilities.allowed_tools == ("list",)
     assert cfg.capabilities.skills.paths == ("/opt/skills",)
