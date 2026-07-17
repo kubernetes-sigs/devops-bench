@@ -31,6 +31,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult
@@ -73,7 +74,7 @@ class AgentHarness(ABC):
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or AgentConfig()
 
-    def run(self, prompt: str) -> AgentResult:
+    def run(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
         """Execute the agent against ``prompt`` and return a typed result.
 
         Template method: wraps :meth:`_execute` in the latency stamp and the
@@ -82,6 +83,10 @@ class AgentHarness(ABC):
 
         Args:
             prompt: Task prompt handed to the agent.
+            workspace_path: Harness-owned working directory the agent should
+                execute in, when the harness supplies one (so files the agent
+                writes can be diffed and collected afterward). ``None`` lets
+                the agent fall back to its own throwaway working directory.
 
         Returns:
             An :class:`AgentResult` with ``latency`` always populated. A
@@ -90,7 +95,7 @@ class AgentHarness(ABC):
         start = time.monotonic()
         try:
             traced = _maybe_observe(self._execute)
-            result = traced(prompt)
+            result = traced(prompt, workspace_path)
             elapsed = time.monotonic() - start
             # Trust _execute when it already stamped latency (e.g. it has finer
             # timing for a sub-step it wants surfaced); only fill in when zero.
@@ -103,7 +108,7 @@ class AgentHarness(ABC):
             return AgentResult.errored(f"{type(exc).__name__}: {exc}", latency=elapsed)
 
     @abstractmethod
-    def _execute(self, prompt: str) -> AgentResult:
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
         """Run the agent and return its typed result.
 
         Subclass extension point. Implementations build the provider-specific
@@ -114,6 +119,9 @@ class AgentHarness(ABC):
 
         Args:
             prompt: Task prompt handed to the agent.
+            workspace_path: Harness-owned working directory, or ``None`` when
+                the harness has not supplied one. A subclass with no local
+                filesystem workspace (e.g. a pure API agent) may ignore it.
 
         Returns:
             An :class:`AgentResult` (``latency`` may be left zero — the base
@@ -121,7 +129,9 @@ class AgentHarness(ABC):
         """
 
 
-def _maybe_observe(func: Callable[[str], AgentResult]) -> Callable[[str], AgentResult]:
+def _maybe_observe(
+    func: Callable[[str, Path | None], AgentResult],
+) -> Callable[[str, Path | None], AgentResult]:
     """Return ``func`` wrapped in ``deepeval.tracing.observe`` when available.
 
     The wrap is performed once per ``run()`` call rather than at import time so
