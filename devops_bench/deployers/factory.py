@@ -97,9 +97,10 @@ def get_deployer(
         A configured :class:`~devops_bench.deployers.base.Deployer`.
 
     Raises:
-        ConfigError: If ``infra_config["deployer"]`` is anything other than
-            ``tofu`` or ``noop``, if an external stack names no provider, or if
-            the selected provider is unknown.
+        ConfigError: If ``infra_config["deployer"]`` is set to a value other
+            than ``tofu`` or ``noop`` (unset/empty defaults to ``tofu``), if
+            an external stack names no provider, or if the selected provider
+            is unknown.
     """
     deployer_type = (infra_config.get("deployer") or "").lower()
 

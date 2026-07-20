@@ -142,6 +142,9 @@ class TFDeployer(Deployer):
             resolved under ``<repo_root>/tf``.
         provider: Cloud provider supplying credentials and cluster details.
         variables: OpenTofu input variables passed as ``-var`` flags.
+        custom_keys: Subset of ``variables`` that came from task-level config;
+            any of these not declared in the TF stack raises ``ConfigError``
+            in :meth:`_var_flags`.
 
     Raises:
         ConfigError: If the stack directory does not exist.

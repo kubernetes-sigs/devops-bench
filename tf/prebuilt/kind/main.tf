@@ -13,6 +13,7 @@
 # limitations under the License.
 
 terraform {
+  required_version = ">= 1.5.0"
   required_providers {
     kind = {
       source  = "tehcyx/kind"
@@ -34,5 +35,5 @@ output "cluster_name" {
 }
 
 output "cluster_location" {
-  value = "local"
+  value = var.location
 }
