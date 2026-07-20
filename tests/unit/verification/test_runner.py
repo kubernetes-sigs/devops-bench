@@ -22,7 +22,8 @@ on any concrete verifier module that lands in a follow-up.
 from __future__ import annotations
 
 import time
-from typing import Literal
+from collections.abc import Iterator
+from typing import Any, Literal
 
 import pytest
 
@@ -66,7 +67,7 @@ class _FakeLeaf(BaseVerifier):
 
 
 @pytest.fixture(autouse=True)
-def _register_fake_leaf():
+def _register_fake_leaf() -> Iterator[None]:
     """Register the fake leaf for one test, then drop it from the registry."""
     VERIFIERS.register("fake_leaf")(_FakeLeaf)
     try:
@@ -81,7 +82,7 @@ def agent() -> VerifierAgent:
     return VerifierAgent()
 
 
-def _leaf(**kwargs) -> dict:
+def _leaf(**kwargs: Any) -> dict[str, Any]:
     """Build a raw fake-leaf spec node."""
     return {"type": "fake_leaf", **kwargs}
 
@@ -89,21 +90,24 @@ def _leaf(**kwargs) -> dict:
 # --- leaf dispatch --------------------------------------------------------
 
 
-def test_leaf_success_passes_through(agent):
+def test_leaf_success_passes_through(agent: VerifierAgent) -> None:
+    """A passing leaf result is returned unchanged."""
     res = agent.wait_for_condition(_leaf(succeed=True, tag="a"))
 
     assert res.success is True
     assert res.reason == "leaf:a"
 
 
-def test_leaf_failure_passes_through(agent):
+def test_leaf_failure_passes_through(agent: VerifierAgent) -> None:
+    """A failing leaf result is returned unchanged."""
     res = agent.wait_for_condition(_leaf(succeed=False, tag="b"))
 
     assert res.success is False
     assert res.reason == "leaf:b"
 
 
-def test_leaf_receives_remaining_deadline_budget(agent):
+def test_leaf_receives_remaining_deadline_budget(agent: VerifierAgent) -> None:
+    """A leaf is handed the budget remaining on the shared deadline."""
     # The leaf is handed the budget left on the shared deadline, not the raw
     # ``timeout_sec`` verbatim, but for a bare leaf they are within epsilon.
     res = agent.wait_for_condition(_leaf(), timeout_sec=30)
@@ -112,7 +116,8 @@ def test_leaf_receives_remaining_deadline_budget(agent):
     assert 0 < res.raw["timeout_sec"] <= 30
 
 
-def test_leaf_short_circuits_below_min_budget(agent):
+def test_leaf_short_circuits_below_min_budget(agent: VerifierAgent) -> None:
+    """A sub-floor budget fails the leaf without ever calling ``verify()``."""
     # A sub-``_MIN_LEAF_BUDGET_SECONDS`` budget fails the leaf without ever
     # running verify() (raw stays None because verify() was skipped).
     res = agent.wait_for_condition(_leaf(succeed=True), timeout_sec=0.0)
@@ -125,7 +130,8 @@ def test_leaf_short_circuits_below_min_budget(agent):
 # --- sequence dispatch ----------------------------------------------------
 
 
-def test_sequence_all_pass(agent):
+def test_sequence_all_pass(agent: VerifierAgent) -> None:
+    """A sequence whose children all pass succeeds and echoes its name."""
     spec = {
         "type": "sequence",
         "name": "seq",
@@ -139,7 +145,8 @@ def test_sequence_all_pass(agent):
     assert [c.success for c in res.children] == [True, True]
 
 
-def test_sequence_fail_fast_skips_remaining(agent):
+def test_sequence_fail_fast_skips_remaining(agent: VerifierAgent) -> None:
+    """The first failure halts the sequence and marks the rest skipped."""
     spec = {
         "type": "sequence",
         "checks": [
@@ -162,7 +169,8 @@ def test_sequence_fail_fast_skips_remaining(agent):
     assert "[2] skipped" in res.reason
 
 
-def test_sequence_bulk_skips_all_when_deadline_already_passed(agent):
+def test_sequence_bulk_skips_all_when_deadline_already_passed(agent: VerifierAgent) -> None:
+    """An already-passed deadline bulk-skips every child without running them."""
     # A non-positive budget puts the deadline in the past, so the first loop
     # iteration bulk-marks every child skipped without running any of them.
     spec = {
@@ -183,7 +191,8 @@ def test_sequence_bulk_skips_all_when_deadline_already_passed(agent):
 # --- parallel dispatch ----------------------------------------------------
 
 
-def test_parallel_all_pass(agent):
+def test_parallel_all_pass(agent: VerifierAgent) -> None:
+    """A parallel group whose children all pass succeeds."""
     spec = {
         "type": "parallel",
         "checks": [_leaf(succeed=True, tag="1"), _leaf(succeed=True, tag="2")],
@@ -195,7 +204,8 @@ def test_parallel_all_pass(agent):
     assert [c.success for c in res.children] == [True, True]
 
 
-def test_parallel_one_failure_fails_group(agent):
+def test_parallel_one_failure_fails_group(agent: VerifierAgent) -> None:
+    """A single failing child fails the parallel group as a whole."""
     spec = {
         "type": "parallel",
         "checks": [_leaf(succeed=True, tag="1"), _leaf(succeed=False, tag="2")],
@@ -207,7 +217,8 @@ def test_parallel_one_failure_fails_group(agent):
     assert {c.success for c in res.children} == {True, False}
 
 
-def test_parallel_leaf_exception_becomes_failed_child(agent):
+def test_parallel_leaf_exception_becomes_failed_child(agent: VerifierAgent) -> None:
+    """A raising leaf is converted to a failed child, not propagated."""
     spec = {
         "type": "parallel",
         "checks": [_leaf(succeed=True, tag="1"), _leaf(boom=True, tag="2")],
@@ -222,7 +233,8 @@ def test_parallel_leaf_exception_becomes_failed_child(agent):
     assert "boom:2" in failed[0].reason
 
 
-def test_parallel_empty_checks_is_vacuously_true(agent):
+def test_parallel_empty_checks_is_vacuously_true(agent: VerifierAgent) -> None:
+    """An empty parallel group succeeds vacuously."""
     res = agent.wait_for_condition({"type": "parallel", "checks": []})
 
     assert res.success is True
@@ -233,7 +245,8 @@ def test_parallel_empty_checks_is_vacuously_true(agent):
 # --- nesting --------------------------------------------------------------
 
 
-def test_nested_parallel_inside_sequence(agent):
+def test_nested_parallel_inside_sequence(agent: VerifierAgent) -> None:
+    """Compound nodes nest: a parallel group runs as a sequence child."""
     spec = {
         "type": "sequence",
         "checks": [

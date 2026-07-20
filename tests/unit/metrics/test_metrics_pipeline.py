@@ -22,10 +22,12 @@ and restored so the stubs never leak into sibling tests.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from typing import Any
 
 import pytest
 
+from devops_bench.core import Registry
 from devops_bench.metrics.base import METRICS, MetricContext, MetricScore
 from devops_bench.metrics.pipeline import evaluate_metrics_batch
 
@@ -82,7 +84,7 @@ def _make_stub(key: str) -> type:
 
 
 @pytest.fixture
-def registry():
+def registry() -> Iterator[Registry[Any]]:
     """Yield the ``METRICS`` registry emptied for the test, then restored."""
     saved = dict(METRICS._items)
     METRICS._items.clear()
@@ -93,12 +95,13 @@ def registry():
         METRICS._items.update(saved)
 
 
-def _result(name: str = "t1") -> dict:
+def _result(name: str = "t1") -> dict[str, Any]:
     """Minimal execution-result dict the pipeline can build a context from."""
     return {"name": name, "input": "q", "output": "a", "expected_output": "a"}
 
 
-def test_scores_written_from_registered_evaluator(registry):
+def test_scores_written_from_registered_evaluator(registry: Registry[Any]) -> None:
+    """A registered evaluator's scores land in the result's ``scores`` map."""
     registry.register("stub")(_StubEvaluator)
     results = [_result()]
 
@@ -107,7 +110,10 @@ def test_scores_written_from_registered_evaluator(registry):
     assert results[0]["scores"] == {"stub_score": {"score": 1.0, "success": True, "reason": "ok"}}
 
 
-def test_one_failing_metric_does_not_abort_others(registry, caplog):
+def test_one_failing_metric_does_not_abort_others(
+    registry: Registry[Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A raising metric is isolated and logged; siblings still record scores."""
     registry.register("boom")(_BoomEvaluator)
     registry.register("stub")(_StubEvaluator)
     results = [_result()]
@@ -119,7 +125,8 @@ def test_one_failing_metric_does_not_abort_others(registry, caplog):
     assert "boom" in caplog.text
 
 
-def test_evaluate_skipped_when_applies_false(registry):
+def test_evaluate_skipped_when_applies_false(registry: Registry[Any]) -> None:
+    """An evaluator whose ``applies`` returns False is never evaluated."""
     registry.register("skipped")(_SkippedEvaluator)
     results = [_result()]
 
@@ -128,7 +135,8 @@ def test_evaluate_skipped_when_applies_false(registry):
     assert results[0]["scores"] == {}
 
 
-def test_absent_builtin_keys_are_skipped(registry):
+def test_absent_builtin_keys_are_skipped(registry: Registry[Any]) -> None:
+    """Unregistered builtin keys are skipped rather than instantiated."""
     # None of the pinned builtin keys are registered here; the batch must not
     # raise while building evaluators (the builtin-key filter guards this).
     registry.register("stub")(_StubEvaluator)
@@ -139,7 +147,8 @@ def test_absent_builtin_keys_are_skipped(registry):
     assert results[0]["scores"]["stub_score"]["score"] == 1.0
 
 
-def test_builtin_keys_scored_before_third_party(registry):
+def test_builtin_keys_scored_before_third_party(registry: Registry[Any]) -> None:
+    """Registered builtin keys are ordered ahead of third-party registrations."""
     # A registered builtin ("checklist") is ordered ahead of a third-party
     # metric even though the latter sorts earlier alphabetically.
     registry.register("checklist")(_make_stub("checklist"))
@@ -151,7 +160,8 @@ def test_builtin_keys_scored_before_third_party(registry):
     assert list(results[0]["scores"].keys()) == ["checklist_score", "aaa_custom_score"]
 
 
-def test_each_result_in_batch_is_scored(registry):
+def test_each_result_in_batch_is_scored(registry: Registry[Any]) -> None:
+    """Every result in a multi-item batch is scored in place."""
     registry.register("stub")(_StubEvaluator)
     results = [_result("t1"), _result("t2"), _result("t3")]
 
