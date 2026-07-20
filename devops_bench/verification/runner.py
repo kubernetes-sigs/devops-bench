@@ -84,7 +84,10 @@ class VerifierAgent:
                 mapping the spec validator can parse.
             timeout_sec: Total wall-clock budget shared across the (possibly
                 nested) checks. A single monotonic deadline is computed from
-                this once at the top.
+                this once at the top. Note: a value below
+                :data:`_MIN_LEAF_BUDGET_SECONDS` (1.0s) short-circuits a bare
+                leaf as failed without ever calling ``verify()``, so callers
+                should not mistake such a result for a check failure.
 
         Returns:
             The aggregated verification result.
@@ -119,26 +122,42 @@ class VerifierAgent:
             return _failed(node, "deadline exhausted before evaluation")
         return node.verify(remaining)
 
+    @staticmethod
+    def _skip_rest(
+        checks: list[Any],
+        start_index: int,
+        reason: str,
+        children: list[VerificationResult],
+        reasons: list[str],
+    ) -> None:
+        """Mark every child from ``start_index`` onward as skipped, in one pass."""
+        for j, rest in enumerate(checks[start_index:], start=start_index):
+            children.append(_failed(rest, reason))
+            reasons.append(f"[{j}] skipped")
+
     def _run_sequence(self, node: SequenceSpec, deadline: float) -> VerificationResult:
-        """Run children in order; stop and skip the rest on the first failure."""
+        """Run children in order; stop and skip the rest on the first failure.
+
+        Both a hit deadline and a failed step halt the walk immediately and
+        bulk-mark every remaining child skipped, so later children never incur a
+        per-item loop iteration (nor a redundant deadline check) once the
+        sequence can no longer make progress.
+        """
         start = time.monotonic()
         children: list[VerificationResult] = []
         reasons: list[str] = []
         ok = True
         for i, child in enumerate(node.checks):
             if time.monotonic() >= deadline:
-                children.append(_failed(child, "deadline exhausted"))
-                reasons.append(f"[{i}] skipped")
                 ok = False
-                continue
+                self._skip_rest(node.checks, i, "deadline exhausted", children, reasons)
+                break
             res = self._run(child, deadline)
             children.append(res)
             if not res.success:
                 ok = False
                 reasons.append(f"[{i}] failed: {res.reason}")
-                for j, rest in enumerate(node.checks[i + 1 :], start=i + 1):
-                    children.append(_failed(rest, "earlier step failed"))
-                    reasons.append(f"[{j}] skipped")
+                self._skip_rest(node.checks, i + 1, "earlier step failed", children, reasons)
                 break  # fail-fast
             reasons.append(f"[{i}] succeeded")
         return VerificationResult(

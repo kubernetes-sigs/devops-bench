@@ -176,11 +176,14 @@ def evaluate_metrics_batch(
     if use_mcp is None:
         use_mcp = get_bool("BENCH_USE_MCP", True)
 
-    builtin_keys = list(_BUILTIN_METRIC_KEYS)
-    builtin_set = set(builtin_keys)
+    builtin_set = set(_BUILTIN_METRIC_KEYS)
     # Builtin metrics in the pinned (results.json) order, then any third-party
-    # registrations in registry insertion order.
-    ordered_keys = builtin_keys + [k for k in METRICS if k not in builtin_set]
+    # registrations in registry insertion order. Builtins absent from the
+    # registry are skipped: the pipeline defers importing concrete families, so
+    # a key may not be registered yet and ``METRICS[k]()`` would otherwise raise.
+    ordered_keys = [k for k in _BUILTIN_METRIC_KEYS if k in METRICS] + [
+        k for k in METRICS if k not in builtin_set
+    ]
     evaluators = [METRICS[k]() for k in ordered_keys]
 
     for res in detailed_results:
