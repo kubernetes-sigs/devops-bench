@@ -81,6 +81,19 @@ def test_get_deployer_tofu_default_stack(mocker, base_config):
     assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/kind")
 
 
+def test_get_deployer_null_variables_key(mocker, base_config):
+    # A YAML "variables:" key with no value parses to None, not a missing key.
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    deployer = get_deployer(
+        {"deployer": "tofu", "variables": None},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.custom_keys == set()
+
+
 def test_get_deployer_tofu_custom_stack_and_vars(mocker, base_config, monkeypatch):
     monkeypatch.delenv("KUBECONFIG", raising=False)
     mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
@@ -204,18 +217,6 @@ def test_get_deployer_infra_provider_env(mocker, base_config):
     assert deployer.variables["project_id"] == base_config["project_id"]
 
 
-def test_get_deployer_cloud_provider_raises_rename_error(mocker, base_config):
-    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
-    mocker.patch.dict(os.environ, {"CLOUD_PROVIDER": "gcp"})
-    with pytest.raises(ConfigError, match="has been renamed to INFRA_PROVIDER"):
-        get_deployer(
-            {"deployer": "tofu", "stack": "prebuilt/kind"},
-            base_config["project_id"],
-            base_config["cluster_name"],
-            base_config["location"],
-        )
-
-
 def test_get_deployer_unknown_provider_raises(mocker, base_config):
     mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
     with pytest.raises(ConfigError, match="unknown provider"):
@@ -241,7 +242,6 @@ def test_get_deployer_absolute_stack_requires_explicit_provider(tmp_path, base_c
     err_msg = str(exc_info.value)
     assert "requires an explicit provider" in err_msg
     assert "INFRA_PROVIDER" in err_msg
-    assert "CLOUD_PROVIDER" not in err_msg
 
 
 def test_get_deployer_absolute_stack_with_provider(tmp_path, base_config):

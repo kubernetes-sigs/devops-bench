@@ -22,6 +22,10 @@ variable "location" {
   default = "local"
 }
 
+# TODO: cluster_name and kubeconfig_path defaults are static, not per-run-unique.
+# Concurrent runs that don't each get an explicit override collide on the same
+# cluster name / kubeconfig file. Needs per-run-unique value generation from
+# whatever orchestrates runs; not solvable at this stack's variable-default layer.
 variable "kubeconfig_path" {
   type        = string
   description = "Path to write the kubeconfig file"

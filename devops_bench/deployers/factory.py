@@ -54,11 +54,6 @@ def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
     explicit = (get_env("INFRA_PROVIDER", "") or infra_config.get("provider") or "").strip().lower()
     if explicit:
         return explicit
-    if get_env("CLOUD_PROVIDER", ""):
-        raise ConfigError(
-            "CLOUD_PROVIDER environment variable has been renamed to INFRA_PROVIDER. "
-            "Please use INFRA_PROVIDER instead."
-        )
     if Path(stack).expanduser().is_absolute():
         raise ConfigError(
             f"external stack {stack!r} requires an explicit provider; set 'provider' in task "
@@ -115,7 +110,7 @@ def get_deployer(
 
     location = global_location or get_env("GCP_LOCATION", _DEFAULT_LOCATION)
     stack = infra_config.get("stack") or _DEFAULT_STACK
-    custom_variables = infra_config.get("variables", {})
+    custom_variables = infra_config.get("variables") or {}
 
     provider_name = _select_provider(infra_config, stack)
     if provider_name not in PROVIDERS:
