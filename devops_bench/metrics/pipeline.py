@@ -169,7 +169,10 @@ def evaluate_metrics_batch(
         use_mcp: Whether the harness granted MCP tool capabilities. ``None``
             falls back to the ``BENCH_USE_MCP`` env var.
     """
-    _log.info("Starting batch post-processing evaluation metrics...")
+    _log.info(
+        "Starting batch post-processing evaluation metrics for %d result(s)...",
+        len(detailed_results),
+    )
     if use_mcp is None:
         use_mcp = get_bool("BENCH_USE_MCP", True)
 
@@ -183,7 +186,7 @@ def evaluate_metrics_batch(
     for res in detailed_results:
         ctx = _build_context(res, judge_model, use_mcp)
         scores: dict[str, Any] = {}
-        _log.info("Evaluating metrics for: %s...", res.get("name"))
+        _log.debug("Evaluating metrics for: %s...", res.get("name"))
         for ev in evaluators:
             try:
                 if not ev.applies(ctx):
