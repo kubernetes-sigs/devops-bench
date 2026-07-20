@@ -217,7 +217,7 @@ class TFDeployer(Deployer):
     def up(self) -> None:
         tf_path = Path(self.work_dir)
         if not tf_path.exists():
-            raise ConfigError(f"TF directory not found: {self.work_dir}")
+            raise ConfigError(f"TF directory not found: {self.work_dir} (stack: {self.tf_dir})")
 
         self.provider.ensure_account_credentials()
         run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
@@ -235,7 +235,11 @@ class TFDeployer(Deployer):
     def down(self) -> None:
         tf_path = Path(self.work_dir)
         if not tf_path.exists():
-            _log.warning("TF directory %s not found. Skipping teardown.", self.work_dir)
+            _log.warning(
+                "TF directory %s (stack: %s) not found. Skipping teardown.",
+                self.work_dir,
+                self.tf_dir,
+            )
             return
 
         self.provider.ensure_account_credentials()
