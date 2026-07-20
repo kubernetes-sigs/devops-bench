@@ -76,8 +76,8 @@ def test_unknown_type_lists_registered_keys_in_error():
         VerificationSpec({"type": "definitely_not_registered"})
     msg = str(excinfo.value)
     assert "definitely_not_registered" in msg
-    # At least one of the builtins must show up in the listed keys.
-    assert "pod_healthy" in msg or "sequence" in msg
+    # The registered compound builtin must show up in the listed keys.
+    assert "sequence" in msg
 
 
 class _UnregisteredVerifier(BaseModel):

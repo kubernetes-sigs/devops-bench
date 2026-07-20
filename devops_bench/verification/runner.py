@@ -50,18 +50,12 @@ def _node_name(node: Any) -> str | None:
     return getattr(node, "name", None)
 
 
-def _timed_out(node: Any, reason: str) -> VerificationResult:
-    """Build a failed result for a node that ran into the deadline."""
-    return VerificationResult(
-        success=False,
-        elapsed_time=0.0,
-        reason=reason,
-        name=_node_name(node),
-    )
+def _failed(node: Any, reason: str) -> VerificationResult:
+    """Build a failed result for a node not run to completion.
 
-
-def _skipped(node: Any, reason: str) -> VerificationResult:
-    """Build a failed result for a node skipped by sequence fail-fast / deadline."""
+    Covers deadline exhaustion and sequence fail-fast skips alike; ``reason``
+    carries the specific cause.
+    """
     return VerificationResult(
         success=False,
         elapsed_time=0.0,
@@ -122,7 +116,7 @@ class VerifierAgent:
         """
         remaining = deadline - time.monotonic()
         if remaining < _MIN_LEAF_BUDGET_SECONDS:
-            return _timed_out(node, "deadline exhausted before evaluation")
+            return _failed(node, "deadline exhausted before evaluation")
         return node.verify(remaining)
 
     def _run_sequence(self, node: SequenceSpec, deadline: float) -> VerificationResult:
@@ -133,7 +127,7 @@ class VerifierAgent:
         ok = True
         for i, child in enumerate(node.checks):
             if time.monotonic() >= deadline:
-                children.append(_skipped(child, "deadline exhausted"))
+                children.append(_failed(child, "deadline exhausted"))
                 reasons.append(f"[{i}] skipped")
                 ok = False
                 continue
@@ -143,7 +137,7 @@ class VerifierAgent:
                 ok = False
                 reasons.append(f"[{i}] failed: {res.reason}")
                 for j, rest in enumerate(node.checks[i + 1 :], start=i + 1):
-                    children.append(_skipped(rest, "earlier step failed"))
+                    children.append(_failed(rest, "earlier step failed"))
                     reasons.append(f"[{j}] skipped")
                 break  # fail-fast
             reasons.append(f"[{i}] succeeded")
@@ -174,7 +168,7 @@ class VerifierAgent:
                 children=[],
             )
         results: list[VerificationResult] = [
-            _timed_out(child, "deadline reached") for child in node.checks
+            _failed(child, "deadline reached") for child in node.checks
         ]
         workers = min(_MAX_PARALLEL_WORKERS, len(node.checks))
         # ``cancel_futures=True`` (3.9+) drops queued-but-not-started futures so
