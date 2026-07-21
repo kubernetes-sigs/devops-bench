@@ -33,7 +33,7 @@ def test_abstract_base_cannot_be_instantiated() -> None:
 
 def test_subclass_run_returns_typed_result_with_latency() -> None:
     class _Stub(AgentHarness):
-        def _execute(self, prompt: str) -> AgentResult:
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
             return AgentResult(output=f"echo:{prompt}", trajectory=[])
 
     result = _Stub().run("hi")
@@ -44,7 +44,7 @@ def test_subclass_run_returns_typed_result_with_latency() -> None:
 
 def test_subclass_can_self_stamp_latency() -> None:
     class _Stub(AgentHarness):
-        def _execute(self, prompt: str) -> AgentResult:
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
             # Subclasses with finer-grained timing may pre-fill latency; the
             # base must leave that value untouched.
             return AgentResult(output="x", trajectory=[], latency=99.0)
@@ -54,7 +54,7 @@ def test_subclass_can_self_stamp_latency() -> None:
 
 def test_safety_net_converts_unexpected_exception_to_errored_result() -> None:
     class _Boom(AgentHarness):
-        def _execute(self, prompt: str) -> AgentResult:
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
             raise RuntimeError("kaboom")
 
     result = _Boom().run("hi")
@@ -68,7 +68,7 @@ def test_safety_net_converts_unexpected_exception_to_errored_result() -> None:
 
 def test_safety_net_covers_a_none_result_from_execute() -> None:
     class _Forgetful(AgentHarness):
-        def _execute(self, prompt: str) -> AgentResult:
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
             return None  # type: ignore[return-value]  # subclass bug: forgot to return
 
     result = _Forgetful().run("hi")
@@ -79,7 +79,7 @@ def test_safety_net_covers_a_none_result_from_execute() -> None:
 
 def test_config_default_is_a_fresh_agent_config() -> None:
     class _Stub(AgentHarness):
-        def _execute(self, prompt: str) -> AgentResult:
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
             return AgentResult(output="", trajectory=[])
 
     a = _Stub()
@@ -92,7 +92,7 @@ def test_third_party_can_register_with_no_central_edit() -> None:
     """A dummy agent registers via @AGENTS.register and resolves via .get."""
 
     class _Dummy(AgentHarness):
-        def _execute(self, prompt: str) -> AgentResult:
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
             return AgentResult(output="", trajectory=[])
 
     AGENTS.register("dummy-extension")(_Dummy)
