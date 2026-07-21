@@ -12,4 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Package for chaos agent.
+"""Concrete chaos triggers, each self-registering in ``chaos.base.TRIGGERS``.
+
+Importing this package pulls each bundled trigger module so its
+``@TRIGGERS.register`` decorator fires. The imports stay light: a trigger
+module loads only the trigger *class* (and ``core`` / ``pydantic``).
+"""
+
+from __future__ import annotations
+
+# Imported for the ``@TRIGGERS.register`` side effect that populates the registry.
+from devops_bench.chaos.triggers import time_delay  # noqa: F401
+
+__all__: list[str] = []
