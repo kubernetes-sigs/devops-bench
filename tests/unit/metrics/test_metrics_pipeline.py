@@ -224,6 +224,13 @@ def test_checklist_preserves_trailing_hyphen() -> None:
     assert extract_checklist_items(expected, use_mcp=True) == ["Deploy to namespace staging-"]
 
 
+def test_checklist_preserves_leading_flag_double_dash() -> None:
+    # Stripping the bullet must remove only the "- " marker, not a leading "--"
+    # on a flag requirement (e.g. "- --dry-run flag must be set").
+    expected = "Critical Requirements:\n- --dry-run flag must be set\n"
+    assert extract_checklist_items(expected, use_mcp=True) == ["--dry-run flag must be set"]
+
+
 def test_checklist_threshold_is_value_independent_of_tool_invocation() -> None:
     # Phase-0 fix #1: a dedicated constant so the checklist cutoff is not
     # silently coupled to ``TOOL_INVOCATION_THRESHOLD``.

@@ -73,12 +73,13 @@ def extract_checklist_items(expected_output: str, use_mcp: bool) -> list[str]:
         parts = re.split(r"(?i)expected manifest generated\s*:", reqs_section, maxsplit=1)
         reqs_section = parts[0]
 
-    # Strip only the leading "- " bullet; ``str.strip("- ")`` would also eat
-    # trailing hyphens and corrupt items like "...staging-".
+    # Strip a single leading "-" bullet marker (and the spaces after it). A
+    # character-class strip like ``lstrip("- ")`` would also eat a leading flag
+    # ("- --dry-run" -> "dry-run") or a trailing hyphen ("...staging-").
     raw_checklist_items = [
-        line.lstrip("- ").strip()
+        re.sub(r"^-\s*", "", stripped)
         for line in reqs_section.split("\n")
-        if line.strip().startswith("-")
+        if (stripped := line.strip()).startswith("-")
     ]
     checklist_items = []
     for item in raw_checklist_items:
