@@ -23,15 +23,30 @@ from deepeval.test_case import LLMTestCase
 
 from devops_bench.core import get_bool, get_logger
 
-# Metric families populate the ``METRICS`` registry via their
-# ``@METRICS.register`` decorators when their modules are imported.
+# Imported for their @METRICS.register side effects.
+from devops_bench.metrics import (
+    chaos_metrics,  # noqa: F401
+    grounding,  # noqa: F401
+    outcome_validity,  # noqa: F401
+    tool_invocation,  # noqa: F401
+)
 from devops_bench.metrics.base import (
     METRICS,
     MetricContext,
 )
 
+# Re-exported for callers importing from this module.
+from devops_bench.metrics.checklist import (
+    CHECKLIST_THRESHOLD,
+    ChecklistMetric,
+    extract_checklist_items,
+)
+
 __all__ = [
+    "CHECKLIST_THRESHOLD",
+    "ChecklistMetric",
     "evaluate_metrics_batch",
+    "extract_checklist_items",
 ]
 
 _log = get_logger("metrics.pipeline")
