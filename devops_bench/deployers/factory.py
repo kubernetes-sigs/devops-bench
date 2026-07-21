@@ -57,7 +57,8 @@ def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
     explicit = (get_env("INFRA_PROVIDER", "") or infra_config.get("provider") or "").strip().lower()
     if explicit:
         return explicit
-    if not Path(stack).expanduser().is_absolute() and "kind" in stack:
+    stack_path = Path(stack).expanduser()
+    if not stack_path.is_absolute() and stack_path.name == "kind":
         return "kind"
     raise ConfigError(
         f"stack {stack!r} requires an explicit provider; set 'provider' in task "

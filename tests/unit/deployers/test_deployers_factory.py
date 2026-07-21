@@ -253,6 +253,17 @@ def test_get_deployer_non_kind_stack_requires_explicit_provider(base_config):
         )
 
 
+def test_get_deployer_kind_like_stack_name_requires_explicit_provider(base_config):
+    # Deduction matches the final path component exactly, not a substring.
+    with pytest.raises(ConfigError, match="requires an explicit provider"):
+        get_deployer(
+            {"deployer": "tofu", "stack": "custom/kindness"},
+            base_config["project_id"],
+            base_config["cluster_name"],
+            base_config["location"],
+        )
+
+
 def test_get_deployer_unknown_provider_raises(mocker, base_config):
     mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
     with pytest.raises(ConfigError, match="unknown provider"):
