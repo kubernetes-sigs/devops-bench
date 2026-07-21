@@ -12,22 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Metric evaluators: the registry and shared scoring primitives."""
+"""LLM-as-judge scoring for benchmark runs.
+
+The public extension surface is :data:`METRICS` (the registry), :class:`MetricScore`,
+:class:`MetricContext`, and :func:`run_geval`. The batch entry point
+:func:`evaluate_metrics_batch` consumes the registry; concrete metric modules
+self-register on import. Importing this package pulls ``deepeval``, but never a
+provider SDK — those stay lazy in the models layer.
+"""
+
+from __future__ import annotations
 
 from devops_bench.metrics.base import (
-    GEVAL_PASS_THRESHOLD,
     METRICS,
     MetricContext,
     MetricEvaluator,
     MetricScore,
     run_geval,
 )
+from devops_bench.metrics.chaos_metrics import evaluate_chaos_metrics
+from devops_bench.metrics.geval import ModelLayerJudge, get_judge_model
+from devops_bench.metrics.grounding import (
+    calculate_doc_retrieval_rate,
+    evaluate_documentation_grounding,
+)
+from devops_bench.metrics.outcome_validity import build_outcome_validity_metric
+from devops_bench.metrics.pipeline import (
+    CHECKLIST_THRESHOLD,
+    evaluate_metrics_batch,
+    extract_checklist_items,
+)
+from devops_bench.metrics.tool_invocation import build_tool_invocation_metric
 
 __all__ = [
-    "GEVAL_PASS_THRESHOLD",
+    "CHECKLIST_THRESHOLD",
     "METRICS",
     "MetricContext",
     "MetricEvaluator",
     "MetricScore",
+    "ModelLayerJudge",
+    "build_outcome_validity_metric",
+    "build_tool_invocation_metric",
+    "calculate_doc_retrieval_rate",
+    "evaluate_chaos_metrics",
+    "evaluate_documentation_grounding",
+    "evaluate_metrics_batch",
+    "extract_checklist_items",
+    "get_judge_model",
     "run_geval",
 ]
