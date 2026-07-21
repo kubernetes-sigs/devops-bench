@@ -24,6 +24,7 @@ from deepeval.test_case import LLMTestCase, SingleTurnParams
 
 from devops_bench.core import get_logger
 from devops_bench.metrics.base import (
+    GEVAL_PASS_THRESHOLD,
     METRICS,
     MetricContext,
     MetricScore,
@@ -69,6 +70,7 @@ def evaluate_chaos_metrics(
             f"Did the agent accurately identify that the fault injected was '{actual_fault}'?"
         ),
         evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+        threshold=GEVAL_PASS_THRESHOLD,
         model=judge_model,
     )
 
@@ -79,6 +81,7 @@ def evaluate_chaos_metrics(
             " uptime, zero downtime)?"
         ),
         evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+        threshold=GEVAL_PASS_THRESHOLD,
         model=judge_model,
     )
 

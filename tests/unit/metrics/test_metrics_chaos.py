@@ -19,18 +19,20 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from pytest_mock import MockerFixture
+
 from devops_bench.metrics import chaos_metrics
 from devops_bench.metrics.chaos_metrics import evaluate_chaos_metrics
 
 
-def _chaos_result():
+def _chaos_result() -> SimpleNamespace:
     diag = SimpleNamespace(name="DiagnosisAccuracy [GEval]", score=5.0, success=True, reason="r")
     rec = SimpleNamespace(name="GracefulRecovery", score=4.0, success=True, reason="r")
     test_result = SimpleNamespace(metrics_data=[diag, rec])
     return SimpleNamespace(test_results=[test_result])
 
 
-def test_chaos_records_geval_and_perf(mocker):
+def test_chaos_records_geval_and_perf(mocker: MockerFixture) -> None:
     captured = {}
 
     def _fake_geval(**kwargs):
@@ -65,7 +67,7 @@ def test_chaos_records_geval_and_perf(mocker):
     assert scores["Resource_Utilization_Efficiency"] == 0.8
 
 
-def test_chaos_defaults_fault_and_survives_eval_error(mocker):
+def test_chaos_defaults_fault_and_survives_eval_error(mocker: MockerFixture) -> None:
     captured = {}
     mocker.patch.object(
         chaos_metrics,

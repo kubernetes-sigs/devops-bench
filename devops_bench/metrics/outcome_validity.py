@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
 from deepeval.metrics import GEval
 from deepeval.test_case import SingleTurnParams
@@ -70,7 +71,7 @@ def load_outcome_criteria() -> str:
     return load_skill_text(OUTCOME_SKILL_FILENAME)
 
 
-def build_outcome_validity_metric(model, *, generation_only: bool = False) -> GEval:
+def build_outcome_validity_metric(model: Any, *, generation_only: bool = False) -> GEval:
     """Build the OutcomeValidity GEval metric.
 
     Args:

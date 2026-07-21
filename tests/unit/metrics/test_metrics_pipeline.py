@@ -30,6 +30,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pytest_mock import MockerFixture
 
 from devops_bench.core import Registry
 from devops_bench.metrics import checklist, pipeline
@@ -184,7 +185,7 @@ def test_each_result_in_batch_is_scored(registry: Registry[Any]) -> None:
 # --- extract_checklist_items (pure logic) -------------------------------------
 
 
-def test_checklist_extracts_critical_requirements_bullets():
+def test_checklist_extracts_critical_requirements_bullets() -> None:
     expected = (
         "Critical Requirements:\n- Deployment must use 3 replicas\n- Service exposes port 8080\n"
     )
@@ -194,7 +195,7 @@ def test_checklist_extracts_critical_requirements_bullets():
     ]
 
 
-def test_checklist_stops_at_expected_manifest_marker():
+def test_checklist_stops_at_expected_manifest_marker() -> None:
     expected = (
         "Critical Requirements:\n"
         "- Keep replicas at 3\n"
@@ -204,7 +205,7 @@ def test_checklist_stops_at_expected_manifest_marker():
     assert extract_checklist_items(expected, use_mcp=True) == ["Keep replicas at 3"]
 
 
-def test_checklist_drops_tool_call_items_when_mcp_disabled():
+def test_checklist_drops_tool_call_items_when_mcp_disabled() -> None:
     expected = "Critical Requirements:\n- Expected Tool Call: apply_manifest\n- App is reachable\n"
     assert extract_checklist_items(expected, use_mcp=False) == ["App is reachable"]
     assert extract_checklist_items(expected, use_mcp=True) == [
@@ -213,17 +214,17 @@ def test_checklist_drops_tool_call_items_when_mcp_disabled():
     ]
 
 
-def test_checklist_empty_when_no_bullets():
+def test_checklist_empty_when_no_bullets() -> None:
     assert extract_checklist_items("Some prose without bullets", use_mcp=True) == []
 
 
-def test_checklist_preserves_trailing_hyphen():
+def test_checklist_preserves_trailing_hyphen() -> None:
     # ``lstrip("- ")`` must not eat a trailing hyphen the way ``strip("- ")`` would.
     expected = "Critical Requirements:\n- Deploy to namespace staging-\n"
     assert extract_checklist_items(expected, use_mcp=True) == ["Deploy to namespace staging-"]
 
 
-def test_checklist_threshold_is_value_independent_of_tool_invocation():
+def test_checklist_threshold_is_value_independent_of_tool_invocation() -> None:
     # Phase-0 fix #1: a dedicated constant so the checklist cutoff is not
     # silently coupled to ``TOOL_INVOCATION_THRESHOLD``.
     assert CHECKLIST_THRESHOLD == 0.8
@@ -232,7 +233,7 @@ def test_checklist_threshold_is_value_independent_of_tool_invocation():
 # --- evaluate_metrics_batch (deepeval mocked) ---------------------------------
 
 
-def _metric_result(name, score=1.0, success=True, reason="ok"):
+def _metric_result(name, score=1.0, success=True, reason="ok") -> SimpleNamespace:
     metric_data = SimpleNamespace(name=name, score=score, success=success, reason=reason)
     test_result = SimpleNamespace(metrics_data=[metric_data])
     return SimpleNamespace(test_results=[test_result])
@@ -257,7 +258,7 @@ def _evaluate_by_metric_name(successes=None):
     return _side_effect
 
 
-def _base_result(**overrides):
+def _base_result(**overrides) -> dict[str, Any]:
     res = {
         "input": "deploy the app",
         "output": "done, applied to cluster",
@@ -272,7 +273,7 @@ def _base_result(**overrides):
     return res
 
 
-def _patch_judges(mocker):
+def _patch_judges(mocker: MockerFixture) -> None:
     from devops_bench.metrics import outcome_validity, tool_invocation
 
     mocker.patch.object(
@@ -287,7 +288,7 @@ def _patch_judges(mocker):
     )
 
 
-def test_batch_scores_outcome_and_tool(mocker):
+def test_batch_scores_outcome_and_tool(mocker: MockerFixture) -> None:
     _patch_judges(mocker)
     mocker.patch.object(pipeline, "LLMTestCase")
     # Order-agnostic: result keyed off the metric name with the [GEval] suffix
@@ -306,7 +307,7 @@ def test_batch_scores_outcome_and_tool(mocker):
     assert "ChecklistScore" not in scores
 
 
-def test_batch_skips_tool_when_mcp_disabled(mocker):
+def test_batch_skips_tool_when_mcp_disabled(mocker: MockerFixture) -> None:
     _patch_judges(mocker)
     mocker.patch.object(pipeline, "LLMTestCase")
     evaluate = mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
@@ -321,7 +322,7 @@ def test_batch_skips_tool_when_mcp_disabled(mocker):
     assert "ToolInvocation" not in results[0]["scores"]
 
 
-def test_batch_use_mcp_falls_back_to_env(mocker):
+def test_batch_use_mcp_falls_back_to_env(mocker: MockerFixture) -> None:
     _patch_judges(mocker)
     mocker.patch.object(pipeline, "LLMTestCase")
     mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
@@ -334,7 +335,7 @@ def test_batch_use_mcp_falls_back_to_env(mocker):
     assert "ToolInvocation" not in results[0]["scores"]
 
 
-def test_batch_computes_checklist_score(mocker):
+def test_batch_computes_checklist_score(mocker: MockerFixture) -> None:
     _patch_judges(mocker)
     mocker.patch.object(pipeline, "LLMTestCase")
     # Give the dynamic GEval metric a stable name so success is matchable.
@@ -354,7 +355,7 @@ def test_batch_computes_checklist_score(mocker):
     assert scores["ChecklistScore"]["success"] is True
 
 
-def test_checklist_per_item_geval_uses_explicit_pass_threshold(mocker):
+def test_checklist_per_item_geval_uses_explicit_pass_threshold(mocker: MockerFixture) -> None:
     # Per-item checklist GEvals must pass the explicit 0.8 cutoff rather than
     # inheriting deepeval's looser 0.5 default, since their success flags feed
     # the aggregate ChecklistScore.
@@ -372,7 +373,7 @@ def test_checklist_per_item_geval_uses_explicit_pass_threshold(mocker):
     assert geval_cls.call_args.kwargs["threshold"] == GEVAL_PASS_THRESHOLD
 
 
-def test_batch_invokes_grounding_and_chaos(mocker):
+def test_batch_invokes_grounding_and_chaos(mocker: MockerFixture) -> None:
     _patch_judges(mocker)
     mocker.patch.object(pipeline, "LLMTestCase")
     mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
@@ -400,7 +401,7 @@ def test_batch_invokes_grounding_and_chaos(mocker):
     assert results[0]["scores"]["DocRetrievalRate"] == 0.5
 
 
-def test_batch_score_insertion_order_matches_legacy_results_json(mocker):
+def test_batch_score_insertion_order_matches_legacy_results_json(mocker: MockerFixture) -> None:
     # D3: ``res["scores"]`` insertion order lands on disk; pin the legacy
     # ordering (outcome -> tool -> checklist -> grounding -> chaos) so
     # downstream results.json consumers do not see a reshuffle.
@@ -472,12 +473,12 @@ def test_batch_score_insertion_order_matches_legacy_results_json(mocker):
 # --- generation_only flow + MCP tool-name normalization -----------------------
 
 
-def test_canonical_tool_name_strips_mcp_prefix():
+def test_canonical_tool_name_strips_mcp_prefix() -> None:
     assert pipeline._canonical_tool_name("default__generate_manifest") == "generate_manifest"
     assert pipeline._canonical_tool_name("run_shell_command") == "run_shell_command"
 
 
-def test_build_context_threads_generation_only(mocker):
+def test_build_context_threads_generation_only(mocker: MockerFixture) -> None:
     mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
     ctx = pipeline._build_context(_base_result(generation_only=True), MagicMock(), True)
     assert ctx.generation_only is True
@@ -485,7 +486,7 @@ def test_build_context_threads_generation_only(mocker):
     assert pipeline._build_context(_base_result(), MagicMock(), True).generation_only is False
 
 
-def test_build_context_normalizes_tool_names_for_judge(mocker):
+def test_build_context_normalizes_tool_names_for_judge(mocker: MockerFixture) -> None:
     mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
     res = _base_result(
         tools=["default__generate_manifest"],
@@ -499,7 +500,7 @@ def test_build_context_normalizes_tool_names_for_judge(mocker):
     assert res["trajectory"][0]["name"] == "default__generate_manifest"
 
 
-def test_outcome_validity_override_only_when_generation_only(mocker):
+def test_outcome_validity_override_only_when_generation_only(mocker: MockerFixture) -> None:
     from devops_bench.metrics import outcome_validity
 
     captured = {}
@@ -514,7 +515,9 @@ def test_outcome_validity_override_only_when_generation_only(mocker):
     assert outcome_validity._GENERATION_ONLY_OVERRIDE in captured["criteria"]
 
 
-def test_build_context_warns_on_empty_expected_output(caplog, mocker):
+def test_build_context_warns_on_empty_expected_output(
+    caplog: pytest.LogCaptureFixture, mocker: MockerFixture
+) -> None:
     mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
     import logging
 
@@ -525,7 +528,9 @@ def test_build_context_warns_on_empty_expected_output(caplog, mocker):
     assert "has an empty expected_output" in caplog.text
 
 
-def test_build_context_no_warning_when_expected_output_set(caplog, mocker):
+def test_build_context_no_warning_when_expected_output_set(
+    caplog: pytest.LogCaptureFixture, mocker: MockerFixture
+) -> None:
     mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
     import logging
 
@@ -535,7 +540,9 @@ def test_build_context_no_warning_when_expected_output_set(caplog, mocker):
     assert len(caplog.records) == 0
 
 
-def test_build_context_missing_expected_output_defaults_and_warns(caplog, mocker):
+def test_build_context_missing_expected_output_defaults_and_warns(
+    caplog: pytest.LogCaptureFixture, mocker: MockerFixture
+) -> None:
     mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
     import logging
 

@@ -22,6 +22,7 @@ import pytest
 from deepeval.metrics.g_eval.utils import construct_test_case_string
 from deepeval.models import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase, SingleTurnParams
+from pytest_mock import MockerFixture
 
 from devops_bench.metrics import _skills, outcome_validity, tool_invocation
 from devops_bench.metrics.base import GEVAL_PASS_THRESHOLD
@@ -44,7 +45,7 @@ class _StubJudgeModel(DeepEvalBaseLLM):
         return "stub-judge"
 
 
-def _patch_resources(mocker, files_by_name):
+def _patch_resources(mocker: MockerFixture, files_by_name: dict[str, str]) -> None:
     """Patch ``_skills.resources.files`` with a fake package traversable.
 
     ``files_by_name`` maps a filename to its text content; any name absent from
@@ -68,28 +69,28 @@ def _patch_resources(mocker, files_by_name):
     mocker.patch.object(_skills.resources, "files", return_value=_FakePackage())
 
 
-def test_load_skill_text_reads_packaged_resource(mocker):
+def test_load_skill_text_reads_packaged_resource(mocker: MockerFixture) -> None:
     _patch_resources(mocker, {"outcome-validity-checklist.md": "## Evaluation Criteria"})
     assert _skills.load_skill_text("outcome-validity-checklist.md") == "## Evaluation Criteria"
 
 
-def test_load_outcome_criteria_uses_loader(mocker):
+def test_load_outcome_criteria_uses_loader(mocker: MockerFixture) -> None:
     _patch_resources(mocker, {outcome_validity.OUTCOME_SKILL_FILENAME: "OUTCOME-MD"})
     assert outcome_validity.load_outcome_criteria() == "OUTCOME-MD"
 
 
-def test_load_tool_criteria_uses_loader(mocker):
+def test_load_tool_criteria_uses_loader(mocker: MockerFixture) -> None:
     _patch_resources(mocker, {tool_invocation.TOOL_SKILL_FILENAME: "TOOL-MD"})
     assert tool_invocation.load_tool_criteria() == "TOOL-MD"
 
 
-def test_load_skill_text_missing_raises(mocker):
+def test_load_skill_text_missing_raises(mocker: MockerFixture) -> None:
     _patch_resources(mocker, {})  # nothing exists
     with pytest.raises(FileNotFoundError):
         _skills.load_skill_text("does-not-exist.md")
 
 
-def test_build_outcome_validity_metric(mocker):
+def test_build_outcome_validity_metric(mocker: MockerFixture) -> None:
     geval_cls = mocker.patch.object(outcome_validity, "GEval")
     mocker.patch.object(outcome_validity, "load_outcome_criteria", return_value="CRIT")
     model = MagicMock()
@@ -103,7 +104,7 @@ def test_build_outcome_validity_metric(mocker):
     assert kwargs["model"] is model
 
 
-def test_build_tool_invocation_metric_applies_threshold(mocker):
+def test_build_tool_invocation_metric_applies_threshold(mocker: MockerFixture) -> None:
     geval_cls = mocker.patch.object(tool_invocation, "GEval")
     mocker.patch.object(tool_invocation, "load_tool_criteria", return_value="CRIT")
     model = MagicMock()
@@ -116,7 +117,7 @@ def test_build_tool_invocation_metric_applies_threshold(mocker):
     assert kwargs["model"] is model
 
 
-def test_build_outcome_validity_metric_includes_expected_output(mocker):
+def test_build_outcome_validity_metric_includes_expected_output(mocker: MockerFixture) -> None:
     mocker.patch.object(outcome_validity, "load_outcome_criteria", return_value="CRIT")
 
     metric = outcome_validity.build_outcome_validity_metric(_StubJudgeModel())
@@ -126,7 +127,7 @@ def test_build_outcome_validity_metric_includes_expected_output(mocker):
     assert SingleTurnParams.EXPECTED_OUTPUT in metric.evaluation_params
 
 
-def test_build_tool_invocation_metric_includes_expected_output(mocker):
+def test_build_tool_invocation_metric_includes_expected_output(mocker: MockerFixture) -> None:
     mocker.patch.object(tool_invocation, "load_tool_criteria", return_value="CRIT")
 
     metric = tool_invocation.build_tool_invocation_metric(_StubJudgeModel())
@@ -136,7 +137,7 @@ def test_build_tool_invocation_metric_includes_expected_output(mocker):
     assert SingleTurnParams.EXPECTED_OUTPUT in metric.evaluation_params
 
 
-def test_outcome_validity_judge_text_includes_expected_output(mocker):
+def test_outcome_validity_judge_text_includes_expected_output(mocker: MockerFixture) -> None:
     mocker.patch.object(outcome_validity, "load_outcome_criteria", return_value="CRIT")
     metric = outcome_validity.build_outcome_validity_metric(_StubJudgeModel())
     case = LLMTestCase(

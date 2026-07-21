@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from pytest_mock import MockerFixture
 
 from devops_bench.metrics import grounding
 from devops_bench.metrics.base import GEVAL_PASS_THRESHOLD
@@ -31,23 +32,23 @@ from devops_bench.metrics.grounding import (
 # --- calculate_doc_retrieval_rate (pure logic) --------------------------------
 
 
-def test_retrieval_rate_empty_docs():
+def test_retrieval_rate_empty_docs() -> None:
     assert calculate_doc_retrieval_rate([], [{"step": 1}]) == 0.0
 
 
-def test_retrieval_rate_matches_by_name():
+def test_retrieval_rate_matches_by_name() -> None:
     docs = [{"doc_name": "GuideA", "url": "http://a"}]
     trajectory = [{"action": "read guidea docs"}]
     assert calculate_doc_retrieval_rate(docs, trajectory) == 1.0
 
 
-def test_retrieval_rate_matches_by_url():
+def test_retrieval_rate_matches_by_url() -> None:
     docs = [{"doc_name": "GuideA", "url": "http://example.com/a"}]
     trajectory = [{"href": "see http://example.com/a now"}]
     assert calculate_doc_retrieval_rate(docs, trajectory) == 1.0
 
 
-def test_retrieval_rate_partial():
+def test_retrieval_rate_partial() -> None:
     docs = [
         {"doc_name": "GuideA", "url": "http://a"},
         {"doc_name": "GuideB", "url": "http://b"},
@@ -56,12 +57,12 @@ def test_retrieval_rate_partial():
     assert calculate_doc_retrieval_rate(docs, trajectory) == 0.5
 
 
-def test_retrieval_rate_no_match():
+def test_retrieval_rate_no_match() -> None:
     docs = [{"doc_name": "GuideA", "url": "http://a"}]
     assert calculate_doc_retrieval_rate(docs, [{"action": "nothing here"}]) == 0.0
 
 
-def test_retrieval_rate_tolerates_missing_name_and_url():
+def test_retrieval_rate_tolerates_missing_name_and_url() -> None:
     docs = [
         {"url": "http://a"},  # no doc_name
         {"doc_name": None, "url": None},  # both None
@@ -74,20 +75,22 @@ def test_retrieval_rate_tolerates_missing_name_and_url():
 # --- evaluate_documentation_grounding (GEval mocked) --------------------------
 
 
-def _metric_result(name, score, success, reason="ok"):
+def _metric_result(name, score, success, reason="ok") -> SimpleNamespace:
     metric_data = SimpleNamespace(name=name, score=score, success=success, reason=reason)
     test_result = SimpleNamespace(metrics_data=[metric_data])
     return SimpleNamespace(test_results=[test_result])
 
 
-def _named_geval(mocker):
+def _named_geval(mocker: MockerFixture) -> MagicMock:
     """Patch grounding.GEval so each metric carries its real ``name``."""
     return mocker.patch.object(
         grounding, "GEval", side_effect=lambda **kw: SimpleNamespace(name=kw["name"])
     )
 
 
-def _evaluate_by_outcome(mocker, outcomes):
+def _evaluate_by_outcome(
+    mocker: MockerFixture, outcomes: dict[str, tuple[float, bool]]
+) -> MagicMock:
     """Order-agnostic ``deepeval.evaluate`` keyed off the metric name.
 
     ``outcomes`` maps a metric name (as built by the grounding code, e.g.
@@ -103,7 +106,7 @@ def _evaluate_by_outcome(mocker, outcomes):
     return mocker.patch("deepeval.evaluate", side_effect=_side_effect)
 
 
-def test_grounding_constraint_geval_uses_explicit_pass_threshold(mocker):
+def test_grounding_constraint_geval_uses_explicit_pass_threshold(mocker: MockerFixture) -> None:
     # Per-constraint GEvals must pass the explicit 0.8 cutoff rather than
     # inheriting deepeval's looser 0.5 default, since their success flags drive
     # GroundingAccuracy / ParameterRecallAccuracy.
@@ -116,7 +119,7 @@ def test_grounding_constraint_geval_uses_explicit_pass_threshold(mocker):
     assert geval_cls.call_args.kwargs["threshold"] == GEVAL_PASS_THRESHOLD
 
 
-def test_grounding_no_constraints_returns_early(mocker):
+def test_grounding_no_constraints_returns_early(mocker: MockerFixture) -> None:
     evaluate = mocker.patch("deepeval.evaluate")
     scores: dict = {}
 
@@ -126,7 +129,7 @@ def test_grounding_no_constraints_returns_early(mocker):
     assert scores == {}
 
 
-def test_grounding_all_applied_scores_full(mocker):
+def test_grounding_all_applied_scores_full(mocker: MockerFixture) -> None:
     _named_geval(mocker)
     docs = [
         {
@@ -154,7 +157,7 @@ def test_grounding_all_applied_scores_full(mocker):
     assert scores["Doc Constraint: use TLS"]["success"] is True
 
 
-def test_grounding_critical_missing_scores_partial(mocker):
+def test_grounding_critical_missing_scores_partial(mocker: MockerFixture) -> None:
     _named_geval(mocker)
     docs = [
         {
@@ -181,7 +184,7 @@ def test_grounding_critical_missing_scores_partial(mocker):
     assert scores["ParameterRecallAccuracy"] == 0.5
 
 
-def test_grounding_none_applied_scores_zero(mocker):
+def test_grounding_none_applied_scores_zero(mocker: MockerFixture) -> None:
     _named_geval(mocker)
     docs = [{"constraints": [{"text": "use TLS", "critical": True}]}]
     scores: dict = {}
@@ -193,7 +196,7 @@ def test_grounding_none_applied_scores_zero(mocker):
     assert scores["ParameterRecallAccuracy"] == 0.0
 
 
-def test_grounding_dedups_shared_constraint_text(mocker):
+def test_grounding_dedups_shared_constraint_text(mocker: MockerFixture) -> None:
     # Two guides share the same constraint text; it must collapse to one metric
     # so a perfect 5.0 (applied == unique total) is reachable.
     _named_geval(mocker)

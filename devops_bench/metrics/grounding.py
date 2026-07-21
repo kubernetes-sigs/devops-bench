@@ -64,24 +64,23 @@ def calculate_doc_retrieval_rate(
     # trajectory for every documentation guide (it does not depend on the doc).
     step_strs = [json.dumps(step).lower() for step in trajectory]
 
-    accessed_docs = set()
+    # Count matched entries directly: deduplicating by ``doc_name`` would
+    # collapse distinct guides that share (or lack) a name but match via URL,
+    # undercounting the accessed fraction.
+    accessed_count = 0
     for doc in documentation:
-        doc_name = doc.get("doc_name") or ""
-        doc_name_lower = doc_name.lower()
+        doc_name_lower = (doc.get("doc_name") or "").lower()
         url_lower = (doc.get("url") or "").lower()
-        found_in_trajectory = False
         for step_str in step_strs:
             # Guard both substrings on truthiness so a missing name/url (now "")
             # does not spuriously match every step (``"" in s`` is always True).
             if (doc_name_lower and doc_name_lower in step_str) or (
                 url_lower and url_lower in step_str
             ):
-                found_in_trajectory = True
+                accessed_count += 1
                 break
-        if found_in_trajectory:
-            accessed_docs.add(doc_name)
 
-    return len(accessed_docs) / len(documentation)
+    return accessed_count / len(documentation)
 
 
 def evaluate_documentation_grounding(

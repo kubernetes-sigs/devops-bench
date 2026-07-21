@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
 from deepeval.metrics import GEval
 from deepeval.test_case import SingleTurnParams
@@ -56,7 +57,7 @@ def load_tool_criteria() -> str:
     return load_skill_text(TOOL_SKILL_FILENAME)
 
 
-def build_tool_invocation_metric(model) -> GEval:
+def build_tool_invocation_metric(model: Any) -> GEval:
     """Build the ToolInvocation GEval metric.
 
     Args:
