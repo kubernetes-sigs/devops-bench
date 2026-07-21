@@ -70,11 +70,14 @@ def _get_declared_variables(tf_dir: str) -> set[str]:
     """
     declared: set[str] = set()
     for path in Path(tf_dir).glob("*.tf"):
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                match = re.match(r'^\s*variable\s+"([^"]+)"', line)
-                if match:
-                    declared.add(match.group(1))
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    match = re.match(r'^\s*variable\s+"([^"]+)"', line)
+                    if match:
+                        declared.add(match.group(1))
+        except OSError:
+            continue
     for path in Path(tf_dir).glob("*.tf.json"):
         try:
             with open(path, encoding="utf-8") as f:

@@ -94,12 +94,23 @@ def test_get_deployer_null_variables_key(mocker, base_config):
     assert deployer.custom_keys == set()
 
 
+def test_get_deployer_non_dict_variables_raises(base_config):
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        get_deployer(
+            {"deployer": "tofu", "variables": "not-a-mapping"},
+            base_config["project_id"],
+            base_config["cluster_name"],
+            base_config["location"],
+        )
+
+
 def test_get_deployer_tofu_custom_stack_and_vars(mocker, base_config, monkeypatch):
     monkeypatch.delenv("KUBECONFIG", raising=False)
     mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
     infra_config = {
         "deployer": "tofu",
         "stack": "custom/stack",
+        "provider": "gcp",
         "variables": {
             "node_count": 5,
             "machine_type": "n2-standard-4",
@@ -215,6 +226,31 @@ def test_get_deployer_infra_provider_env(mocker, base_config):
     )
     assert isinstance(deployer, TFDeployer)
     assert deployer.variables["project_id"] == base_config["project_id"]
+
+
+def test_get_deployer_infra_location_env_overrides_gcp_location(mocker, base_config, monkeypatch):
+    # INFRA_LOCATION outranks the vendor-specific GCP_LOCATION env var.
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    monkeypatch.setenv("GCP_LOCATION", "us-east1-b")
+    monkeypatch.setenv("INFRA_LOCATION", "europe-west1-b")
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "custom/stack", "provider": "gcp"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        None,
+    )
+    assert deployer.variables["location"] == "europe-west1-b"
+
+
+def test_get_deployer_non_kind_stack_requires_explicit_provider(base_config):
+    # No cloud is assumed by default; only a stack named "kind" deduces one.
+    with pytest.raises(ConfigError, match="requires an explicit provider"):
+        get_deployer(
+            {"deployer": "tofu", "stack": "custom/stack"},
+            base_config["project_id"],
+            base_config["cluster_name"],
+            base_config["location"],
+        )
 
 
 def test_get_deployer_unknown_provider_raises(mocker, base_config):

@@ -35,11 +35,13 @@ def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
     """Determine the provider name for a tofu stack.
 
     Precedence: ``INFRA_PROVIDER`` env → explicit ``provider`` config key →
-    substring deduction from the stack name. The env var wins so a task can pin a
-    default ``provider`` in its config while runs stay overridable from the
-    environment (matching ``TARGET_DEPLOYMENT_NAME`` / ``NAMESPACE``). Deduction
-    is only applied to in-repo (relative) stacks; an out-of-repo (absolute or
-    ``~``) stack must name its provider explicitly rather than be guessed at.
+    ``kind`` deduced from an in-repo stack name. The env var wins so a task can
+    pin a default ``provider`` in its config while runs stay overridable from
+    the environment (matching ``TARGET_DEPLOYMENT_NAME`` / ``NAMESPACE``).
+    Deduction is only applied to in-repo (relative) stacks named ``kind``; an
+    out-of-repo (absolute or ``~``) stack, or any in-repo stack not named
+    ``kind``, must name its provider explicitly — no cloud is assumed by
+    default, so a new provider never silently inherits another's defaults.
 
     Args:
         infra_config: Task infrastructure config.
@@ -49,17 +51,18 @@ def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
         The selected provider name.
 
     Raises:
-        ConfigError: If an absolute/external stack has no explicit provider.
+        ConfigError: If no explicit provider is given and the stack does not
+            deduce to ``kind``.
     """
     explicit = (get_env("INFRA_PROVIDER", "") or infra_config.get("provider") or "").strip().lower()
     if explicit:
         return explicit
-    if Path(stack).expanduser().is_absolute():
-        raise ConfigError(
-            f"external stack {stack!r} requires an explicit provider; set 'provider' in task "
-            "config or the INFRA_PROVIDER env var (e.g. 'gcp' or 'kind')"
-        )
-    return "kind" if "kind" in stack else "gcp"
+    if not Path(stack).expanduser().is_absolute() and "kind" in stack:
+        return "kind"
+    raise ConfigError(
+        f"stack {stack!r} requires an explicit provider; set 'provider' in task "
+        "config or the INFRA_PROVIDER env var (e.g. 'gcp' or 'kind')"
+    )
 
 
 def get_deployer(
@@ -78,8 +81,8 @@ def get_deployer(
     * ``BENCH_NO_INFRA=true`` (env) *overrides* any config to skip infra for a
       run (local smoke tests, CI plumbing, running against existing clusters).
 
-    Location precedence: ``global_location`` arg → ``GCP_LOCATION`` env →
-    ``us-central1-a``.
+    Location precedence: ``global_location`` arg → ``INFRA_LOCATION`` env →
+    ``GCP_LOCATION`` env → ``us-central1-a``.
 
     Args:
         infra_config: Task infrastructure config (``deployer``, ``provider``,
@@ -94,8 +97,8 @@ def get_deployer(
     Raises:
         ConfigError: If ``infra_config["deployer"]`` is set to a value other
             than ``tofu`` or ``noop`` (unset/empty defaults to ``tofu``), if
-            an external stack names no provider, or if the selected provider
-            is unknown.
+            ``infra_config["variables"]`` is set but not a mapping, if the
+            stack names no provider, or if the selected provider is unknown.
     """
     deployer_type = (infra_config.get("deployer") or "").lower()
 
@@ -108,9 +111,17 @@ def get_deployer(
             "BENCH_NO_INFRA=true to skip infra"
         )
 
-    location = global_location or get_env("GCP_LOCATION", _DEFAULT_LOCATION)
+    location = (
+        global_location
+        or get_env("INFRA_LOCATION", "")
+        or get_env("GCP_LOCATION", _DEFAULT_LOCATION)
+    )
     stack = infra_config.get("stack") or _DEFAULT_STACK
     custom_variables = infra_config.get("variables") or {}
+    if not isinstance(custom_variables, dict):
+        raise ConfigError(
+            f"'variables' in task config must be a mapping, got {type(custom_variables).__name__}"
+        )
 
     provider_name = _select_provider(infra_config, stack)
     if provider_name not in PROVIDERS:
