@@ -83,10 +83,14 @@ class ScalingCompleteVerifier(BaseVerifier):
             A result reflecting the last observed scaling state; successful once
             ready replicas fall within ``[min_replicas, max_replicas]``.
         """
-        return self._poll_to_result(self._check_scaling, timeout_sec)
+        return self._poll_to_result(lambda: self._check_scaling(timeout_sec), timeout_sec)
 
-    def _check_scaling(self) -> tuple[bool, str, dict[str, Any] | None]:
+    def _check_scaling(self, timeout_sec: float) -> tuple[bool, str, dict[str, Any] | None]:
         """Read the deployment once and compare ready replicas to the target.
+
+        Args:
+            timeout_sec: Seconds before the ``kubectl get`` call is killed, so
+                a single hung API request cannot block the whole poll.
 
         Returns:
             A ``(success, reason, raw)`` triple. ``raw`` carries the raw
@@ -98,6 +102,7 @@ class ScalingCompleteVerifier(BaseVerifier):
                 self.deployment,
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
+                timeout=timeout_sec,
             )
         except SubprocessError as exc:
             stderr = (exc.stderr or "").strip()

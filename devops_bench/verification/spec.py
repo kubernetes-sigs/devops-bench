@@ -21,9 +21,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, RootModel, ValidationError, model_validator
 from pydantic_core import PydanticCustomError
 
-# Leaf verifiers populate the ``VERIFIERS`` registry via their
-# ``@VERIFIERS.register`` decorators when their modules are imported.
 from devops_bench.core import NotRegisteredError
+from devops_bench.verification import verifiers as _verifiers  # noqa: F401
 from devops_bench.verification.base import VERIFIERS
 
 __all__ = [

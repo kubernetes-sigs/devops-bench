@@ -37,3 +37,18 @@ def test_import_pulls_no_heavy_sdks():
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert "ok" in proc.stdout
+
+
+def test_parse_node_finds_leaf_verifiers_without_importing_them_directly():
+    # A fresh interpreter that only imports devops_bench.verification: nothing
+    # else has imported devops_bench.verification.verifiers yet, so this fails
+    # unless the package itself registers the leaf verifiers on import.
+    code = (
+        "from devops_bench.verification.spec import parse_node\n"
+        "node = parse_node({'type': 'pod_healthy', 'selector': 'app=web'})\n"
+        "assert node.type == 'pod_healthy'\n"
+        "print('ok')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert "ok" in proc.stdout

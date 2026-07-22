@@ -108,6 +108,60 @@ def test_null_status_does_not_crash_phase_check() -> None:
     assert result.raw == fake_pods
 
 
+def test_crashloop_pod_reporting_running_phase_is_not_healthy() -> None:
+    # A CrashLoopBackOff pod still reports phase "Running" while its container
+    # keeps restarting; the Ready condition must be checked, not just phase.
+    fake_pods = {
+        "items": [
+            {
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                }
+            }
+        ]
+    }
+    with (
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.wait",
+            side_effect=SubprocessError(["kubectl"], returncode=1, stderr="timeout"),
+        ),
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.get_resource",
+            return_value=fake_pods,
+        ),
+    ):
+        result = PodHealthyVerifier(selector="app=web").verify(timeout_sec=5)
+
+    assert result.success is False
+
+
+def test_ready_condition_true_is_healthy_even_with_other_phase() -> None:
+    fake_pods = {
+        "items": [
+            {
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                }
+            }
+        ]
+    }
+    with (
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.wait",
+            side_effect=SubprocessError(["kubectl"], returncode=1, stderr="timeout"),
+        ),
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.get_resource",
+            return_value=fake_pods,
+        ),
+    ):
+        result = PodHealthyVerifier(selector="app=web").verify(timeout_sec=5)
+
+    assert result.success is True
+
+
 def test_elapsed_time_includes_fallback_fetch_duration() -> None:
     # A plain monotonic() mock can't distinguish call ordering, so drive a fake
     # clock that advances inside the fetch itself: elapsed_time must reflect
