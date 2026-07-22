@@ -102,8 +102,19 @@ class ResultRow(BaseModel):
             when the metric did not run (e.g. a failed task).
         tool_score: Tool-invocation judge score in ``[0, 1]``, or ``None``.
         latency_sec: Agent wall-clock seconds for the iteration.
-        input_tokens: Prompt token count, or ``None`` when unreported.
-        output_tokens: Completion token count, or ``None`` when unreported.
+        input_tokens: Non-cached prompt token count, or ``None`` when
+            unreported. (Historical records that predate the canonical token
+            schema may include cached tokens here.)
+        output_tokens: Visible completion token count (excludes reasoning
+            where the harness reports it), or ``None`` when unreported.
+        cached_tokens: Cache-read token count, or ``None`` when the harness
+            reports no cache telemetry.
+        reasoning_tokens: Thinking-token count, or ``None`` when unreported
+            (some providers bill thinking inside ``output_tokens``).
+        cache_write_tokens: Cache-creation token count (billed at a premium by
+            providers that report it), or ``None`` when unreported.
+        total_tokens: Provider-reported or bucket-sum total, or ``None`` when
+            unreported. Semantics vary for pre-canonical records.
         status: Terminal record status, ``"success"`` or ``"failed"``.
         validated: Whether the task is vetted as correct and eligible for the
             leaderboard; ingest gates promotion on this (default ``False``).
@@ -125,6 +136,10 @@ class ResultRow(BaseModel):
     latency_sec: float
     input_tokens: int | None
     output_tokens: int | None
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    total_tokens: int | None = None
     status: str
     validated: bool = False
 

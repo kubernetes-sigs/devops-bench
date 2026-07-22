@@ -351,7 +351,16 @@ def test_parse_stream_json_real_cli_schema() -> None:
             "status": "completed",
         },
     ]
-    assert tokens == {"input": 31225, "output": 35, "total": 31489, "cached": 12173}
+    # Canonical buckets: input excludes the cached subset, and reasoning is
+    # derived from the total gap (total - full_input - output = thinking).
+    assert tokens == {
+        "input": 31225 - 12173,
+        "cached": 12173,
+        "cache_write": None,
+        "reasoning": 31489 - 31225 - 35,
+        "output": 35,
+        "total": 31489,
+    }
 
 
 def test_parse_stream_json_marks_failed_tool_result_status_field() -> None:

@@ -19,7 +19,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["ToolCall", "AgentResult"]
+__all__ = ["ToolCall", "AgentResult", "TOKEN_BUCKETS", "empty_tokens"]
+
+# Canonical token buckets every harness maps onto: ``input`` is the non-cached
+# prompt, ``cached`` is cache-read only (cache writes go in ``cache_write``),
+# ``output`` excludes ``reasoning``, and ``total`` is the sum of all buckets.
+TOKEN_BUCKETS = ("input", "cached", "cache_write", "reasoning", "output", "total")
+
+
+def empty_tokens() -> dict[str, Any]:
+    """Return the canonical token dict with every bucket ``None`` (unavailable)."""
+    return dict.fromkeys(TOKEN_BUCKETS, None)
 
 
 @dataclass

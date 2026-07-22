@@ -45,17 +45,22 @@ __all__ = [
 OUTCOME_SCORE_KEY = "OutcomeValidity"
 TOOL_SCORE_KEY = "ToolInvocation"
 
-# Token usage aliases per provider, in lookup priority. Kept in sync with
-# ``devops_bench.agents.api.agent.extract_tokens`` (API providers) and the CLI
-# parsers, which emit ``input`` / ``output``.
-_INPUT_TOKEN_KEYS = ("prompt_tokens", "prompt_token_count", "input_tokens", "input")
+# Token usage aliases per provider, in lookup priority. The canonical keys
+# (``input`` / ``cached`` / ``reasoning`` / ``output``; see
+# ``devops_bench.agents.result.TOKEN_BUCKETS``) come first; the rest keep
+# historical ``results.json`` records readable.
+_INPUT_TOKEN_KEYS = ("input", "prompt_tokens", "prompt_token_count", "input_tokens")
 _OUTPUT_TOKEN_KEYS = (
+    "output",
     "candidates_tokens",
     "candidates_token_count",
     "completion_tokens",
     "output_tokens",
-    "output",
 )
+_CACHED_TOKEN_KEYS = ("cached", "cache_read_input_tokens", "cached_content_token_count")
+_CACHE_WRITE_TOKEN_KEYS = ("cache_write", "cache_creation_input_tokens")
+_REASONING_TOKEN_KEYS = ("reasoning", "thoughts_token_count", "reasoning_tokens")
+_TOTAL_TOKEN_KEYS = ("total", "total_tokens", "total_token_count")
 
 # Runs of characters outside ``[a-z0-9]`` collapse to a single ``-``. Mirrors the
 # dashboard's ``catalog.mjs`` / seeder ``slugify`` so the model component of a
@@ -147,23 +152,33 @@ def _first_token(tokens: Mapping[str, Any], keys: tuple[str, ...]) -> int | None
     return None
 
 
-def normalize_tokens(tokens: Mapping[str, Any] | None) -> tuple[int | None, int | None]:
-    """Flatten a provider-defined token dict to ``(input_tokens, output_tokens)``.
+def normalize_tokens(
+    tokens: Mapping[str, Any] | None,
+) -> tuple[int | None, int | None, int | None, int | None, int | None, int | None]:
+    """Flatten a token dict to per-bucket counts.
 
-    Reads the first present alias for each direction across the known provider
-    shapes; an unreported direction yields ``None`` rather than ``0`` so the
-    dashboard can distinguish "no data" from a genuine zero.
+    Reads the first present alias for each bucket across the canonical shape
+    and the known historical provider shapes; an unreported bucket yields
+    ``None`` rather than ``0`` so the dashboard can distinguish "no data" from
+    a genuine zero. ``total`` semantics vary for pre-canonical records (some
+    eras exclude cached/reasoning); canonical records always report the full
+    footprint.
 
     Args:
         tokens: The record's ``tokens`` mapping, or ``None``.
 
     Returns:
-        An ``(input_tokens, output_tokens)`` pair, each ``int`` or ``None``.
+        An ``(input, output, cached, reasoning, cache_write, total)`` tuple of
+        token counts, each ``int`` or ``None``.
     """
     usage = tokens or {}
     return (
         _first_token(usage, _INPUT_TOKEN_KEYS),
         _first_token(usage, _OUTPUT_TOKEN_KEYS),
+        _first_token(usage, _CACHED_TOKEN_KEYS),
+        _first_token(usage, _REASONING_TOKEN_KEYS),
+        _first_token(usage, _CACHE_WRITE_TOKEN_KEYS),
+        _first_token(usage, _TOTAL_TOKEN_KEYS),
     )
 
 
@@ -208,7 +223,14 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
     rows: list[ResultRow] = []
     for record in records:
         scores = record.get("scores")
-        input_tokens, output_tokens = normalize_tokens(record.get("tokens"))
+        (
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+            reasoning_tokens,
+            cache_write_tokens,
+            total_tokens,
+        ) = normalize_tokens(record.get("tokens"))
         rows.append(
             ResultRow(
                 setup_id=manifest.setup_id,
@@ -225,6 +247,10 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 latency_sec=float(record.get("latency") or 0.0),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cache_write_tokens=cache_write_tokens,
+                total_tokens=total_tokens,
                 status=record.get("status", "") or "",
                 validated=bool(record.get("validated", False)),
             )

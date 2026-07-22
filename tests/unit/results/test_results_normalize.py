@@ -87,27 +87,47 @@ def test_setup_id_matches_catalog_slug_for_dotted_model():
 # -- normalize_tokens --------------------------------------------------------
 
 
-def test_normalize_tokens_api_shape():
+def test_normalize_tokens_legacy_api_shape():
     tokens = {"prompt_tokens": 10, "candidates_tokens": 5, "total_tokens": 15}
-    assert normalize_tokens(tokens) == (10, 5)
+    assert normalize_tokens(tokens) == (10, 5, None, None, None, 15)
 
 
-def test_normalize_tokens_cli_shape():
-    assert normalize_tokens({"input": 7, "output": 3}) == (7, 3)
+def test_normalize_tokens_canonical_shape():
+    tokens = {
+        "input": 7,
+        "cached": 100,
+        "cache_write": None,
+        "reasoning": 4,
+        "output": 3,
+        "total": 114,
+    }
+    assert normalize_tokens(tokens) == (7, 3, 100, 4, None, 114)
 
 
 def test_normalize_tokens_google_metadata_shape():
     tokens = {"prompt_token_count": 8, "candidates_token_count": 4}
-    assert normalize_tokens(tokens) == (8, 4)
+    assert normalize_tokens(tokens) == (8, 4, None, None, None, None)
 
 
 def test_normalize_tokens_missing_yields_none():
-    assert normalize_tokens({}) == (None, None)
-    assert normalize_tokens(None) == (None, None)
+    assert normalize_tokens({}) == (None, None, None, None, None, None)
+    assert normalize_tokens(None) == (None, None, None, None, None, None)
+
+
+def test_normalize_tokens_none_valued_canonical_keys_fall_through():
+    # A canonical dict with None buckets must not mask values under legacy keys.
+    assert normalize_tokens({"input": None, "prompt_tokens": 9, "output": 2}) == (
+        9,
+        2,
+        None,
+        None,
+        None,
+        None,
+    )
 
 
 def test_normalize_tokens_float_coerced_to_int():
-    assert normalize_tokens({"input": 12.0, "output": 3.9}) == (12, 3)
+    assert normalize_tokens({"input": 12.0, "output": 3.9}) == (12, 3, None, None, None, None)
 
 
 # -- extract_score -----------------------------------------------------------
@@ -172,6 +192,10 @@ def test_build_rows_success_record():
         "latencySec": 42.5,
         "inputTokens": 100,
         "outputTokens": 20,
+        "cachedTokens": None,
+        "reasoningTokens": None,
+        "cacheWriteTokens": None,
+        "totalTokens": None,
         "status": "success",
         "validated": False,
     }
@@ -194,6 +218,10 @@ def test_build_rows_failed_record_has_null_scores_and_tokens():
     assert row.tool_score is None
     assert row.input_tokens is None
     assert row.output_tokens is None
+    assert row.cached_tokens is None
+    assert row.reasoning_tokens is None
+    assert row.cache_write_tokens is None
+    assert row.total_tokens is None
     assert row.iteration == 0
 
 
@@ -233,6 +261,10 @@ def test_result_row_keys_match_typescript_interface():
         "latencySec",
         "inputTokens",
         "outputTokens",
+        "cachedTokens",
+        "reasoningTokens",
+        "cacheWriteTokens",
+        "totalTokens",
         "validated",
     }
     row = build_rows(
@@ -263,3 +295,45 @@ def test_build_rows_propagates_validated():
     # Absent key defaults to False (unvetted tasks don't promote).
     default_row = build_rows([{"name": "t", "folder": "f", "status": "success"}], manifest)[0]
     assert default_row.to_dict()["validated"] is False
+
+
+def test_build_rows_carries_cached_and_reasoning():
+    record = {
+        "name": "t",
+        "folder": "f",
+        "status": "success",
+        "tokens": {
+            "input": 19052,
+            "cached": 12173,
+            "cache_write": None,
+            "reasoning": 229,
+            "output": 35,
+            "total": 31489,
+        },
+    }
+    row = build_rows([record], _manifest())[0]
+    assert row.input_tokens == 19052
+    assert row.cached_tokens == 12173
+    assert row.reasoning_tokens == 229
+    assert row.output_tokens == 35
+    assert row.total_tokens == 31489
+    assert row.cache_write_tokens is None
+
+
+def test_build_rows_carries_cache_write():
+    record = {
+        "name": "t",
+        "folder": "f",
+        "status": "success",
+        "tokens": {
+            "input": 5,
+            "cached": 1000,
+            "cache_write": 200,
+            "reasoning": None,
+            "output": 40,
+            "total": 1245,
+        },
+    }
+    row = build_rows([record], _manifest())[0]
+    assert row.cache_write_tokens == 200
+    assert row.total_tokens == 1245
