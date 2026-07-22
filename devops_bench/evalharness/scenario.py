@@ -24,12 +24,13 @@ verification mapping supplied by the caller.
 from __future__ import annotations
 
 import contextlib
+import copy
 import socket
 import threading
 import time
 from typing import Any
 
-from devops_bench.chaos import ChaosSpec
+from devops_bench.chaos import ChaosResult, ChaosSpec
 from devops_bench.chaos.faults.generate_load import (
     _ENV_LOCAL_PORT,
     _ENV_SKIP_PORT_FORWARD,
@@ -136,6 +137,10 @@ class ScenarioManager:
         }
         self.start_time: float | None = None
         self._aborted = threading.Event()
+        # Guards writes to ``result_holder`` against a concurrent snapshot in
+        # ``get_reports`` — the reader can run while this thread is still writing
+        # (the timeout path in the harness drains reports without a completed join).
+        self._report_lock = threading.Lock()
 
     def run_chaos_and_verification(
         self,
@@ -153,19 +158,24 @@ class ScenarioManager:
 
         # Record initial chaos metadata before injection begins, so a crash
         # mid-injection still produces a partial report rather than silence.
-        self.result_holder["chaos_report"] = {
-            "injected_fault": spec.action.type,
-            "name": spec.name,
-            "status": "initiated",
-        }
+        with self._report_lock:
+            self.result_holder["chaos_report"] = {
+                "injected_fault": spec.action.type,
+                "name": spec.name,
+                "status": "initiated",
+            }
 
         try:
             chaos_result = self._inject_chaos(spec, ctx)
-            self.result_holder["chaos_report"] = self._chaos_report_from_result(spec, chaos_result)
+            with self._report_lock:
+                self.result_holder["chaos_report"] = self._chaos_report_from_result(
+                    spec, chaos_result
+                )
         except Exception as exc:  # noqa: BLE001 - surface failure into the report
             _log.error("error running scenario: %s", exc)
-            self.result_holder["chaos_report"]["status"] = "failed"
-            self.result_holder["chaos_report"]["error"] = str(exc)
+            with self._report_lock:
+                self.result_holder["chaos_report"]["status"] = "failed"
+                self.result_holder["chaos_report"]["error"] = str(exc)
             # Unblock the main thread immediately: it waits on this event to
             # learn the disruption is active, and a failed injection never sets
             # it via the fault, so without this it stalls for the full
@@ -194,16 +204,22 @@ class ScenarioManager:
                 "verification completed: %s",
                 verification_result.model_dump_json(indent=2),
             )
-            self.result_holder["chaos_report"]["verification"] = verification_result.model_dump()
-            self.result_holder["perf_report"] = self._perf_from_verification(verification_result)
+            with self._report_lock:
+                self.result_holder["chaos_report"]["verification"] = (
+                    verification_result.model_dump()
+                )
+                self.result_holder["perf_report"] = self._perf_from_verification(
+                    verification_result
+                )
         except Exception as exc:  # noqa: BLE001 - surface failure into the report
             _log.error("verification failed with exception: %s", exc)
-            self.result_holder["chaos_report"]["verification"] = {
-                "success": False,
-                "reason": f"Verification exception: {exc}",
-            }
+            with self._report_lock:
+                self.result_holder["chaos_report"]["verification"] = {
+                    "success": False,
+                    "reason": f"Verification exception: {exc}",
+                }
 
-    def _inject_chaos(self, spec: ChaosSpec, ctx: RunContext):
+    def _inject_chaos(self, spec: ChaosSpec, ctx: RunContext) -> ChaosResult:
         """Wait on the trigger, then drive ``action.inject`` with the target env.
 
         The trigger is a typed node; wait through its own ``wait(ctx)`` rather
@@ -401,13 +417,14 @@ class ScenarioManager:
             # just in the log. The shape mirrors the typed
             # VerificationResult dump (success/reason/name) so downstream
             # consumers don't need a special-case parse path.
-            self.result_holder["chaos_report"]["verification"] = {
-                "success": False,
-                "reason": reason,
-                "name": verify_ref,
-                "unresolved_reference": verify_ref,
-                "known_references": known,
-            }
+            with self._report_lock:
+                self.result_holder["chaos_report"]["verification"] = {
+                    "success": False,
+                    "reason": reason,
+                    "name": verify_ref,
+                    "unresolved_reference": verify_ref,
+                    "known_references": known,
+                }
             return None
         return node
 
@@ -416,12 +433,15 @@ class ScenarioManager:
 
         Returns:
             A ``(chaos_report, perf_report)`` pair derived from the most recent
-            scenario run; each is an empty dict before the run produces it.
+            scenario run; each is an empty dict before the run produces it. The
+            snapshot is a deep copy taken under the report lock, so a caller may
+            read it safely while the scenario thread is still writing.
         """
-        return (
-            self.result_holder.get("chaos_report", {}),
-            self.result_holder.get("perf_report", {}),
-        )
+        with self._report_lock:
+            return (
+                copy.deepcopy(self.result_holder.get("chaos_report", {})),
+                copy.deepcopy(self.result_holder.get("perf_report", {})),
+            )
 
     def stop(self) -> None:
         """Abort the scenario so a pending verification is skipped.
