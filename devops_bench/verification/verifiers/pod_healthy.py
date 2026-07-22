@@ -77,12 +77,12 @@ class PodHealthyVerifier(BaseVerifier):
             # ``kubectl wait`` returns nonzero on timeout even for healthy pods
             # that never reach Ready (probe-less pods, or the condition not yet
             # propagated), so fall back to checking the Running phase directly.
-            elapsed = time.monotonic() - start_time
             _log.debug(
                 "kubectl wait failed for selector %s; falling back to phase check",
                 self.selector,
             )
             raw = self._get_pods_details()
+            elapsed = time.monotonic() - start_time
             if self._check_pods_status(raw):
                 return VerificationResult(
                     success=True,

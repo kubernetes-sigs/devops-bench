@@ -27,7 +27,7 @@ from devops_bench.core import SubprocessError
 from devops_bench.verification.verifiers import PodHealthyVerifier
 
 
-def test_kubectl_wait_success_returns_raw_output():
+def test_kubectl_wait_success_returns_raw_output() -> None:
     completed = SimpleNamespace(stdout="pod/web condition met\n")
     with patch(
         "devops_bench.verification.verifiers.pod_healthy.wait",
@@ -40,7 +40,7 @@ def test_kubectl_wait_success_returns_raw_output():
     assert result.children == []
 
 
-def test_polling_fallback_when_kubectl_wait_fails_and_pods_running():
+def test_polling_fallback_when_kubectl_wait_fails_and_pods_running() -> None:
     fake_pods = {
         "items": [
             {"status": {"phase": "Running"}},
@@ -64,7 +64,7 @@ def test_polling_fallback_when_kubectl_wait_fails_and_pods_running():
     assert result.raw == fake_pods
 
 
-def test_fallback_reports_failure_when_no_pods_match():
+def test_fallback_reports_failure_when_no_pods_match() -> None:
     with (
         patch(
             "devops_bench.verification.verifiers.pod_healthy.wait",
@@ -81,7 +81,7 @@ def test_fallback_reports_failure_when_no_pods_match():
     assert "no match" in result.reason
 
 
-def test_null_status_does_not_crash_phase_check():
+def test_null_status_does_not_crash_phase_check() -> None:
     # A pod returned with an explicitly null ``status`` field would crash a
     # naive ``p["status"]["phase"]`` lookup. The verifier must null-guard.
     fake_pods = {
@@ -108,7 +108,39 @@ def test_null_status_does_not_crash_phase_check():
     assert result.raw == fake_pods
 
 
-def test_name_is_echoed_onto_result():
+def test_elapsed_time_includes_fallback_fetch_duration() -> None:
+    # A plain monotonic() mock can't distinguish call ordering, so drive a fake
+    # clock that advances inside the fetch itself: elapsed_time must reflect
+    # that advance, which only holds if it's computed after the fetch returns.
+    clock = {"t": 100.0}
+
+    def fake_monotonic() -> float:
+        return clock["t"]
+
+    def fake_get_resource(*args: object, **kwargs: object) -> dict:
+        clock["t"] += 5.0
+        return {"items": [{"status": {"phase": "Running"}}]}
+
+    with (
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.wait",
+            side_effect=SubprocessError(["kubectl"], returncode=1, stderr="timeout"),
+        ),
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.get_resource",
+            side_effect=fake_get_resource,
+        ),
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.time.monotonic",
+            side_effect=fake_monotonic,
+        ),
+    ):
+        result = PodHealthyVerifier(selector="app=web").verify(timeout_sec=10)
+
+    assert result.elapsed_time >= 5.0
+
+
+def test_name_is_echoed_onto_result() -> None:
     completed = SimpleNamespace(stdout="ok")
     with patch(
         "devops_bench.verification.verifiers.pod_healthy.wait",

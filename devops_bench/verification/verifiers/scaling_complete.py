@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from pydantic import model_validator
+
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.k8s import get_resource
 from devops_bench.verification.base import VERIFIERS, BaseVerifier, VerificationResult
@@ -45,6 +47,10 @@ class ScalingCompleteVerifier(BaseVerifier):
         max_replicas: Optional maximum ready replicas allowed for success; when
             ``None`` only the lower bound is enforced.
         namespace: Optional namespace; defaults to the active one.
+
+    Raises:
+        pydantic.ValidationError: If ``min_replicas`` or ``max_replicas`` is
+            negative, or ``min_replicas`` exceeds ``max_replicas``.
     """
 
     type: Literal["scaling_complete"] = "scaling_complete"
@@ -52,6 +58,20 @@ class ScalingCompleteVerifier(BaseVerifier):
     min_replicas: int = 1
     max_replicas: int | None = None
     namespace: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_replica_bounds(self) -> ScalingCompleteVerifier:
+        if self.min_replicas < 0:
+            raise ValueError(f"min_replicas must be >= 0, got {self.min_replicas}")
+        if self.max_replicas is not None:
+            if self.max_replicas < 0:
+                raise ValueError(f"max_replicas must be >= 0, got {self.max_replicas}")
+            if self.min_replicas > self.max_replicas:
+                raise ValueError(
+                    f"min_replicas ({self.min_replicas}) must be <= "
+                    f"max_replicas ({self.max_replicas})"
+                )
+        return self
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         """Poll the deployment until its ready replicas reach the target range.
