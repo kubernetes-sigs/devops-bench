@@ -39,13 +39,17 @@ def _canonical_tokens(stats: Mapping[str, object]) -> dict[str, int | None]:
     The CLI reports ``input_tokens`` as the *full* prompt with ``cached`` as a
     subset, and rolls thinking tokens into ``total_tokens`` only — so canonical
     ``input`` is the difference, and ``reasoning`` is derived from the total gap
-    (``total - full_input - output``) when every part is reported.
+    (``total - full_input - output``) when every part is reported. Both
+    subtractions are clamped at ``0`` so an over-reported ``cached`` (or a
+    rounding quirk) can never yield a negative bucket.
     """
     full_input = _int_or_none(stats.get("input_tokens"))
     output = _int_or_none(stats.get("output_tokens"))
     total = _int_or_none(stats.get("total_tokens"))
     cached = _int_or_none(stats.get("cached"))
-    inp = full_input - cached if full_input is not None and cached is not None else full_input
+    inp = (
+        max(full_input - cached, 0) if full_input is not None and cached is not None else full_input
+    )
     reasoning = None
     if full_input is not None and output is not None and total is not None:
         gap = total - full_input - output

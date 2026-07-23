@@ -27,7 +27,7 @@ __all__: list[str] = ["AgentResult", "TOKEN_BUCKETS", "ToolCall", "empty_tokens"
 TOKEN_BUCKETS: tuple[str, ...] = ("input", "cached", "cache_write", "reasoning", "output", "total")
 
 
-def empty_tokens() -> dict[str, Any]:
+def empty_tokens() -> dict[str, int | None]:
     """Return the canonical token dict with every bucket ``None`` (unavailable)."""
     return dict.fromkeys(TOKEN_BUCKETS, None)
 

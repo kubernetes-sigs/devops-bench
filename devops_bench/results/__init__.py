@@ -22,6 +22,7 @@ from devops_bench.results.aggregate import (
     rebatch_rows,
 )
 from devops_bench.results.normalize import (
+    NormalizedTokens,
     build_rows,
     derive_augmentation,
     extract_score,
@@ -34,6 +35,7 @@ from devops_bench.results.row import SCHEMA_VERSION, Manifest, ResultRow
 __all__ = [
     "SCHEMA_VERSION",
     "Manifest",
+    "NormalizedTokens",
     "ResultRow",
     "aggregate",
     "build_manifests",

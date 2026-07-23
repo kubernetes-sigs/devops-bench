@@ -24,13 +24,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from devops_bench.results.row import Manifest, ResultRow
 
 __all__ = [
     "OUTCOME_SCORE_KEY",
     "TOOL_SCORE_KEY",
+    "NormalizedTokens",
     "build_rows",
     "derive_augmentation",
     "extract_score",
@@ -152,9 +153,24 @@ def _first_token(tokens: Mapping[str, Any], keys: tuple[str, ...]) -> int | None
     return None
 
 
-def normalize_tokens(
-    tokens: Mapping[str, Any] | None,
-) -> tuple[int | None, int | None, int | None, int | None, int | None, int | None]:
+class NormalizedTokens(NamedTuple):
+    """Per-bucket token counts flattened from a provider ``tokens`` dict.
+
+    Each field is an ``int`` count or ``None`` when the bucket was unreported
+    (distinct from a genuine ``0``). Being a :class:`~typing.NamedTuple`, it
+    still unpacks and compares as a plain 6-tuple, so existing positional
+    callers keep working.
+    """
+
+    input: int | None
+    output: int | None
+    cached: int | None
+    reasoning: int | None
+    cache_write: int | None
+    total: int | None
+
+
+def normalize_tokens(tokens: Mapping[str, Any] | None) -> NormalizedTokens:
     """Flatten a token dict to per-bucket counts.
 
     Reads the first present alias for each bucket across the canonical shape
@@ -168,17 +184,17 @@ def normalize_tokens(
         tokens: The record's ``tokens`` mapping, or ``None``.
 
     Returns:
-        An ``(input, output, cached, reasoning, cache_write, total)`` tuple of
-        token counts, each ``int`` or ``None``.
+        A :class:`NormalizedTokens` of ``(input, output, cached, reasoning,
+        cache_write, total)`` counts, each ``int`` or ``None``.
     """
     usage = tokens or {}
-    return (
-        _first_token(usage, _INPUT_TOKEN_KEYS),
-        _first_token(usage, _OUTPUT_TOKEN_KEYS),
-        _first_token(usage, _CACHED_TOKEN_KEYS),
-        _first_token(usage, _REASONING_TOKEN_KEYS),
-        _first_token(usage, _CACHE_WRITE_TOKEN_KEYS),
-        _first_token(usage, _TOTAL_TOKEN_KEYS),
+    return NormalizedTokens(
+        input=_first_token(usage, _INPUT_TOKEN_KEYS),
+        output=_first_token(usage, _OUTPUT_TOKEN_KEYS),
+        cached=_first_token(usage, _CACHED_TOKEN_KEYS),
+        reasoning=_first_token(usage, _REASONING_TOKEN_KEYS),
+        cache_write=_first_token(usage, _CACHE_WRITE_TOKEN_KEYS),
+        total=_first_token(usage, _TOTAL_TOKEN_KEYS),
     )
 
 
@@ -223,14 +239,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
     rows: list[ResultRow] = []
     for record in records:
         scores = record.get("scores")
-        (
-            input_tokens,
-            output_tokens,
-            cached_tokens,
-            reasoning_tokens,
-            cache_write_tokens,
-            total_tokens,
-        ) = normalize_tokens(record.get("tokens"))
+        tokens = normalize_tokens(record.get("tokens"))
         rows.append(
             ResultRow(
                 setup_id=manifest.setup_id,
@@ -245,12 +254,12 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 outcome_score=extract_score(scores, OUTCOME_SCORE_KEY),
                 tool_score=extract_score(scores, TOOL_SCORE_KEY),
                 latency_sec=float(record.get("latency") or 0.0),
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_tokens=cached_tokens,
-                reasoning_tokens=reasoning_tokens,
-                cache_write_tokens=cache_write_tokens,
-                total_tokens=total_tokens,
+                input_tokens=tokens.input,
+                output_tokens=tokens.output,
+                cached_tokens=tokens.cached,
+                reasoning_tokens=tokens.reasoning,
+                cache_write_tokens=tokens.cache_write,
+                total_tokens=tokens.total,
                 status=record.get("status", "") or "",
                 validated=bool(record.get("validated", False)),
             )
