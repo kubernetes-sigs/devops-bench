@@ -24,29 +24,29 @@ import pytest
 from devops_bench.agents.api.mcp import MCPClient, extract_tool_text
 
 
-def test_extract_tool_text_joins_text_blocks():
+def test_extract_tool_text_joins_text_blocks() -> None:
     blocks = [SimpleNamespace(text="alpha"), SimpleNamespace(text="beta")]
     assert extract_tool_text(SimpleNamespace(content=blocks)) == "alpha\nbeta"
 
 
-def test_extract_tool_text_skips_blocks_without_text():
+def test_extract_tool_text_skips_blocks_without_text() -> None:
     # A block missing ``.text`` must not crash; mixed lists fall through to the
     # text-only blocks.
     blocks = [SimpleNamespace(text="alpha"), SimpleNamespace()]
     assert extract_tool_text(SimpleNamespace(content=blocks)) == "alpha"
 
 
-def test_extract_tool_text_falls_back_to_str_when_no_blocks():
+def test_extract_tool_text_falls_back_to_str_when_no_blocks() -> None:
     obj = SimpleNamespace(content=[])
     assert extract_tool_text(obj) == str(obj)
 
 
-def test_extract_tool_text_falls_back_to_str_when_no_content_attr():
+def test_extract_tool_text_falls_back_to_str_when_no_content_attr() -> None:
     obj = SimpleNamespace()
     assert extract_tool_text(obj) == str(obj)
 
 
-def test_mcp_client_enter_rejects_empty_server_path():
+def test_mcp_client_enter_rejects_empty_server_path() -> None:
     # We must surface a clear error rather than spawning ``""``; ValueError
     # surfaces through the agent's _execute as an errored result (see
     # test_execute_returns_errored_on_empty_mcp_server_string).
@@ -55,7 +55,9 @@ def test_mcp_client_enter_rejects_empty_server_path():
         asyncio.run(client.__aenter__())
 
 
-def test_aenter_unwinds_exit_stack_when_session_setup_fails(monkeypatch):
+def test_aenter_unwinds_exit_stack_when_session_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If session setup fails after the stdio transport spawned the server,
     ``__aenter__`` must unwind its exit stack — ``__aexit__`` never runs when
     ``__aenter__`` raises, so without the unwind the server subprocess leaks
@@ -91,7 +93,9 @@ def test_aenter_unwinds_exit_stack_when_session_setup_fails(monkeypatch):
     assert state["transport_exited"] is True
 
 
-def test_call_tool_degrades_gracefully_when_deepeval_missing(monkeypatch):
+def test_call_tool_degrades_gracefully_when_deepeval_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If ``deepeval`` is not installed, ``call_tool`` still works (untraced).
 
     The legacy implementation imported ``deepeval.tracing.observe`` at the top
@@ -129,7 +133,7 @@ def test_call_tool_degrades_gracefully_when_deepeval_missing(monkeypatch):
     assert client.session.calls == [("t", {"k": "v"})]
 
 
-def test_mcp_module_does_not_import_sdk_at_module_load():
+def test_mcp_module_does_not_import_sdk_at_module_load() -> None:
     """Importing the module must not pull the ``mcp`` SDK — it loads on enter."""
     import subprocess
     import sys

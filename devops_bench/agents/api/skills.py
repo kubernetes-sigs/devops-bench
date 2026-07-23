@@ -75,9 +75,11 @@ def discover_skill_tools(
     Discovery goes through the shared
     :func:`~devops_bench.agents.shared.skills.iter_skills` walk, so semantics
     (expanduser, sorted order, first-wins dedupe, missing paths warned) are
-    identical across harnesses. The file content is captured at discovery time
-    so invoking a skill tool later serves the exact text that was advertised —
-    no re-read, no window for the file to change or vanish mid-run.
+    identical across harnesses; names that collide after tool-name
+    normalization are additionally deduped here, first-wins with a warning.
+    The file content is captured at discovery time so invoking a skill tool
+    later serves the exact text that was advertised — no re-read, no window
+    for the file to change or vanish mid-run.
 
     Performs blocking filesystem I/O; callers in async contexts should run this
     via :func:`asyncio.to_thread` to keep the event loop responsive.
@@ -99,9 +101,23 @@ def discover_skill_tools(
     tools: list[SkillToolInfo] = []
     resources: dict[str, str] = {}
     names: list[str] = []
+    seen_normalized: set[str] = set()
 
     for skill in iter_skills(paths):
         normalized = "skill_" + skill.name.replace("-", "_")
+        # iter_skills dedupes raw names, but distinct raw names can still
+        # normalize to the same tool name (``my-skill`` vs ``my_skill``) —
+        # first wins, so the advertised tool list never carries duplicates and
+        # ``resources`` is never silently overwritten.
+        if normalized in seen_normalized:
+            _log.warning(
+                "Skipping skill %r from %s: normalized tool name %r collides with an earlier skill",
+                skill.name,
+                skill.path,
+                normalized,
+            )
+            continue
+        seen_normalized.add(normalized)
         tools.append(
             SkillToolInfo(
                 name=normalized,
