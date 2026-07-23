@@ -115,6 +115,29 @@ def test_get_resource_with_name(mocker: MockerFixture) -> None:
     assert argv == ["kubectl", "get", "deployment", "my-dep", "-o", "json"]
 
 
+def test_get_resource_forwards_timeout(mocker: MockerFixture) -> None:
+    payload = {"items": []}
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout=json.dumps(payload)),
+    )
+
+    kubectl.get_resource("pods", timeout=30)
+
+    assert mock_run.call_args.kwargs["timeout"] == 30
+
+
+def test_get_resource_timeout_defaults_to_none(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout="{}"),
+    )
+
+    kubectl.get_resource("pods")
+
+    assert mock_run.call_args.kwargs["timeout"] is None
+
+
 def test_apply_builds_argv(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
 
