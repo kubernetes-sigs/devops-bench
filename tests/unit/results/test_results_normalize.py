@@ -87,12 +87,12 @@ def test_setup_id_matches_catalog_slug_for_dotted_model():
 # -- normalize_tokens --------------------------------------------------------
 
 
-def test_normalize_tokens_legacy_api_shape():
+def test_normalize_tokens_legacy_api_shape() -> None:
     tokens = {"prompt_tokens": 10, "candidates_tokens": 5, "total_tokens": 15}
     assert normalize_tokens(tokens) == (10, 5, None, None, None, 15)
 
 
-def test_normalize_tokens_canonical_shape():
+def test_normalize_tokens_canonical_shape() -> None:
     tokens = {
         "input": 7,
         "cached": 100,
@@ -114,7 +114,7 @@ def test_normalize_tokens_missing_yields_none():
     assert normalize_tokens(None) == (None, None, None, None, None, None)
 
 
-def test_normalize_tokens_none_valued_canonical_keys_fall_through():
+def test_normalize_tokens_none_valued_canonical_keys_fall_through() -> None:
     # A canonical dict with None buckets must not mask values under legacy keys.
     assert normalize_tokens({"input": None, "prompt_tokens": 9, "output": 2}) == (
         9,
@@ -297,7 +297,7 @@ def test_build_rows_propagates_validated():
     assert default_row.to_dict()["validated"] is False
 
 
-def test_build_rows_carries_cached_and_reasoning():
+def test_build_rows_carries_cached_and_reasoning() -> None:
     record = {
         "name": "t",
         "folder": "f",
@@ -320,7 +320,7 @@ def test_build_rows_carries_cached_and_reasoning():
     assert row.cache_write_tokens is None
 
 
-def test_build_rows_carries_cache_write():
+def test_build_rows_carries_cache_write() -> None:
     record = {
         "name": "t",
         "folder": "f",

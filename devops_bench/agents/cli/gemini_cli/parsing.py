@@ -21,10 +21,11 @@ list and pulls the final text and aggregated token usage from ``result`` events.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 from devops_bench.agents.result import ToolCall, empty_tokens
 
-__all__ = ["parse_stream_json"]
+__all__: list[str] = ["parse_stream_json"]
 
 
 def _int_or_none(value: object) -> int | None:
@@ -32,7 +33,7 @@ def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _canonical_tokens(stats: dict) -> dict:
+def _canonical_tokens(stats: Mapping[str, object]) -> dict[str, int | None]:
     """Map the terminal ``result.stats`` block onto the canonical token buckets.
 
     The CLI reports ``input_tokens`` as the *full* prompt with ``cached`` as a

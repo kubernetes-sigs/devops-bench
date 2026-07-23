@@ -19,12 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["ToolCall", "AgentResult", "TOKEN_BUCKETS", "empty_tokens"]
+__all__: list[str] = ["AgentResult", "TOKEN_BUCKETS", "ToolCall", "empty_tokens"]
 
 # Canonical token buckets every harness maps onto: ``input`` is the non-cached
 # prompt, ``cached`` is cache-read only (cache writes go in ``cache_write``),
 # ``output`` excludes ``reasoning``, and ``total`` is the sum of all buckets.
-TOKEN_BUCKETS = ("input", "cached", "cache_write", "reasoning", "output", "total")
+TOKEN_BUCKETS: tuple[str, ...] = ("input", "cached", "cache_write", "reasoning", "output", "total")
 
 
 def empty_tokens() -> dict[str, Any]:
