@@ -21,10 +21,43 @@ list and pulls the final text and aggregated token usage from ``result`` events.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
-from devops_bench.agents.result import ToolCall
+from devops_bench.agents.result import ToolCall, empty_tokens
 
-__all__ = ["parse_stream_json"]
+__all__: list[str] = ["parse_stream_json"]
+
+
+def _int_or_none(value: object) -> int | None:
+    """Coerce to ``int``, rejecting ``bool`` (a JSON ``true`` is not a count)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _canonical_tokens(stats: Mapping[str, object]) -> dict[str, int | None]:
+    """Map the terminal ``result.stats`` block onto the canonical token buckets.
+
+    The CLI reports ``input_tokens`` as the *full* prompt with ``cached`` as a
+    subset, and rolls thinking tokens into ``total_tokens`` only — so canonical
+    ``input`` is the difference, and ``reasoning`` is derived from the total gap
+    (``total - full_input - output``) when every part is reported. Both
+    subtractions are clamped at ``0`` so an over-reported ``cached`` (or a
+    rounding quirk) can never yield a negative bucket.
+    """
+    full_input = _int_or_none(stats.get("input_tokens"))
+    output = _int_or_none(stats.get("output_tokens"))
+    total = _int_or_none(stats.get("total_tokens"))
+    cached = _int_or_none(stats.get("cached"))
+    inp = (
+        max(full_input - cached, 0) if full_input is not None and cached is not None else full_input
+    )
+    reasoning = None
+    if full_input is not None and output is not None and total is not None:
+        gap = total - full_input - output
+        if gap >= 0:
+            reasoning = gap
+    tokens = empty_tokens()
+    tokens.update(input=inp, cached=cached, reasoning=reasoning, output=output, total=total)
+    return tokens
 
 
 def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
@@ -127,12 +160,7 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
             stats = event.get("stats")
             usage = event.get("tokens") or event.get("usage")
             if isinstance(stats, dict):
-                tokens = {
-                    "input": stats.get("input_tokens"),
-                    "output": stats.get("output_tokens"),
-                    "total": stats.get("total_tokens"),
-                    "cached": stats.get("cached"),
-                }
+                tokens = _canonical_tokens(stats)
             elif isinstance(usage, dict):
                 tokens = usage
 

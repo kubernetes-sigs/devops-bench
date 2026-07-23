@@ -351,7 +351,32 @@ def test_parse_stream_json_real_cli_schema() -> None:
             "status": "completed",
         },
     ]
-    assert tokens == {"input": 31225, "output": 35, "total": 31489, "cached": 12173}
+    # Canonical buckets: input excludes the cached subset, and reasoning is
+    # derived from the total gap (total - full_input - output = thinking).
+    assert tokens == {
+        "input": 31225 - 12173,
+        "cached": 12173,
+        "cache_write": None,
+        "reasoning": 31489 - 31225 - 35,
+        "output": 35,
+        "total": 31489,
+    }
+
+
+def test_parse_stream_json_clamps_input_when_cached_exceeds_full_input() -> None:
+    """A ``cached`` count larger than ``input_tokens`` must not push canonical
+    ``input`` negative — the difference clamps at 0."""
+    blob = _stream(
+        {
+            "type": "result",
+            "status": "success",
+            "stats": {"input_tokens": 100, "cached": 250, "output_tokens": 10},
+        },
+    )
+    _, _, tokens, errors = parse_stream_json(blob)
+    assert errors == []
+    assert tokens["input"] == 0
+    assert tokens["cached"] == 250
 
 
 def test_parse_stream_json_marks_failed_tool_result_status_field() -> None:
