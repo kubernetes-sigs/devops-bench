@@ -45,8 +45,14 @@ dependencies = [
 anthropic = ["anthropic>=0.104.1"]
 openai = ["openai>=1.0.0"]
 
+[project.scripts]
+devops-bench = "devops_bench.cli:main"
+
 [tool.hatch.version]
 path = "devops_bench/__init__.py"
+# Hatchling's default regex does not accept an annotated assignment
+# (``__version__: str = ...``), which the repo's type-hint guideline requires.
+pattern = "__version__: str = [\"'](?P<version>[^\"']+)[\"']"
 
 [tool.hatch.build.targets.wheel]
 packages = ["devops_bench"]

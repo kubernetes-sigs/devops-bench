@@ -15,6 +15,9 @@
 """Unit tests for devops_bench.core.run_env."""
 
 import os
+from pathlib import Path
+
+import pytest
 
 from devops_bench.core.run_env import RunEnv
 
@@ -62,6 +65,58 @@ def test_apply_sets_isolated_env_and_creates_dirs(monkeypatch, tmp_path):
     # gcloud config + tofu data dirs are created so the tools find them.
     assert (expected_dir / "gcloud").is_dir()
     assert (expected_dir / "tf-data").is_dir()
+
+
+def test_apply_publishes_parallel_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Swap in a copy so apply()'s mutations never touch the real environment.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("BENCH_PARALLEL", raising=False)
+
+    RunEnv.create(parallel=True, run_id="run-1", state_root=tmp_path).apply()
+
+    # Components constructed after apply() (e.g. the eval harness) read
+    # BENCH_PARALLEL from env, so flag-only parallel must be published.
+    assert os.environ["BENCH_PARALLEL"] == "true"
+
+
+def test_apply_does_not_publish_parallel_when_not_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("BENCH_PARALLEL", raising=False)
+
+    RunEnv.create(parallel=False, run_id="run-1").apply()
+
+    assert "BENCH_PARALLEL" not in os.environ
+
+
+def test_restore_undoes_apply_mutations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setenv("KUBECONFIG", "/original/kubeconfig")
+    added = ("CLOUDSDK_CONFIG", "TF_DATA_DIR", "RUN_ID", "BENCH_RUN_DIR", "BENCH_PARALLEL")
+    for var in added:
+        monkeypatch.delenv(var, raising=False)
+
+    run_env = RunEnv.create(parallel=True, run_id="run-1", state_root=tmp_path)
+    run_env.apply()
+    assert os.environ["BENCH_PARALLEL"] == "true"
+
+    run_env.restore()
+
+    # Pre-existing keys return to their prior values; added keys are removed.
+    assert os.environ["KUBECONFIG"] == "/original/kubeconfig"
+    for var in added:
+        assert var not in os.environ
+
+
+def test_restore_is_noop_without_apply(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    snapshot = dict(os.environ)
+
+    # Neither the non-isolated pass-through nor an isolated env whose apply()
+    # never ran may touch the environment on restore().
+    RunEnv.create(parallel=False, run_id="run-1").restore()
+    RunEnv.create(parallel=True, run_id="run-2", state_root=tmp_path).restore()
+
+    assert dict(os.environ) == snapshot
 
 
 def test_state_root_from_env(monkeypatch, tmp_path):

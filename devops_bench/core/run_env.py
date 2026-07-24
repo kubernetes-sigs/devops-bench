@@ -35,8 +35,9 @@ import hashlib
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from devops_bench.core.config import get_env
 from devops_bench.core.logging import get_logger
@@ -90,6 +91,21 @@ class RunEnv:
     kubeconfig_path: str | None
     gcloud_config_path: str | None
     tf_data_dir: str | None
+    # Pre-apply() values of the mutated env keys, captured so restore() can
+    # undo the mutation for library embedders; None marks a key that was absent.
+    _saved_env: dict[str, str | None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    #: Environment keys apply() writes and restore() puts back.
+    _MUTATED_KEYS: ClassVar[tuple[str, ...]] = (
+        "KUBECONFIG",
+        "CLOUDSDK_CONFIG",
+        "TF_DATA_DIR",
+        "RUN_ID",
+        "BENCH_RUN_DIR",
+        "BENCH_PARALLEL",
+    )
 
     @classmethod
     def create(
@@ -146,9 +162,17 @@ class RunEnv:
         A no-op when not isolated. Mutates ``os.environ`` so every subprocess
         spawned afterward (``gcloud`` / ``kubectl`` / ``tofu`` / agents)
         inherits the isolated kubeconfig, gcloud config, and tofu data dir.
+        Pair with :meth:`restore` so the mutations do not outlive the run in
+        a long-lived embedding process.
         """
         if not self.isolated:
             return
+        # Snapshot the prior values (None = absent) so restore() can undo.
+        object.__setattr__(
+            self,
+            "_saved_env",
+            {key: os.environ.get(key) for key in self._MUTATED_KEYS},
+        )
         self.run_dir.mkdir(parents=True, exist_ok=True)
         Path(self.gcloud_config_path).mkdir(parents=True, exist_ok=True)  # type: ignore[arg-type]
         Path(self.tf_data_dir).mkdir(parents=True, exist_ok=True)  # type: ignore[arg-type]
@@ -160,6 +184,11 @@ class RunEnv:
         # dir) can locate per-run paths without re-deriving them.
         os.environ["RUN_ID"] = self.run_id
         os.environ["BENCH_RUN_DIR"] = str(self.run_dir)
+        # Publish the parallel flag itself: components constructed after this
+        # point read ``BENCH_PARALLEL`` from env (e.g. the eval harness picking
+        # a free chaos port-forward port), and must observe parallel mode even
+        # when isolation was requested via a flag rather than the env.
+        os.environ["BENCH_PARALLEL"] = "true"
         _log.info(
             "run isolation active (run_id=%s): KUBECONFIG=%s CLOUDSDK_CONFIG=%s TF_DATA_DIR=%s",
             self.run_id,
@@ -167,6 +196,24 @@ class RunEnv:
             self.gcloud_config_path,
             self.tf_data_dir,
         )
+
+    def restore(self) -> None:
+        """Undo :meth:`apply`'s environment mutations.
+
+        Puts every key from the pre-apply snapshot back (removing keys that
+        were absent), so an isolated run does not leak ``BENCH_PARALLEL`` /
+        ``KUBECONFIG`` / etc. into a later serial invocation from the same
+        process. A no-op when not isolated or when :meth:`apply` never ran;
+        safe to call from a ``finally`` block.
+        """
+        if not self.isolated or self._saved_env is None:
+            return
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        object.__setattr__(self, "_saved_env", None)
 
     @property
     def cluster_token(self) -> str:
