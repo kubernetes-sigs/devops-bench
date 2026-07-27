@@ -600,6 +600,8 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "retrieval_context",
         "chaos_spec",
         "verification_spec",
+        "recoverable_safety",
+        "catastrophic",
         "chaos_report",
         "perf_report",
         "documentation",

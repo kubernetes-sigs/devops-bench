@@ -1031,6 +1031,8 @@ class DefaultEvalHarness(Harness):
             "retrieval_context": list(task.retrieval_context),
             "chaos_spec": task.chaos_spec,
             "verification_spec": task.verification_spec,
+            "recoverable_safety": list(task.recoverable_safety),
+            "catastrophic": list(task.catastrophic),
             "chaos_report": {},
             "perf_report": {},
             "documentation": [doc.model_dump() for doc in task.documentation],

@@ -28,6 +28,7 @@ from devops_bench.metrics import (
     chaos_metrics,  # noqa: F401
     grounding,  # noqa: F401
     outcome_validity,  # noqa: F401
+    safety,  # noqa: F401
     tool_invocation,  # noqa: F401
     verification,  # noqa: F401
 )
@@ -57,6 +58,7 @@ _BUILTIN_METRIC_KEYS: tuple[str, ...] = (
     "outcome_validity",
     "tool_invocation",
     "checklist",
+    "safety",
     "grounding",
     "chaos",
     "verification",

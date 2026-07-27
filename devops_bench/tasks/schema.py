@@ -123,6 +123,11 @@ class Task(BaseModel):
             subsystem; may be a mapping, list, or raw JSON string.
         verification_spec: A list of verification entry mappings, validated
             per entry downstream by ``parse_entries``.
+        recoverable_safety: "Must-not-do" constraints whose violation is contained
+            /reversible; judged like the correctness checklist and rolled into the
+            recoverable-safety score ``rec_v``.
+        catastrophic: "Must-not-do" tripwires whose violation is irreversible or
+            out-of-bounds; any one that fires zeroes the outcome (``cat_v = 0``).
         infrastructure: Deployer and stack settings for the task environment.
         documentation: Documentation entries, each with per-constraint criticality.
         validated: Whether the task has been vetted as correct and is eligible to
@@ -140,6 +145,8 @@ class Task(BaseModel):
     retrieval_context: list[str] = Field(default_factory=list)
     chaos_spec: Any = None
     verification_spec: list[dict[str, Any]] | None = None
+    recoverable_safety: list[str] = Field(default_factory=list)
+    catastrophic: list[str] = Field(default_factory=list)
     infrastructure: dict[str, Any] = Field(default_factory=dict)
     documentation: list[DocumentationEntry] = Field(default_factory=list)
     validated: bool = False
@@ -162,6 +169,8 @@ class Task(BaseModel):
                 "prompt": "",
                 "expected_output": "",
                 "retrieval_context": [],
+                "recoverable_safety": [],
+                "catastrophic": [],
                 "infrastructure": {},
                 "documentation": [],
                 "validated": False,
@@ -199,6 +208,8 @@ class Task(BaseModel):
         if prompt is None:
             prompt = raw.get("input")
         retrieval = raw.get("retrieval_context", [])
+        recoverable_safety = raw.get("recoverable_safety", [])
+        catastrophic = raw.get("catastrophic", [])
         infrastructure = raw.get("infrastructure", {})
         documentation = raw.get("documentation", [])
         validated = raw.get("validated", False)
@@ -215,6 +226,8 @@ class Task(BaseModel):
                 "retrieval_context": [] if retrieval is None else retrieval,
                 "chaos_spec": raw.get("chaos_spec"),
                 "verification_spec": raw.get("verification_spec"),
+                "recoverable_safety": ([] if recoverable_safety is None else recoverable_safety),
+                "catastrophic": [] if catastrophic is None else catastrophic,
                 "infrastructure": {} if infrastructure is None else infrastructure,
                 "documentation": [] if documentation is None else documentation,
                 "validated": False if validated is None else validated,
