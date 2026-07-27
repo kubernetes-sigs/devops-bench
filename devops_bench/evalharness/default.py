@@ -818,39 +818,6 @@ class DefaultEvalHarness(Harness):
 
         return result
 
-    #: Top-level keys present on **every** record (success and failed alike).
-    #: Exposed so downstream parsers / tests can pin the symmetric schema
-    #: without reproducing the literal in every spot.
-    _RECORD_KEYS: frozenset[str] = frozenset(
-        {
-            "input",
-            "output",
-            "latency",
-            "tokens",
-            "tools",
-            "trajectory",
-            "skills",
-            "name",
-            "folder",
-            "status",
-            "error",
-            "errors",
-            "scores",
-            "expected_output",
-            "expected_output_raw",
-            "retrieval_context",
-            "chaos_spec",
-            "verification_spec",
-            "chaos_report",
-            "perf_report",
-            "documentation",
-            "capabilities_granted",
-            "verification_parse_errors",
-            "generation_only",
-            "validated",
-        }
-    )
-
     def _build_success_record(
         self,
         *,
@@ -865,10 +832,10 @@ class DefaultEvalHarness(Harness):
         """Shape a typed :class:`AgentResult` + reports into the on-disk schema.
 
         Routes every typed value through ``to_dict()`` / ``model_dump()`` and
-        emits the **symmetric** key union (every key in :attr:`_RECORD_KEYS`
-        is present on every record), so success and failed records never differ
-        in top-level shape — a downstream parser iterating one shape can never
-        ``KeyError`` crossing into the other.
+        emits the **symmetric** key union (every key is present on every
+        record), so success and failed records never differ in top-level
+        shape — a downstream parser iterating one shape can never ``KeyError``
+        crossing into the other.
 
         Capability metadata (``capabilities_granted``) is recorded so metrics
         / downstream consumers can read what the agent was actually granted
@@ -924,11 +891,11 @@ class DefaultEvalHarness(Harness):
     ) -> dict[str, Any]:
         """Build a failed-task record so the failure stays visible.
 
-        Emits the **same** top-level key set as :meth:`_build_success_record`
-        (pinned in :attr:`_RECORD_KEYS`): a downstream parser iterating either
-        shape never trips a ``KeyError`` crossing between them. The differences
-        are values only — ``status=\"failed\"``, ``error`` carries the
-        exception text, ``scores`` stays empty.
+        Emits the **same** top-level key set as :meth:`_build_success_record`:
+        a downstream parser iterating either shape never trips a ``KeyError``
+        crossing between them. The differences are values only —
+        ``status=\"failed\"``, ``error`` carries the exception text, ``scores``
+        stays empty.
 
         Args:
             task: The task that failed.

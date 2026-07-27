@@ -400,7 +400,7 @@ def test_resolve_deployment_and_namespace_precedence_and_types(
     assert ns == "456"
 
 
-# --- results.json schema (Decision D3): _RECORD_KEYS is the source of truth ---
+# --- results.json schema (Decision D3) ---
 
 # Pinned symmetric key set. Every key must be present on *both* the success and
 # failed record, so a downstream parser iterating one shape never KeyErrors on
@@ -466,11 +466,6 @@ def _stub_agent_result() -> AgentResult:
         tokens={"input": 10, "output": 5},
         latency=1.5,
     )
-
-
-def test_record_keys_class_constant_matches_golden(isolated_env: None) -> None:
-    """``_RECORD_KEYS`` is the authoritative schema; pin it against the golden set."""
-    assert DefaultEvalHarness._RECORD_KEYS == _RESULTS_JSON_REQUIRED_KEYS  # noqa: SLF001
 
 
 def test_success_record_keys_match_golden(isolated_env: None) -> None:
