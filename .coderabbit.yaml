@@ -19,6 +19,10 @@ reviews:
       instructions: |
         Review against Python 3.12+ idioms. All Python code must include type hints. Ensure docstrings are provided for public classes and functions. Enforce `uv` for dependency/environment management and `ruff` for linting and formatting. Ensure Apache 2.0 license headers are present on all new source files.
 
+    - path: "{devops_bench,docs}/**"
+      instructions: |
+        Flag vendor-specific terminology (GKE, GCP, gcloud, Google Cloud) in user-facing surfaces: docstrings, CLI help text, error messages, public API names, and docs. The benchmark is vendor-neutral. Also flag generic framework layers (core, evalharness, run/cli, tasks, metrics) reading provider-specific environment variables such as GCP_PROJECT_ID — provider resolution belongs in devops_bench/providers/ and deployer implementations. Provider-specific terms are acceptable only in those provider modules, in tf/, or when naming a real provider artifact. Suggest neutral phrasing such as "cloud project id" or "target Kubernetes cluster" elsewhere.
+
     - path: "tests/**/*.py"
       instructions: |
         Verify unit test coverage, fixture scoping, mock usage, and pytest assertions. Ensure test functions have proper type annotations and clean structure.

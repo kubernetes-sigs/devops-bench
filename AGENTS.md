@@ -7,6 +7,7 @@
 - **Dependencies**: Do NOT use `pip`, `virtualenv`, or `poetry`. Exclusively use **`uv`** for dependency and environment management.
 - **Linting & Formatting**: Do NOT use `black` or `flake8`. Exclusively use **`ruff`**.
 - **Documentation**: Provide clear, concise docstrings for public functions and classes.
+- **Vendor neutrality**: User-facing text (docstrings, CLI help, error messages, docs) and the generic framework layers must be vendor-neutral. Provider-specific terms and environment variables (GKE, GCP, `gcloud`, `GCP_PROJECT_ID`, ...) belong only in provider-specific modules (`devops_bench/providers/`, deployer implementations, `tf/`) or where they name a real provider artifact.
 
 ## Development Workflow
 All commands should be run from the project root.
