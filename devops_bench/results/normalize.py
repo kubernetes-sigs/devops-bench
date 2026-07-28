@@ -29,7 +29,11 @@ from typing import Any, NamedTuple
 from devops_bench.results.row import Manifest, ResultRow
 
 __all__ = [
+    "CATASTROPHIC_SCORE_KEY",
+    "CORRECTNESS_FALLBACK_KEY",
+    "CORRECTNESS_SCORE_KEY",
     "OUTCOME_SCORE_KEY",
+    "RECOVERABLE_SAFETY_SCORE_KEY",
     "TOOL_SCORE_KEY",
     "NormalizedTokens",
     "build_rows",
@@ -40,11 +44,18 @@ __all__ = [
     "slugify",
 ]
 
-#: ``res["scores"]`` keys the flat ``outcomeScore`` / ``toolScore`` are read
-#: from. These match the ``MetricScore.name`` of the builtin outcome and tool
-#: metrics.
-OUTCOME_SCORE_KEY = "OutcomeValidity"
+#: ``res["scores"]`` keys the flat row fields are read from. These match the
+#: ``MetricScore.name`` (and the composite key) emitted by the metrics layer;
+#: kept as literals here so the results layer stays free of the metrics/SDK
+#: import (it only extracts, never scores).
+OUTCOME_SCORE_KEY = "OutcomeScore"
 TOOL_SCORE_KEY = "ToolInvocation"
+#: Correctness ``c`` is the checklist score, falling back to OutcomeValidity for
+#: tasks that define no checklist.
+CORRECTNESS_SCORE_KEY = "ChecklistScore"
+CORRECTNESS_FALLBACK_KEY = "OutcomeValidity"
+RECOVERABLE_SAFETY_SCORE_KEY = "RecoverableSafety"
+CATASTROPHIC_SCORE_KEY = "Catastrophic"
 
 # Token usage aliases per provider, in lookup priority. The canonical keys
 # (``input`` / ``cached`` / ``reasoning`` / ``output``; see
@@ -221,6 +232,22 @@ def extract_score(scores: Mapping[str, Any] | None, key: str) -> float | None:
     return None
 
 
+def _scoring_version(scores: Mapping[str, Any] | None) -> str:
+    """Read the scoring-framework version stamped on the composite entry.
+
+    Args:
+        scores: The record's ``scores`` mapping, or ``None``.
+
+    Returns:
+        The ``version`` string on the ``OutcomeScore`` entry, or ``""`` when
+        absent (unscored record, or a row predating the scoring framework).
+    """
+    entry = (scores or {}).get(OUTCOME_SCORE_KEY)
+    if isinstance(entry, Mapping) and isinstance(entry.get("version"), str):
+        return entry["version"]
+    return ""
+
+
 def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list[ResultRow]:
     """Flatten harness result records into :class:`ResultRow` rows for one run.
 
@@ -240,6 +267,10 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
     for record in records:
         scores = record.get("scores")
         tokens = normalize_tokens(record.get("tokens"))
+        correctness = extract_score(scores, CORRECTNESS_SCORE_KEY)
+        if correctness is None:
+            correctness = extract_score(scores, CORRECTNESS_FALLBACK_KEY)
+        catastrophic_score = extract_score(scores, CATASTROPHIC_SCORE_KEY)
         rows.append(
             ResultRow(
                 setup_id=manifest.setup_id,
@@ -252,6 +283,10 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 task_name=record.get("name", "") or "",
                 iteration=0,
                 outcome_score=extract_score(scores, OUTCOME_SCORE_KEY),
+                correctness_score=correctness,
+                recoverable_safety_score=extract_score(scores, RECOVERABLE_SAFETY_SCORE_KEY),
+                catastrophic=catastrophic_score == 0.0,
+                scoring_version=_scoring_version(scores),
                 tool_score=extract_score(scores, TOOL_SCORE_KEY),
                 latency_sec=float(record.get("latency") or 0.0),
                 input_tokens=tokens.input,

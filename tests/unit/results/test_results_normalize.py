@@ -188,6 +188,10 @@ def test_build_rows_success_record():
         "taskName": "Rotate Secret",
         "iteration": 0,
         "outcomeScore": 0.9,
+        "correctnessScore": None,
+        "recoverableSafetyScore": None,
+        "catastrophic": False,
+        "scoringVersion": "",
         "toolScore": 0.7,
         "latencySec": 42.5,
         "inputTokens": 100,
@@ -199,6 +203,64 @@ def test_build_rows_success_record():
         "status": "success",
         "validated": False,
     }
+
+
+def test_build_rows_maps_all_v1_score_components():
+    record = {
+        "name": "Optimize Scale",
+        "folder": "task_017",
+        "status": "success",
+        "scores": {
+            "OutcomeScore": {"score": 0.82, "version": "v1", "reason": "..."},
+            "ChecklistScore": {"score": 0.9, "success": True, "reason": "3/3"},
+            "RecoverableSafety": {"score": 0.55, "success": False, "reason": "1/2"},
+            "Catastrophic": {"score": 1.0, "success": True, "reason": "0 fired"},
+        },
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["outcomeScore"] == 0.82
+    assert d["correctnessScore"] == 0.9
+    assert d["recoverableSafetyScore"] == 0.55
+    assert d["catastrophic"] is False
+    assert d["scoringVersion"] == "v1"
+
+
+def test_build_rows_flags_catastrophic_and_zeroed_outcome():
+    record = {
+        "name": "Nuked prod",
+        "folder": "task_x",
+        "status": "success",
+        "scores": {
+            "OutcomeScore": {"score": 0.0, "version": "v1", "reason": "cat_v=0"},
+            "ChecklistScore": {"score": 1.0, "success": True},
+            "Catastrophic": {"score": 0.0, "success": False, "reason": "1 fired"},
+        },
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["catastrophic"] is True
+    assert d["outcomeScore"] == 0.0
+    assert d["correctnessScore"] == 1.0
+
+
+def test_build_rows_correctness_falls_back_to_outcome_validity():
+    # A task with no checklist: correctness comes from OutcomeValidity instead.
+    record = {
+        "name": "No checklist",
+        "folder": "task_y",
+        "status": "success",
+        "scores": {
+            "OutcomeScore": {"score": 0.7, "version": "v1"},
+            "OutcomeValidity": {"score": 0.7, "success": False},
+        },
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["correctnessScore"] == 0.7
 
 
 def test_build_rows_failed_record_has_null_scores_and_tokens():
@@ -244,6 +306,11 @@ def test_result_row_keys_match_typescript_interface():
     Pinned so the producer and the ``site/src/lib/schema.d.ts`` consumer
     cannot drift apart silently. The contract version lives on the manifest, not
     on each row, so ``schemaVersion`` is intentionally absent here.
+
+    NOTE: the scoring-framework v1 fields (``correctnessScore`` /
+    ``recoverableSafetyScore`` / ``catastrophic`` / ``scoringVersion``, and the
+    ``outcomeScore`` re-semantics) are produced here first; the TS interface and
+    the ingest validators are updated in the frontend-phase rollout.
     """
     ts_result_row_fields = {
         "setupId",
@@ -257,6 +324,10 @@ def test_result_row_keys_match_typescript_interface():
         "iteration",
         "status",
         "outcomeScore",
+        "correctnessScore",
+        "recoverableSafetyScore",
+        "catastrophic",
+        "scoringVersion",
         "toolScore",
         "latencySec",
         "inputTokens",

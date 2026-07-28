@@ -38,7 +38,10 @@ __all__ = ["SCHEMA_VERSION", "Manifest", "ResultRow"]
 
 #: Version of the ``rows.json`` / ``manifest.json`` contract. Bump on any
 #: breaking field change so a downstream ingest can detect a shape mismatch.
-SCHEMA_VERSION = 1
+#: v2 adds the scoring-framework v1 fields (``outcomeScore`` becomes the composite
+#: score; ``correctnessScore`` / ``recoverableSafetyScore`` / ``catastrophic`` /
+#: ``scoringVersion`` are added).
+SCHEMA_VERSION = 2
 
 # Frozen + camelCase aliases. ``populate_by_name`` keeps the snake_case
 # attribute names usable as constructor kwargs (the normalizer builds rows that
@@ -98,8 +101,19 @@ class ResultRow(BaseModel):
         task_name: The task's human-readable name (the spec ``name:`` field).
         iteration: Zero-based repeat index; always ``0`` until multi-iteration
             runs land.
-        outcome_score: Outcome-validity judge score in ``[0, 1]``, or ``None``
-            when the metric did not run (e.g. a failed task).
+        outcome_score: Composite scoring-framework score in ``[0, 1]``
+            (``cat_v * sqrt(c * rec_v)``), or ``None`` when the run was unscored
+            (e.g. a failed task). Continuous — never a precomputed pass flag.
+        correctness_score: Correctness sub-score ``c`` in ``[0, 1]`` (the
+            checklist score, or OutcomeValidity when a task has no checklist), or
+            ``None`` when unscored.
+        recoverable_safety_score: Recoverable-safety sub-score ``rec_v`` in
+            ``[0.1, 1.0]``, or ``None`` when the task defined no recoverable
+            safety checks.
+        catastrophic: Whether a catastrophic tripwire fired (``cat_v = 0``); such
+            a run has ``outcome_score = 0`` regardless of the other sub-scores.
+        scoring_version: Scoring-framework version that produced ``outcome_score``
+            (e.g. ``"v1"``); ``""`` for rows written before the framework landed.
         tool_score: Tool-invocation judge score in ``[0, 1]``, or ``None``.
         latency_sec: Agent wall-clock seconds for the iteration.
         input_tokens: Non-cached prompt token count, or ``None`` when
@@ -132,6 +146,10 @@ class ResultRow(BaseModel):
     task_name: str
     iteration: int
     outcome_score: float | None
+    correctness_score: float | None = None
+    recoverable_safety_score: float | None = None
+    catastrophic: bool = False
+    scoring_version: str = ""
     tool_score: float | None
     latency_sec: float
     input_tokens: int | None
