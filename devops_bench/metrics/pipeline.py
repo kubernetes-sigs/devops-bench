@@ -291,6 +291,12 @@ def evaluate_metrics_batch(
                     res.get("name"),
                 )
         # Assemble the versioned composite from the sub-scores once every metric
-        # has run, so it can read the checklist / safety outputs above.
-        _finalize_outcome_score(scores)
+        # has run, so it can read the checklist / safety outputs above. Guarded
+        # like the metric loop: a malformed sub-score raises out of the scoring
+        # formula, and must cost this record its composite rather than abort the
+        # remaining records in the batch.
+        try:
+            _finalize_outcome_score(scores)
+        except Exception:  # noqa: BLE001 - one record must not abort the batch
+            _log.exception("composite outcome score failed for %s", res.get("name"))
         res["scores"] = scores

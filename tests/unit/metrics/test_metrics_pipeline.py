@@ -657,3 +657,27 @@ def test_finalize_skips_when_no_correctness_signal() -> None:
     scores = {"ToolInvocation": {"score": 0.5, "success": True}}
     pipeline._finalize_outcome_score(scores)  # noqa: SLF001
     assert pipeline.OUTCOME_SCORE_KEY not in scores
+
+
+def test_batch_survives_a_failing_composite_assembly(mocker) -> None:
+    # compute_outcome_score_v1 raises on an out-of-range sub-score. Assembly runs
+    # inside the per-record loop, so an unguarded raise would abandon every later
+    # record. The offending record loses only its composite.
+    _patch_judges(mocker)
+    mocker.patch.object(pipeline, "LLMTestCase")
+    mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
+    mocker.patch.object(
+        pipeline,
+        "_finalize_outcome_score",
+        side_effect=[ValueError("correctness must be in [0, 1]"), None],
+    )
+    results = [
+        _base_result(expected_output="App deployed"),
+        _base_result(expected_output="App deployed"),
+    ]
+
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=True)
+
+    # Both records still scored; neither was dropped by the raise.
+    assert "OutcomeValidity" in results[0]["scores"]
+    assert "OutcomeValidity" in results[1]["scores"]
