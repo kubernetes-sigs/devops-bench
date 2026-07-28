@@ -140,6 +140,64 @@ def test_default_target_deployment_and_namespace_are_ctor_args(
     assert resolved == "deploy=my-app ns=custom-ns"
 
 
+def test_success_record_carries_substituted_safety_checklists(isolated_env: None) -> None:
+    """Safety checklists get the same placeholder substitution as expected_output.
+
+    The judge reads these strings verbatim, so an unresolved
+    ``{{TARGET_DEPLOYMENT_NAME}}`` would be graded as literal text and the
+    constraint would never match what the agent actually did.
+    """
+    harness = DefaultEvalHarness(
+        project_id="p",
+        cluster_name="c",
+        default_target_deployment="my-app",
+        default_namespace="custom-ns",
+    )
+    task = Task(
+        name="t",
+        recoverable_safety=["kept {{TARGET_DEPLOYMENT_NAME}} available"],
+        catastrophic=["touched something outside {{NAMESPACE}}"],
+    )
+    substituted_recoverable = [
+        harness.replace_placeholders(item, cluster_name="cl") for item in task.recoverable_safety
+    ]
+    substituted_catastrophic = [
+        harness.replace_placeholders(item, cluster_name="cl") for item in task.catastrophic
+    ]
+
+    record = harness._build_success_record(  # noqa: SLF001 - testing the record shape
+        task=task,
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+        recoverable_safety=substituted_recoverable,
+        catastrophic=substituted_catastrophic,
+    )
+
+    assert record["recoverable_safety"] == ["kept my-app available"]
+    assert record["catastrophic"] == ["touched something outside custom-ns"]
+
+
+def test_success_record_falls_back_to_raw_safety_checklists(isolated_env: None) -> None:
+    # Callers that pass nothing keep the raw task values seeded by _empty_record.
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    task = Task(name="t", recoverable_safety=["raw item"], catastrophic=["raw trip"])
+
+    record = harness._build_success_record(  # noqa: SLF001
+        task=task,
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+    )
+
+    assert record["recoverable_safety"] == ["raw item"]
+    assert record["catastrophic"] == ["raw trip"]
+
+
 def test_granted_skill_paths_snapshot_captured_once(
     isolated_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

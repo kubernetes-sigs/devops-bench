@@ -805,6 +805,14 @@ class DefaultEvalHarness(Harness):
             expected_output = self.replace_placeholders(
                 task.expected_output, active_cluster_name, target_dep, ns
             )
+            recoverable_safety = [
+                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
+                for item in task.recoverable_safety
+            ]
+            catastrophic = [
+                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
+                for item in task.catastrophic
+            ]
 
             chaos_report, perf_report = self._drain_scenario(scenario_manager, scenario_thread)
 
@@ -828,6 +836,8 @@ class DefaultEvalHarness(Harness):
                 verification_parse_errors=verification_parse_errors,
                 verification_report=verification_report,
                 verification_status=verification_status,
+                recoverable_safety=recoverable_safety,
+                catastrophic=catastrophic,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
@@ -889,6 +899,8 @@ class DefaultEvalHarness(Harness):
         verification_parse_errors: list[dict[str, str]] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "evaluated",
+        recoverable_safety: list[str] | None = None,
+        catastrophic: list[str] | None = None,
     ) -> dict[str, Any]:
         """Shape a typed :class:`AgentResult` + reports into the on-disk schema.
 
@@ -934,6 +946,16 @@ class DefaultEvalHarness(Harness):
                 # same key on the success shape (None when nothing went wrong).
                 "error": agent_errors[0] if agent_errors else None,
                 "expected_output": expected_output,
+                # Placeholder-substituted safety checklists, falling back to the
+                # raw task values seeded by ``_empty_record`` when unresolved.
+                "recoverable_safety": (
+                    list(recoverable_safety)
+                    if recoverable_safety is not None
+                    else list(task.recoverable_safety)
+                ),
+                "catastrophic": (
+                    list(catastrophic) if catastrophic is not None else list(task.catastrophic)
+                ),
                 "chaos_report": chaos_report,
                 "perf_report": perf_report,
                 "verification_parse_errors": list(verification_parse_errors or []),
