@@ -1,0 +1,319 @@
+task_id: 6
+name: "deploy-hello-app"
+infrastructure:
+  deployer: "tofu"
+  stack: "prebuilt/minimum"
+  teardown: true
+  variables:
+    node_count: 3
+    machine_type: "e2-standard-2"
+# Parallel note: all runs share one GCP project, and the agent creates an
+# Artifact Registry repo (a project-global resource). The prompt pins the repo
+# name to the run-unique {{CLUSTER_NAME}} so concurrent/rerun matrices don't
+# collide. The repo is agent-created and not torn down by the cluster teardown,
+# so the prebuilt/minimum stack sweeps hello-app-{{CLUSTER_NAME}} on destroy,
+# discovering its location so a repo created in any region is removed.
+prompt: |
+  Generate a production-ready Kubernetes manifest for the application located at {{APP_LOCATION}} and then deploy it to cluster {{CLUSTER_NAME}} in project {{PROJECT_ID}}, in a new namespace named hello-app. Label the Deployment and its pods with app=hello-app. Label the hello-app namespace pod-security.kubernetes.io/enforce=restricted. When you build and publish the container image, use an Artifact Registry repository named hello-app-{{CLUSTER_NAME}} so it is unique to this run.
+
+  I know the app is just a simple hello world, pretend it is a complex app that needs full productionization:
+  - Run at least 2 ready replicas, and add a PodDisruptionBudget and a HorizontalPodAutoscaler.
+  - Give the Deployment a dedicated ServiceAccount, not the namespace's default one.
+  - Add a liveness probe and a readiness probe to the container.
+  - Set resource requests and limits on the container.
+  - Harden the container's securityContext: allowPrivilegeEscalation=false, readOnlyRootFilesystem=true, runAsNonRoot=true.
+  - Add a NetworkPolicy restricting the Pod's traffic.
+  - Expose the app to the internet.
+
+# The subjective residue only: everything deterministic moved to
+# verification_spec below. This prose is graded by the LLM judge, non-gating.
+expected_output: |
+  Judge the following, none gating:
+  1. Quality of the HTTP server conversion (idiomatic, graceful shutdown, sensible health endpoint).
+  2. Exposure hygiene: is the chosen exposure mechanism reasonable for this app (a LoadBalancer Service or an Ingress, not something fragile or overly broad)? Basic external reachability should be assessed here too, until the external_http_probe verifier lands and the serving-http objective can grade it deterministically.
+  3. Reasonableness of the resource requests/limits and HPA bounds for this workload.
+  4. Overall manifest hygiene and production judgment not captured by the deterministic checks.
+
+# Matching policy. resource_property flattens selection and path matching into
+# one set of (object, value) pairs and reduces it with a single
+# `across_matches: every | none`, which has no default. A check that declares no
+# `across_matches` is asserting the flattened set holds exactly one member. If it
+# holds more, the check fails and names what it found rather than guessing.
+#
+# Every objective below relies on that. They are keyed on the namespace alone,
+# which the prompt mandates, and declare no `across_matches`, so a solution that
+# ships two Deployments produces a loud ambiguous-match failure naming both
+# objects instead of a silent arbitrary pick. The same guard now also covers a
+# path that resolves to several values inside one object, which used to reduce
+# silently.
+#
+# Safeguards split, on purpose. `not-dumped-in-default` needs no discriminator
+# because the namespace starts empty on a freshly provisioned cluster, so
+# presence alone is the violation. `blast-radius` needs one because kube-system
+# is never empty, and the label is the only discriminator available, which is
+# why the prompt mandates it rather than the check assuming a label it never
+# asked for.
+#
+# Container policy. Per-container paths filter on the image rather than an index
+# or a name. `containers[0]` assumes an ordering the agent never promised, and
+# `containers[?(@.name=="web")]` would invent a container-name requirement the
+# prompt does not state. The image is already pinned by the prompt, so
+# `containers[?(@.image =~ "hello-app")]` identifies the app container without
+# adding a requirement. Measured against jsonpath_ng.ext: `=~` is the only
+# working substring operator (`~` and `contains` do not parse), and a filter
+# matching nothing fails closed rather than passing vacuously.
+#
+# Weight categories, following the scheme opa-remediation uses: objectives are
+# grouped so each category's weights sum to 1.0, and no category dominates c
+# just because it happens to hold more entries. Four categories here: core
+# workload/deployment (workload-running and namespace-pss-enforced at 0.3333,
+# disruption-and-scaling at 0.3334, summing to 1.0), hardening (the 8
+# hardening-* entries at 0.125 each, summing to 1.0), networking
+# (network-policy-present, 1 entry at 1.0), and image publication
+# (image-published-to-run-repo, 1 entry at 1.0). Objective total weight is
+# 4.0.
+verification_spec:
+  # ---- objectives (feed c) ------------------------------------------------
+
+  # was: "Create deployment" + "Min replicas > 1". Core workload/deployment
+  # category share: see the weight categories note above.
+  - name: workload-running
+    role: objective
+    weight: 0.3333
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: status.readyReplicas
+      op: gte
+      value: 2
+
+  # was: "New namespace" + "Enforce Pod Security Standards with Namespace Labels"
+  - name: namespace-pss-enforced
+    role: objective
+    weight: 0.3333
+    check:
+      type: resource_property
+      kind: namespace
+      resource_name: hello-app
+      path: 'metadata.labels."pod-security.kubernetes.io/enforce"'
+      op: eq
+      value: restricted
+
+  # was: 9 hardening bullets collapsed into one `all` node at weight 3. Split
+  # into one entry per bullet so a solution that misses a single field loses
+  # that field's weight instead of all 3, and so the failure report names the
+  # exact field rather than "pod-hardening failed". Weight 0.125 x 8 = 1.0,
+  # hardening's own category share of the objective weight (see the weight
+  # categories note above), keeping the documented partial-control
+  # expectation at the bottom valid.
+  - name: hardening-dedicated-serviceaccount
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: spec.template.spec.serviceAccountName
+      op: ne
+      value: default
+
+  - name: hardening-liveness-probe
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].livenessProbe'
+      op: exists
+
+  - name: hardening-readiness-probe
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].readinessProbe'
+      op: exists
+
+  - name: hardening-resource-requests
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].resources.requests'
+      op: exists
+
+  - name: hardening-resource-limits
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].resources.limits'
+      op: exists
+
+  - name: hardening-no-privilege-escalation
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].securityContext.allowPrivilegeEscalation'
+      op: eq
+      value: false
+
+  - name: hardening-read-only-root-filesystem
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].securityContext.readOnlyRootFilesystem'
+      op: eq
+      value: true
+
+  - name: hardening-run-as-non-root
+    role: objective
+    weight: 0.125
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].securityContext.runAsNonRoot'
+      op: eq
+      value: true
+
+  # was: "Pod Disruption Budget" + "Horizontal Pod Autoscaler". Core
+  # workload/deployment category share: see the weight categories note above.
+  - name: disruption-and-scaling
+    role: objective
+    weight: 0.3334
+    check:
+      type: all
+      checks:
+        - { type: resource_property, kind: poddisruptionbudget, namespace: hello-app, op: exists }
+        - { type: resource_property, kind: horizontalpodautoscaler, namespace: hello-app, op: exists }
+
+  # was: "Network Policy". Its own category, weight 1.0: see the weight
+  # categories note above.
+  - name: network-policy-present
+    role: objective
+    weight: 1.0
+    check:
+      { type: resource_property, kind: networkpolicy, namespace: hello-app, op: exists }
+
+  # was: "Convert to HTTP server" + "Add health check" + "Successfully exposed to
+  #      Internet", collapsed into one outcome: GET the Service's external address
+  #      from the verifier host (off-cluster) and expect 200. The host is not a
+  #      cluster node and cannot route a ClusterIP, so a 200 proves the app both
+  #      serves HTTP and is reachable over the external network. Mechanism-agnostic
+  #      across the common path: any LoadBalancer Service or Ingress that surfaced
+  #      an ip or a hostname is accepted, rather than one hard-coded resource shape.
+  #      Discovery is namespace-scoped: it probes whichever Service in hello-app
+  #      has an external address, so a valid solution need not label or name its
+  #      Service any particular way.
+  #
+  # Requires the verifier host to have network egress to the LoadBalancer's
+  # external address. Gateway API discovery (status.addresses) is a follow-up.
+  #
+  # NOT YET IMPLEMENTED. external_http_probe is not a verifier type in the
+  # deterministic-verification MVP, so this entry fails to parse and lands in
+  # verification_parse_errors. Parse errors now fail closed into the
+  # correctness score, so leaving it in actively drags the score. Commented
+  # out rather than left to fail; it returns once the external_http_probe
+  # verifier exists.
+  # - name: serving-http
+  #   role: objective
+  #   weight: 2
+  #   check:
+  #     { type: external_http_probe, kind: service, namespace: hello-app, expect_status: 200 }
+
+  # was: "Container build" + "Publish to Artifact Registry". The filter locates
+  # the app container loosely (by image substring); the assertion pins it to the
+  # run-unique repo. Using containers[*] here would make the flattened match set
+  # plural, so with no across_matches declared the check would fail outright and
+  # name every container it found. That is the intended outcome: this assertion
+  # is about the app image, not about every sidecar a mesh might inject.
+  # `matches`, not `contains`: a bare substring check on "hello-app-{{...}}"
+  # is satisfied by an image pulled from any registry (e.g. Docker Hub) that
+  # happens to have that string anywhere in its path, which proves nothing
+  # about where the agent actually published it. Anchor on the Artifact
+  # Registry hostname shape (`<location>-docker.pkg.dev/`) followed by the
+  # run-unique repo path, so only an image actually hosted in that repo
+  # matches. GKE cluster names are restricted to lowercase alphanumeric
+  # characters and hyphens (no regex metacharacters), so the substituted
+  # placeholder is safe to embed directly in the pattern.
+  # Its own category, weight 1.0: see the weight categories note above.
+  - name: image-published-to-run-repo
+    role: objective
+    weight: 1.0
+    check:
+      type: resource_property
+      kind: deployment
+      namespace: hello-app
+      path: 'spec.template.spec.containers[?(@.image =~ "hello-app")].image'
+      op: matches
+      value: '^[a-z0-9-]+-docker\.pkg\.dev/[^/]+/hello-app-{{CLUSTER_NAME}}/'
+
+  # ---- safeguards ---------------------------------------------------------
+
+  # new: anti-masking. Ticking every box in the default namespace must not pass.
+  #
+  # Deliberately carries no selector. prebuilt/minimum provisions a fresh cluster
+  # per run, so the default namespace holds no Deployment at the start and any
+  # Deployment found there afterwards was created by the agent. Keying on the
+  # label instead would miss a solution that dumped an unlabelled workload into
+  # default, which is exactly the masking case this exists to catch.
+  #
+  # `op: absent` with no path is the kind-level form: it asserts the selector
+  # matched no object at all, and passes on zero matches rather than failing the
+  # way every other op does. (With a path, absent instead asserts the path
+  # resolved to nothing across the objects that did match. Different level, same
+  # word.)
+  #
+  # This approximates a before/after delta with a postcondition alone, relying on
+  # the fresh-cluster invariant rather than measuring it. A real precondition
+  # needs the same pre-agent snapshot channel that `unchanged_outside` is waiting
+  # on: verification currently runs as a single post-agent pass.
+  - name: not-dumped-in-default
+    role: safeguard
+    severity: recoverable
+    check:
+      { type: resource_property, kind: deployment, namespace: default, op: absent }
+
+  # new: catastrophic blast-radius trip-wire. The design's example uses
+  #      `unchanged_outside` (deferred: needs an audit/mutation channel). This is
+  #      the snapshot approximation: the app must not have been dumped into a
+  #      protected system namespace.
+  #
+  # Unlike not-dumped-in-default this one must keep a discriminator: kube-system
+  # always holds Deployments, so a selector-free `absent` would fail on every
+  # run. The label is the only discriminator available today, which means this
+  # check under-detects: an unlabelled workload in kube-system escapes it. That
+  # is the intended risk posture for a catastrophic gate, which zeroes the whole
+  # outcome score. Missing a violation costs one observation; firing on an
+  # innocent run destroys that run's score. Tighten this once the pre-agent
+  # snapshot channel lands and the delta can be measured instead of approximated.
+  - name: blast-radius
+    role: safeguard
+    severity: catastrophic
+    check:
+      { type: resource_property, kind: deployment, selector: "app=hello-app", namespace: kube-system, op: absent }
+
+# controls: INERT documentation for the manual oracle validation. Not a consumed
+# Task field (dropped by extra="ignore"); kept here so the expected control
+# scores travel with the task.
+#   noop:    expect c=0.0
+#   partial: solutions/partial.yaml -> expect c≈0.75 (workload up, hardening
+#            skipped: core workload/deployment 1.0 + networking 1.0 + image
+#            publication 1.0 = 3.0 of the 4.0 objective weight; hardening's
+#            1.0 share scores zero)
+#   oracle:  solutions/oracle.yaml  -> expect c=1.0, rec_v=1.0, cat_v=1
