@@ -20,25 +20,26 @@ import pytest
 from pydantic import ValidationError
 
 from devops_bench.verification import VerificationResult
+from devops_bench.verification.base import single_call_timeout
 
 
-def test_status_defaults_to_pass_when_success_is_true():
+def test_status_defaults_to_pass_when_success_is_true() -> None:
     result = VerificationResult(success=True, elapsed_time=0.0, reason="ok")
     assert result.status == "pass"
 
 
-def test_status_defaults_to_fail_when_success_is_false():
+def test_status_defaults_to_fail_when_success_is_false() -> None:
     result = VerificationResult(success=False, elapsed_time=0.0, reason="nope")
     assert result.status == "fail"
 
 
-def test_explicit_error_status_is_kept():
+def test_explicit_error_status_is_kept() -> None:
     result = VerificationResult(success=False, status="error", elapsed_time=0.0, reason="boom")
     assert result.status == "error"
     assert result.success is False
 
 
-def test_status_pass_requires_success_true():
+def test_status_pass_requires_success_true() -> None:
     with pytest.raises(ValidationError):
         VerificationResult(success=False, status="pass", elapsed_time=0.0, reason="mismatch")
 
@@ -80,6 +81,22 @@ def test_leaf_result_carries_raw_not_children():
 
     assert leaf.raw == {"items": []}
     assert leaf.children == []
+
+
+# --- single_call_timeout (Change 4) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("timeout_sec", "expected"),
+    [
+        (0.0, 30.0),  # assert/zero path: floored for bounded I/O
+        (0.5, 30.0),  # still below the runner's minimum effective leaf budget
+        (5.0, 5.0),  # a real (if tight) converge budget: must not be raised
+        (120.0, 120.0),  # a real, generous budget: unchanged
+    ],
+)
+def test_single_call_timeout(timeout_sec: float, expected: float) -> None:
+    assert single_call_timeout(timeout_sec) == expected
 
 
 def test_no_details_field():

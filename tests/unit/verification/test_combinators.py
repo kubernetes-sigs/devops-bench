@@ -14,6 +14,7 @@
 
 """Unit tests for the any, all, and none combinators."""
 
+import time
 from typing import Any, Literal
 
 import pytest
@@ -27,6 +28,8 @@ from devops_bench.verification.spec import (
     NoneSpec,
     ParallelSpec,
     SequenceSpec,
+    VerificationEntry,
+    parse_entries,
     parse_node,
 )
 
@@ -37,11 +40,14 @@ class _Always(BaseVerifier):
 
     type: Literal["always"]
     ok: bool = True
+    status: Literal["pass", "fail", "error"] | None = None
     calls: list[float] = []
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         self.calls.append(timeout_sec)
-        return VerificationResult(success=self.ok, elapsed_time=0.0, reason="stub", name=self.name)
+        return VerificationResult(
+            success=self.ok, status=self.status, elapsed_time=0.0, reason="stub", name=self.name
+        )
 
 
 def _leaf(ok: bool, name: str = "leaf") -> dict[str, Any]:
@@ -84,7 +90,9 @@ class _SlowLeaf(BaseVerifier):
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         time.sleep(self.sleep_for)
-        return VerificationResult(success=False, elapsed_time=self.sleep_for, reason="stub", name=self.name)
+        return VerificationResult(
+            success=False, elapsed_time=self.sleep_for, reason="stub", name=self.name
+        )
 
 
 def _assert_entry(check: dict[str, Any]) -> VerificationEntry:
@@ -125,8 +133,10 @@ def test_any_passes_when_one_child_passes() -> None:
 
 def test_any_fails_when_every_child_fails() -> None:
     agent = VerifierAgent()
+    # Every round fails, so this genuinely polls to the deadline; keep the
+    # deadline small so the test doesn't burn several real seconds.
     result = agent.wait_for_condition(
-        {"type": "any", "checks": [_leaf(False), _leaf(False)]}, timeout_sec=5
+        {"type": "any", "checks": [_leaf(False), _leaf(False)]}, timeout_sec=0.3
     )
     assert result.success is False
 
@@ -151,9 +161,13 @@ def test_none_passes_when_every_child_fails() -> None:
 
 def test_none_fails_at_deadline_when_a_child_keeps_passing() -> None:
     agent = VerifierAgent()
+    # Under round-based polling a passing child no longer fails the group
+    # outright (the state may still be converging toward false), so this
+    # genuinely polls to the deadline; keep it small. The last round still
+    # short-circuits at the first passing child, so only "a" is evaluated.
     result = agent.wait_for_condition(
         {"type": "none", "checks": [_leaf(True, "a"), _leaf(False, "b")]},
-        timeout_sec=5,
+        timeout_sec=0.3,
     )
     assert result.success is False
     assert len(result.children) == 1
@@ -382,6 +396,62 @@ def test_converge_any_with_a_blocking_nested_parallel_child_stays_bounded_by_the
     # Bounded by the (small) converge deadline, not by how long the leaf
     # actually blocks (5s) or the full wait ceiling (120s).
     assert elapsed < 3.0
+
+
+# --- converge rounds are bounded mid-round, not just between rounds (Change 3) --
+
+
+def test_converge_any_round_bounds_mid_round_by_deadline() -> None:
+    """A converge round stops evaluating children once the deadline passes mid-round.
+
+    Without a per-child deadline check inside the round loop, one round could
+    overshoot the shared deadline by up to len(checks) x the per-leaf I/O
+    floor; the fix bounds the overshoot to at most one more leaf call. The
+    first child is still evaluated unconditionally (the always-at-least-one
+    contract); children after the deadline expires are recorded "error"
+    (never observed), not "fail".
+    """
+    agent = VerifierAgent()
+    result = agent.wait_for_condition(
+        {
+            "type": "any",
+            "checks": [
+                {"type": "slow", "sleep_for": 1.0, "name": "a"},
+                {"type": "slow", "sleep_for": 1.0, "name": "b"},
+                {"type": "slow", "sleep_for": 1.0, "name": "c"},
+            ],
+        },
+        timeout_sec=0.3,
+    )
+
+    assert result.status == "error"
+    assert len(result.children) == 3
+    assert result.children[0].reason == "stub"  # evaluated
+    assert result.children[1].status == "error"
+    assert result.children[1].reason == "deadline exhausted before evaluation"
+    assert result.children[2].status == "error"
+    assert result.children[2].reason == "deadline exhausted before evaluation"
+
+
+def test_converge_none_round_bounds_mid_round_by_deadline() -> None:
+    """Mirrors the ``any`` case: ``none``'s round loop is bounded mid-round too."""
+    agent = VerifierAgent()
+    result = agent.wait_for_condition(
+        {
+            "type": "none",
+            "checks": [
+                {"type": "slow", "sleep_for": 1.0, "name": "a"},
+                {"type": "slow", "sleep_for": 1.0, "name": "b"},
+            ],
+        },
+        timeout_sec=0.3,
+    )
+
+    assert result.status == "error"
+    assert len(result.children) == 2
+    assert result.children[0].reason == "stub"  # evaluated
+    assert result.children[1].status == "error"
+    assert result.children[1].reason == "deadline exhausted before evaluation"
 
 
 def test_assert_mode_any_evaluates_exactly_one_round() -> None:

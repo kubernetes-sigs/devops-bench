@@ -27,6 +27,7 @@ from devops_bench.verification.base import (
     BaseVerifier,
     VerificationResult,
     VerificationStatus,
+    single_call_timeout,
 )
 
 __all__ = ["ScalingCompleteVerifier"]
@@ -109,7 +110,7 @@ class ScalingCompleteVerifier(BaseVerifier):
                 self.deployment,
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
-                timeout=timeout_sec,
+                timeout=single_call_timeout(timeout_sec),
             )
         except SubprocessError as exc:
             stderr = (exc.stderr or "").strip()
@@ -119,8 +120,11 @@ class ScalingCompleteVerifier(BaseVerifier):
             _log.warning("Failed to parse deployment JSON for %s", self.deployment)
             return "error", "Failed to parse deployment JSON", None
 
-        # ``status`` may be explicitly null before the controller populates it.
-        ready_replicas = (dep_data.get("status") or {}).get("readyReplicas", 0)
+        # ``status`` may be explicitly null before the controller populates it,
+        # and ``readyReplicas`` may itself be present but explicitly null
+        # (rather than absent); ``or 0`` covers both, where ``.get(..., 0)``
+        # alone only covers the key being absent.
+        ready_replicas = (dep_data.get("status") or {}).get("readyReplicas") or 0
         raw = {"deployment": dep_data}
         if ready_replicas < self.min_replicas:
             reason = f"Ready replicas ({ready_replicas}) < min replicas ({self.min_replicas})"

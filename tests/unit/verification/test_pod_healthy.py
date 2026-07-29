@@ -23,6 +23,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from devops_bench.core import SubprocessError
 from devops_bench.verification.verifiers import PodHealthyVerifier
 
@@ -212,6 +214,46 @@ def test_elapsed_time_includes_fallback_fetch_duration() -> None:
         result = PodHealthyVerifier(selector="app=web").verify(timeout_sec=10)
 
     assert result.elapsed_time >= 5.0
+
+
+@pytest.mark.parametrize(
+    ("timeout_sec", "expected_timeout"), [(0.0, 30.0), (5.0, 5.0), (60.0, 60.0)]
+)
+def test_kubectl_wait_is_called_with_a_floored_timeout(
+    timeout_sec: float, expected_timeout: float
+) -> None:
+    # An assert-mode single_shot call passes timeout_sec=0.0, which as a
+    # literal ``kubectl wait --timeout`` would mean "give up immediately";
+    # the floor is what actually bounds the underlying kubectl call.
+    completed = SimpleNamespace(stdout="pod/web condition met\n")
+    with patch(
+        "devops_bench.verification.verifiers.pod_healthy.wait",
+        return_value=completed,
+    ) as mock_wait:
+        PodHealthyVerifier(selector="app=web").verify(timeout_sec=timeout_sec)
+
+    assert mock_wait.call_args.kwargs["timeout_sec"] == expected_timeout
+
+
+@pytest.mark.parametrize(
+    ("timeout_sec", "expected_timeout"), [(0.0, 30.0), (5.0, 5.0), (60.0, 60.0)]
+)
+def test_fallback_get_resource_is_called_with_a_floored_timeout(
+    timeout_sec: float, expected_timeout: float
+) -> None:
+    with (
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.wait",
+            side_effect=SubprocessError(["kubectl"], returncode=1, stderr="timeout"),
+        ),
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.get_resource",
+            return_value={"items": []},
+        ) as mock_get,
+    ):
+        PodHealthyVerifier(selector="app=web").verify(timeout_sec=timeout_sec)
+
+    assert mock_get.call_args.kwargs["timeout"] == expected_timeout
 
 
 def test_name_is_echoed_onto_result() -> None:

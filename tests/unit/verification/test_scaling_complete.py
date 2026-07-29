@@ -70,6 +70,23 @@ def test_null_status_does_not_crash_check() -> None:
     assert "Ready replicas (0) < min replicas (1)" in result.reason
 
 
+def test_explicit_null_ready_replicas_does_not_crash_check() -> None:
+    # ``status.readyReplicas`` may itself be explicitly null (present but
+    # unset) rather than the key being absent; ``.get(..., 0)`` only covers
+    # the latter and returns None for the former, which then blows up the
+    # numeric comparisons below with a TypeError.
+    deployment = {"status": {"readyReplicas": None}}
+    with patch(
+        "devops_bench.verification.verifiers.scaling_complete.get_resource",
+        return_value=deployment,
+    ):
+        result = ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=0)
+
+    assert result.success is False
+    assert result.status == "fail"
+    assert "Ready replicas (0) < min replicas (1)" in result.reason
+
+
 def test_subprocess_error_is_reported_in_reason() -> None:
     with patch(
         "devops_bench.verification.verifiers.scaling_complete.get_resource",
@@ -125,6 +142,25 @@ def test_negative_max_replicas_raises() -> None:
 def test_min_greater_than_max_raises() -> None:
     with pytest.raises(ValidationError, match="must be <="):
         ScalingCompleteVerifier(deployment="web", min_replicas=5, max_replicas=3)
+
+
+@pytest.mark.parametrize(
+    ("timeout_sec", "expected_timeout"), [(0.0, 30.0), (5.0, 5.0), (60.0, 60.0)]
+)
+def test_get_resource_is_called_with_a_floored_timeout(
+    timeout_sec: float, expected_timeout: float
+) -> None:
+    # An assert-mode single_shot call passes timeout_sec=0.0, which as a
+    # literal ``kubectl get`` subprocess timeout would mean "give up
+    # immediately"; the floor is what actually bounds the underlying call.
+    deployment = {"status": {"readyReplicas": 3}}
+    with patch(
+        "devops_bench.verification.verifiers.scaling_complete.get_resource",
+        return_value=deployment,
+    ) as mock_get:
+        ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=timeout_sec)
+
+    assert mock_get.call_args.kwargs["timeout"] == expected_timeout
 
 
 def test_name_is_echoed_onto_result() -> None:

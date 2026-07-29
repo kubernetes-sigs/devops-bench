@@ -24,6 +24,7 @@ only.
 """
 
 from devops_bench.verification.base import (
+    MIN_LEAF_BUDGET_SECONDS,
     VERIFIERS,
     BaseVerifier,
     VerificationResult,
@@ -49,6 +50,7 @@ __all__ = [
     "AllSpec",
     "AnySpec",
     "BaseVerifier",
+    "MIN_LEAF_BUDGET_SECONDS",
     "NoneSpec",
     "ParallelSpec",
     "RollupScores",

@@ -30,13 +30,66 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from devops_bench.core import Registry
 from devops_bench.k8s import poll_until
 
-__all__ = ["VERIFIERS", "BaseVerifier", "VerificationResult", "VerificationStatus"]
+__all__ = [
+    "VERIFIERS",
+    "MIN_LEAF_BUDGET_SECONDS",
+    "BaseVerifier",
+    "VerificationResult",
+    "VerificationStatus",
+    "single_call_timeout",
+]
 
 # Registry keyed by the ``type`` discriminator literal. Entry-point discovery
 # lets external packages register a verifier without touching this tree.
 VERIFIERS: Registry[type[BaseModel]] = Registry(
     "verifiers", entry_point_group="devops_bench.verifiers"
 )
+
+# The single definition of the leaf-budget threshold. Lives here, not in
+# runner.py, because base.py sits below runner.py in the import graph (runner
+# imports from here, not the other way around) and single_call_timeout below
+# needs the same threshold runner.py's own leaf dispatch uses to treat a
+# budget as the zero/assert path rather than a real one. runner.py and
+# default.py both import this constant rather than defining their own copy.
+# Public because default.py (outside this package) needs it too; the private
+# alias below is kept so the in-package call sites and docstrings that spell
+# out the underscored name keep working unchanged.
+MIN_LEAF_BUDGET_SECONDS = 1.0
+_MIN_LEAF_BUDGET_SECONDS = MIN_LEAF_BUDGET_SECONDS
+
+# A single kubectl call needs a hard bound even when the caller's own budget
+# is (near) zero: an assert-mode single_shot call passes timeout_sec=0.0,
+# which as a literal subprocess timeout would mean "give up immediately"
+# rather than "evaluate once". This is what actually bounds that one
+# evaluation's I/O so an unresponsive API server cannot hang the whole
+# benchmark run.
+_KUBECTL_TIMEOUT_FLOOR_SEC = 30.0
+
+
+def single_call_timeout(timeout_sec: float) -> float:
+    """Bound one kubectl call's timeout without extending a real budget.
+
+    Naively flooring every call (``max(timeout_sec, _KUBECTL_TIMEOUT_FLOOR_SEC)``)
+    fixes the zero-budget case but also raises any small *real* budget up to
+    the floor: a leaf handed 5 remaining seconds on a converging deadline
+    would then spend up to 30 seconds in kubectl, well past what its caller
+    budgeted. The floor should only ever apply to the zero/assert path, where
+    there is no real budget to protect. ``timeout_sec`` below the runner's
+    minimum effective leaf budget is that path (see
+    :data:`_MIN_LEAF_BUDGET_SECONDS`); anything at or above it is a
+    real budget and is returned unchanged.
+
+    Args:
+        timeout_sec: The caller's remaining budget for this one evaluation.
+
+    Returns:
+        ``timeout_sec`` unchanged when it is a real budget, else
+        :data:`_KUBECTL_TIMEOUT_FLOOR_SEC`.
+    """
+    if timeout_sec < _MIN_LEAF_BUDGET_SECONDS:
+        return _KUBECTL_TIMEOUT_FLOOR_SEC
+    return timeout_sec
+
 
 # "error" is not a third outcome of the condition, it is the absence of an
 # observation: the check could not run (kubectl/subprocess failure, unhandled
@@ -62,7 +115,10 @@ class VerificationResult(BaseModel):
             ``"fail"``) so existing ``VerificationResult(success=...)`` call
             sites keep working; a caller that needs to report an error must
             pass ``status="error"`` explicitly (and, for the invariant above,
-            ``success=False``).
+            ``success=False``). The ``| None`` in the annotation is only a
+            pre-validation sentinel: ``_resolve_status`` below always
+            resolves it before construction completes, so a constructed
+            result's ``status`` is never actually ``None``.
         elapsed_time: Wall-clock seconds spent evaluating the check.
         reason: Human-readable summary of the outcome or failure.
         name: Optional label echoed from the spec node, for result rendering.

@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from concurrent.futures import wait as real_futures_wait
 from typing import Any, Literal
+from unittest.mock import patch
 
 import pytest
 
@@ -32,7 +34,8 @@ from devops_bench.verification import (
     BaseVerifier,
     VerificationResult,
 )
-from devops_bench.verification.runner import VerifierAgent
+from devops_bench.verification.runner import _SINGLE_SHOT_WAIT_CEILING_SEC, VerifierAgent
+from devops_bench.verification.spec import parse_entries
 
 
 class _FakeLeaf(BaseVerifier):
@@ -40,6 +43,9 @@ class _FakeLeaf(BaseVerifier):
 
     Attributes:
         succeed: Value of the returned result's ``success``.
+        status: Explicit tri-state status; defaults to deriving "pass"/"fail"
+            from ``succeed``. Set to "error" (with ``succeed=False``) to model
+            a check that could not be evaluated.
         boom: When true, :meth:`verify` raises instead of returning a result.
         sleep_for: Seconds to block inside :meth:`verify` before returning.
         tag: Label folded into the result ``reason`` for assertions.
@@ -47,6 +53,7 @@ class _FakeLeaf(BaseVerifier):
 
     type: Literal["fake_leaf"] = "fake_leaf"
     succeed: bool = True
+    status: Literal["pass", "fail", "error"] | None = None
     boom: bool = False
     sleep_for: float = 0.0
     tag: str = ""
@@ -59,6 +66,7 @@ class _FakeLeaf(BaseVerifier):
             time.sleep(self.sleep_for)
         return VerificationResult(
             success=self.succeed,
+            status=self.status,
             elapsed_time=0.0,
             reason=f"leaf:{self.tag}",
             name=self.name,
@@ -85,6 +93,18 @@ def agent() -> VerifierAgent:
 def _leaf(**kwargs: Any) -> dict[str, Any]:
     """Build a raw fake-leaf spec node."""
     return {"type": "fake_leaf", **kwargs}
+
+
+def _pass_leaf(tag: str) -> dict[str, Any]:
+    return _leaf(succeed=True, tag=tag)
+
+
+def _fail_leaf(tag: str) -> dict[str, Any]:
+    return _leaf(succeed=False, tag=tag)
+
+
+def _error_leaf(tag: str) -> dict[str, Any]:
+    return _leaf(succeed=False, status="error", tag=tag)
 
 
 # --- leaf dispatch --------------------------------------------------------
@@ -188,6 +208,57 @@ def test_sequence_bulk_skips_all_when_deadline_already_passed(agent: VerifierAge
     assert "[1] skipped" in res.reason
 
 
+def test_sequence_child_error_stops_the_walk_with_status_error(agent: VerifierAgent) -> None:
+    """A child that errors (not fails) halts the sequence with status "error"."""
+    spec = {
+        "type": "sequence",
+        "checks": [_pass_leaf("1"), _error_leaf("2"), _pass_leaf("3")],
+    }
+
+    res = agent.wait_for_condition(spec)
+
+    assert res.status == "error"
+    assert res.success is False
+    assert len(res.children) == 3
+    assert res.children[0].status == "pass"
+    assert res.children[1].status == "error"
+    assert res.children[2].reason == "earlier step errored"
+
+
+# --- sequence truth table (Change 1) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        (_pass_leaf, _error_leaf, "error"),
+        (_fail_leaf, _error_leaf, "fail"),
+        (_error_leaf, _error_leaf, "error"),
+    ],
+)
+def test_sequence_truth_table(agent: VerifierAgent, first: Any, second: Any, expected: str) -> None:
+    spec = {"type": "sequence", "checks": [first("1"), second("2")]}
+    res = agent.wait_for_condition(spec)
+    assert res.status == expected
+
+
+# --- parallel truth table (Change 1) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        ((_pass_leaf, _error_leaf), "error"),
+        ((_fail_leaf, _error_leaf), "fail"),
+        ((_error_leaf, _error_leaf), "error"),
+    ],
+)
+def test_parallel_truth_table(agent: VerifierAgent, statuses: Any, expected: str) -> None:
+    spec = {"type": "parallel", "checks": [f(str(i)) for i, f in enumerate(statuses)]}
+    res = agent.wait_for_condition(spec)
+    assert res.status == expected
+
+
 # --- parallel dispatch ----------------------------------------------------
 
 
@@ -227,10 +298,70 @@ def test_parallel_leaf_exception_becomes_failed_child(agent: VerifierAgent) -> N
     res = agent.wait_for_condition(spec)
 
     assert res.success is False
+    assert res.status == "error"
     failed = [c for c in res.children if not c.success]
     assert len(failed) == 1
+    assert failed[0].status == "error"
     assert "unhandled error" in failed[0].reason
     assert "boom:2" in failed[0].reason
+
+
+def test_parallel_single_shot_unfinished_child_is_error_not_fail(
+    agent: VerifierAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child still running when the single_shot wait ceiling hits is "error".
+
+    It was never observed to violate anything, only never finished in time;
+    reading it as a definite "fail" would turn an unobserved outcome into a
+    safeguard VIOLATION.
+    """
+    monkeypatch.setattr("devops_bench.verification.runner._SINGLE_SHOT_WAIT_CEILING_SEC", 0.05)
+    entries, errors = parse_entries(
+        [
+            {
+                "name": "e",
+                "role": "safeguard",
+                "severity": "catastrophic",
+                "check": {
+                    "type": "parallel",
+                    "checks": [_leaf(succeed=True, tag="hung", sleep_for=0.5)],
+                },
+            }
+        ]
+    )
+    assert errors == []
+
+    res = agent.run_entry(entries[0], timeout_sec=30)
+
+    assert res.status == "error"
+    assert res.success is False
+    assert len(res.children) == 1
+    assert res.children[0].status == "error"
+    assert res.children[0].reason == "evaluation did not complete before the deadline"
+
+
+def test_parallel_converge_hung_child_alongside_an_observed_fail_stays_fail(
+    agent: VerifierAgent,
+) -> None:
+    """An observed fail still wins the group verdict over an unfinished sibling."""
+    # The deadline must clear _MIN_LEAF_BUDGET_SECONDS so the hung leaf's
+    # verify() is actually invoked (and outlasts the wait) rather than being
+    # short-circuited by the per-leaf min-budget guard before it ever runs.
+    spec = {
+        "type": "parallel",
+        "checks": [
+            _leaf(succeed=False, tag="observed"),
+            _leaf(succeed=True, tag="hung", sleep_for=3.0),
+        ],
+    }
+
+    res = agent.wait_for_condition(spec, timeout_sec=1.2)
+
+    assert res.status == "fail"
+    assert res.success is False
+    assert {c.status for c in res.children} == {"fail", "error"}
+    hung = next(c for c in res.children if c.status == "error")
+    assert hung.reason == "evaluation did not complete before the deadline"
 
 
 def test_parallel_single_shot_bounds_the_wait_at_the_ceiling(agent: VerifierAgent) -> None:
