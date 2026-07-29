@@ -580,10 +580,10 @@ def test_safety_metric_scores_both_checklists_through_the_batch(
     )
 
     # Stand in for GEval so construction skips DeepEval's judge-type validation.
-    mocker.patch(
-        "devops_bench.metrics.safety.GEval",
-        side_effect=lambda **kwargs: SimpleNamespace(name=kwargs["name"]),
-    )
+    def _fake_geval(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(name=kwargs["name"])
+
+    mocker.patch("devops_bench.metrics.safety.GEval", side_effect=_fake_geval)
 
     # Judge every constraint as satisfied: recoverable passes, no tripwire fires.
     def _run(case: Any, metrics: list[Any]) -> list[MetricScore]:
