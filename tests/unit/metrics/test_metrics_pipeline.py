@@ -559,3 +559,69 @@ def test_build_context_missing_expected_output_defaults_and_warns(
         pipeline._build_context(res, MagicMock(), True)
     assert len(caplog.records) == 1
     assert "has an empty expected_output" in caplog.text
+
+
+# --- the safety metric, driven through the batch pipeline --------------------
+
+
+def test_safety_metric_scores_both_checklists_through_the_batch(
+    registry: Registry[Any], mocker: MockerFixture
+) -> None:
+    """The registered ``safety`` metric writes both sub-scores onto the record.
+
+    Covers the seam the per-metric tests cannot: that ``safety`` is a builtin
+    key the batch actually builds and runs, and that its emitted score names
+    land in ``result["scores"]`` for the composite to read.
+    """
+    from devops_bench.metrics.safety import (
+        CATASTROPHIC_SCORE_KEY,
+        RECOVERABLE_SAFETY_SCORE_KEY,
+        SafetyMetric,
+    )
+
+    # Stand in for GEval so construction skips DeepEval's judge-type validation.
+    mocker.patch(
+        "devops_bench.metrics.safety.GEval",
+        side_effect=lambda **kwargs: SimpleNamespace(name=kwargs["name"]),
+    )
+
+    # Judge every constraint as satisfied: recoverable passes, no tripwire fires.
+    def _run(case: Any, metrics: list[Any]) -> list[MetricScore]:
+        return [MetricScore(name=metrics[0].name, score=1.0, success=True)]
+
+    mocker.patch("devops_bench.metrics.safety.run_geval", side_effect=_run)
+    registry.register("safety")(SafetyMetric)
+
+    results = [_result()]
+    results[0]["recoverable_safety"] = ["kept the service reachable"]
+    results[0]["catastrophic"] = ["deleted the cluster"]
+
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
+
+    scores = results[0]["scores"]
+    assert scores[RECOVERABLE_SAFETY_SCORE_KEY]["score"] == pytest.approx(1.0)
+    assert scores[CATASTROPHIC_SCORE_KEY]["score"] == pytest.approx(1.0)
+    # A registered metric runs either way, so pin the builtin membership too —
+    # that is what orders safety ahead of third-party metrics in the batch.
+    assert "safety" in pipeline._BUILTIN_METRIC_KEYS  # noqa: SLF001
+
+
+def test_safety_metric_skipped_when_task_declares_no_constraints(
+    registry: Registry[Any], mocker: MockerFixture
+) -> None:
+    """A task with neither checklist leaves no safety scores and calls no judge."""
+    from devops_bench.metrics.safety import (
+        CATASTROPHIC_SCORE_KEY,
+        RECOVERABLE_SAFETY_SCORE_KEY,
+        SafetyMetric,
+    )
+
+    run_geval = mocker.patch("devops_bench.metrics.safety.run_geval")
+    registry.register("safety")(SafetyMetric)
+
+    results = [_result()]
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
+
+    assert RECOVERABLE_SAFETY_SCORE_KEY not in results[0]["scores"]
+    assert CATASTROPHIC_SCORE_KEY not in results[0]["scores"]
+    run_geval.assert_not_called()
