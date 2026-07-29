@@ -5,7 +5,9 @@ and it does so through one small interface. Every provider implements the same
 `LLMClient` contract (`devops_bench/models/base.py`), and a single factory,
 `get_model()`, constructs the right adapter at runtime. Add a provider by
 dropping a file in `devops_bench/models/`; nothing else in the tree needs to
-change.
+change, unless it also needs an alias, a distinct backend, a non-default
+API-key variable, or keyless auth — those belong to the provider contract in
+`devops_bench/core/model_providers.py`.
 
 > [!IMPORTANT]
 > This page is about the **LLM** that powers the agent under test and the judge

@@ -1,6 +1,6 @@
 # Infrastructure: deployers and cloud providers
 
-Every eval in devops-bench can stand up **real infrastructure** before the agent runs — a live GKE cluster, a local KinD cluster, or nothing at all. Provisioning is driven entirely by **OpenTofu**: a task points at a stack, and the harness runs `tofu` to bring it up and tear it down. A *cloud provider* sits alongside OpenTofu to supply credentials and fill in Terraform variable defaults (project, location, cluster name) so a stack doesn't have to hard-code them.
+Every eval in devops-bench can stand up **real infrastructure** before the agent runs — a managed Kubernetes cluster, a local KinD cluster, or nothing at all. Provisioning is driven entirely by **OpenTofu**: a task points at a stack, and the harness runs `tofu` to bring it up and tear it down. A *cloud provider* sits alongside OpenTofu to supply credentials and fill in Terraform variable defaults (project, location, cluster name) so a stack doesn't have to hard-code them.
 
 > [!NOTE]
 > *Cloud providers* (GCP, KinD) are not the same thing as *model providers* (the LLM backends an agent talks to). This page is only about infrastructure. For model backends, see [model_providers.md](./model_providers.md).
@@ -86,9 +86,11 @@ infrastructure:
   deployer: "tofu"
   stack: "prebuilt/kind"
   teardown: true
-  variables:
-    cluster_name: "devops-bench-kind"
 ```
+
+Leave `cluster_name` out of `variables`. Task variables are preserved over provider
+defaults, so pinning it here would override the run-scoped name and make concurrent runs
+collide on one cluster.
 
 A no-infra example (manifest-generation task, or a run against an existing cluster):
 

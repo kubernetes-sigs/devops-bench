@@ -13,10 +13,13 @@ For background on the layer this plugs into, see
 
 ### 1. Create the adapter module
 
-Create `devops_bench/models/<key>.py`, where `<key>` is the canonical provider
-key — by convention the model-family name. Guard the SDK import so the module
-imports cleanly even when the SDK isn't installed, then register your adapter
-class under the key:
+Create `devops_bench/models/<family>.py`, where `<family>` is the **adapter
+family** the provider contract maps onto — the model-family name, which is not
+always the canonical provider key. Several canonical providers can share one
+family: `anthropic`, `anthropic-vertex`, and `anthropic-bedrock` all resolve to
+the `claude` family, and `google` and `google-vertex` both resolve to `gemini`.
+Guard the SDK import so the module imports cleanly even when the SDK isn't
+installed, then register your adapter class under that same family key:
 
 ```python
 try:
@@ -155,5 +158,12 @@ export AGENT_MODEL=<your-model-id>
 Run a no-infra task with your provider set and confirm the agent (and judge)
 construct without error. If `get_model()` builds your adapter and the run starts
 talking to the model, the registration and SDK wiring are correct. A missing SDK
-surfaces as `MissingDependencyError` naming the pip package; an unknown key
-surfaces as a `NotRegisteredError`.
+surfaces as `MissingDependencyError` naming the pip package.
+
+The two lookup stages fail differently, which tells you where to look:
+
+- A provider name that is not in the contract raises `ConfigError` from
+  `resolve_provider` — the alias is unknown.
+- A provider that resolves fine but whose adapter family has no module in
+  `devops_bench/models/` raises `NotRegisteredError` from `get_model` — the
+  contract entry exists, the adapter does not.
