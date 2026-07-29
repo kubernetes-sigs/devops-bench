@@ -24,9 +24,11 @@ import behavior.
 from __future__ import annotations
 
 import importlib
+import logging
 import threading
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -36,6 +38,7 @@ from devops_bench.core import ConfigError, MissingDependencyError
 from devops_bench.evalharness import default as harness_default
 from devops_bench.evalharness.default import DefaultEvalHarness
 from devops_bench.tasks import Task
+from devops_bench.verification.base import VerificationResult
 
 
 @pytest.fixture
@@ -293,6 +296,178 @@ def test_run_one_collects_files_the_agent_writes_to_its_workspace(
         AGENTS._items.pop("fake-workspace-writer", None)  # noqa: SLF001
 
 
+def test_run_one_warns_when_a_verification_entry_fails_to_parse(
+    isolated_env: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A typo'd verification entry logs a warning instead of vanishing silently.
+
+    Regression test: parse errors used to be recorded on the record but never
+    logged, so a task whose objective count silently dropped left no trace
+    anywhere except a key buried in results.json.
+    """
+    AGENTS.register("fake-workspace-writer-parse-warn")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-workspace-writer-parse-warn",
+            no_infra=True,
+        )
+        task = Task.from_dict(
+            {
+                "task_id": "t",
+                "name": "demo",
+                "prompt": "p",
+                "verification_spec": [
+                    {
+                        "name": "web-ready",
+                        "role": "objective",
+                        "check": {"type": "pod_healthy", "selector": "app=web"},
+                    },
+                    {
+                        "name": "bad-entry",
+                        "role": "objective",
+                        "check": {"type": "no-such-type"},
+                    },
+                ],
+            }
+        )
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+        ok = VerificationResult(success=True, elapsed_time=0.0, reason="fine")
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch("devops_bench.evalharness.default.VerifierAgent.run_entry", return_value=ok),
+        ):
+            record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert any("failed to parse" in message for message in caplog.messages)
+        assert "bad-entry" in caplog.text
+    finally:
+        AGENTS._items.pop("fake-workspace-writer-parse-warn", None)  # noqa: SLF001
+
+
+def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed record still carries a real verification report once infra is up.
+
+    The exception path used to skip verification unconditionally. Now that
+    ``infra_up`` and ``entries`` are tracked, a crash after provisioning still
+    runs verification, so a failed record is scored instead of silently
+    dropping every objective.
+    """
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    def _boom(prompt: str, ctx: Any) -> Any:
+        raise RuntimeError("agent crashed")
+
+    # ``execute_agent`` is patched directly, not the agent itself: AgentHarness.run()
+    # has its own safety net that converts an agent crash into an errored
+    # AgentResult rather than raising, which would never reach _run_one's
+    # exception path.
+    monkeypatch.setattr(harness, "execute_agent", _boom)
+    canned_report = [{"name": "web-ready", "success": True, "status": "pass"}]
+    monkeypatch.setattr(harness, "_run_verification", lambda entries: canned_report)
+    task = Task.from_dict(
+        {
+            "task_id": "t",
+            "name": "demo",
+            "prompt": "p",
+            "infrastructure": {"deployer": "noop"},
+            "verification_spec": [
+                {
+                    "name": "web-ready",
+                    "role": "objective",
+                    "check": {"type": "pod_healthy", "selector": "app=web"},
+                }
+            ],
+        }
+    )
+
+    record = harness._run_one(task, tmp_path)  # noqa: SLF001
+
+    assert record["status"] == "failed"
+    assert record["verification_report"] == canned_report
+    assert record["verification_status"] == "evaluated"
+
+
+def test_run_one_reports_evaluated_on_the_exception_path_with_no_entries_declared(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No entries declared but infra came up: still reads as "evaluated", not "not_evaluated".
+
+    A task with no verification_spec has nothing to verify, not a broken
+    environment. The exception path must record the same status the success
+    path would for the same case: verification ran trivially over nothing.
+    """
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    def _boom(prompt: str, ctx: Any) -> Any:
+        raise RuntimeError("agent crashed")
+
+    monkeypatch.setattr(harness, "execute_agent", _boom)
+    task = Task.from_dict(
+        {
+            "task_id": "t",
+            "name": "demo",
+            "prompt": "p",
+            "infrastructure": {"deployer": "noop"},
+        }
+    )
+
+    record = harness._run_one(task, tmp_path)  # noqa: SLF001
+
+    assert record["status"] == "failed"
+    assert record["verification_report"] == []
+    assert record["verification_status"] == "evaluated"
+
+
+def test_run_one_skips_verification_entirely_under_no_infra(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """no_infra means there is no cluster to check, so verification never runs."""
+    AGENTS.register("fake-workspace-writer-no-infra")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-workspace-writer-no-infra",
+            no_infra=True,
+        )
+
+        def _fail_if_called(entries: Any) -> Any:
+            raise AssertionError("_run_verification must not be called under no_infra")
+
+        monkeypatch.setattr(harness, "_run_verification", _fail_if_called)
+        task = Task.from_dict(
+            {
+                "task_id": "t",
+                "name": "demo",
+                "prompt": "p",
+                "verification_spec": [
+                    {
+                        "name": "web-ready",
+                        "role": "objective",
+                        "check": {"type": "pod_healthy", "selector": "app=web"},
+                    }
+                ],
+            }
+        )
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert record["verification_status"] == "skipped_no_infra"
+        assert record["verification_report"] == []
+    finally:
+        AGENTS._items.pop("fake-workspace-writer-no-infra", None)  # noqa: SLF001
+
+
 def test_ensure_builtin_agents_swallows_only_import_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -430,6 +605,8 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "documentation",
         "capabilities_granted",
         "verification_parse_errors",
+        "verification_report",
+        "verification_status",
         "generation_only",
         "validated",
     }
@@ -446,7 +623,13 @@ def _stub_task() -> Task:
             "expected_output": "exp",
             "retrieval_context": ["doc-a"],
             "chaos_spec": {"chaos": "yes"},
-            "verification_spec": {"verify": "yes"},
+            "verification_spec": [
+                {
+                    "name": "v1",
+                    "role": "objective",
+                    "check": {"type": "pod_healthy", "selector": "app=web"},
+                }
+            ],
         }
     )
 

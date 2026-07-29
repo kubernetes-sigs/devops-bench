@@ -28,7 +28,7 @@ def test_from_dict_full():
         "expected_output": "  done  ",
         "retrieval_context": ["ctx"],
         "chaos_spec": {"kind": "kill"},
-        "verification_spec": {"check": "ok"},
+        "verification_spec": [{"check": "ok"}],
         "infrastructure": {"deployer": "tofu"},
     }
     task = Task.from_dict(raw, name_default="dir-name")
@@ -39,7 +39,7 @@ def test_from_dict_full():
     assert task.expected_output == "done"
     assert task.retrieval_context == ["ctx"]
     assert task.chaos_spec == {"kind": "kill"}
-    assert task.verification_spec == {"check": "ok"}
+    assert task.verification_spec == [{"check": "ok"}]
     assert task.infrastructure == {"deployer": "tofu"}
 
 
@@ -183,13 +183,22 @@ def test_constraint_empty_text_coalesces():
     assert constraint.critical is False
 
 
-def test_chaos_and_verification_specs_are_opaque():
-    # These specs are parsed downstream, so the schema accepts any shape
-    # (e.g. a raw JSON string from a YAML literal block, a list, or a mapping).
+def test_chaos_spec_is_opaque():
+    # chaos_spec is parsed downstream, so the schema accepts any shape (e.g. a
+    # raw JSON string from a YAML literal block, a list, or a mapping).
     raw = {"chaos_spec": '[{"name": "spike"}]', "verification_spec": [{"name": "v"}]}
     task = Task.from_dict(raw, name_default="d")
     assert task.chaos_spec == '[{"name": "spike"}]'
     assert task.verification_spec == [{"name": "v"}]
+
+
+def test_non_list_verification_spec_raises():
+    # verification_spec is a list of entry mappings; parse_entries downstream
+    # keeps a defensive non-list branch for callers outside Task, but the
+    # schema should reject the malformed shape at load time with a clear
+    # error rather than deferring it.
+    with pytest.raises(ValidationError):
+        Task.from_dict({"verification_spec": {"check": "ok"}}, name_default="d")
 
 
 def test_to_dict_roundtrip_fields():

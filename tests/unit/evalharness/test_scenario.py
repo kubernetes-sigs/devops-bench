@@ -24,7 +24,8 @@ or a real LLM.
 from __future__ import annotations
 
 import threading
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -35,6 +36,8 @@ from devops_bench.chaos.triggers.time_delay import TimeTrigger
 from devops_bench.core.context import RunContext
 from devops_bench.evalharness.scenario import ScenarioManager, pick_free_port
 from devops_bench.verification import VerificationResult, VerifierAgent
+from devops_bench.verification.base import VERIFIERS, BaseVerifier
+from devops_bench.verification.spec import parse_entries
 
 
 def _build_spec(*, verify_key: str | None) -> ChaosSpec:
@@ -212,7 +215,7 @@ def test_pick_free_port_returns_a_usable_port() -> None:
 def test_scenario_resolves_verify_against_mapping() -> None:
     """The chaos ``verify`` key is looked up in the harness-supplied mapping."""
     spec = _build_spec(verify_key="planned-verify")
-    verification_node = object()  # opaque stand-in; VerifierAgent is mocked
+    verification_entry = SimpleNamespace(check=object(), resolved_mode="converge")
 
     fake_result = VerificationResult(success=True, elapsed_time=2.5, reason="all good")
 
@@ -225,20 +228,21 @@ def test_scenario_resolves_verify_against_mapping() -> None:
                 success=True, injected_fault=self.type, elapsed_time=0.0
             ),
         ),
-        patch.object(VerifierAgent, "wait_for_condition", return_value=fake_result) as mock_wait,
+        patch.object(VerifierAgent, "run_entry", return_value=fake_result) as mock_run_entry,
     ):
         manager = ScenarioManager(
             target_deployment="dep",
             namespace="ns",
-            verification_mapping={"planned-verify": verification_node},
+            verification_mapping={"planned-verify": verification_entry},
             skip_port_forward=True,
         )
         manager.run_chaos_and_verification(spec, _build_ctx())
 
-    # The mapping value (not a list-scanned dict) flowed straight to the
-    # VerifierAgent — the lookup is O(1) and never imports verification on the
-    # chaos side.
-    mock_wait.assert_called_once_with(verification_node, timeout_sec=120)
+    # The mapping value's entry (not a list-scanned dict, and not just its
+    # ``check`` node) flowed straight to the VerifierAgent: the lookup is O(1),
+    # never imports verification on the chaos side, and the entry's resolved
+    # mode (converge vs assert) governs the check.
+    mock_run_entry.assert_called_once_with(verification_entry, timeout_sec=120)
 
     chaos_report, perf_report = manager.get_reports()
     assert chaos_report["verification"]["success"] is True
@@ -249,6 +253,75 @@ def test_scenario_resolves_verify_against_mapping() -> None:
         "uptime_percentage": 100.0,
         "resource_utilization_efficiency": 1.0,
     }
+
+
+@VERIFIERS.register("scenario_counting")
+class _ScenarioCounting(BaseVerifier):
+    """Test double recording every budget it was called with.
+
+    Mirrors the assert-mode doubles in test_combinators.py / test_run_entry.py,
+    but exercised through the real (unmocked) ``VerifierAgent`` so the
+    scenario wiring itself — not a mocked ``run_entry`` — is what proves the
+    entry's resolved mode governs the poll.
+    """
+
+    type: Literal["scenario_counting"]
+    budgets: list[float] = []
+
+    def verify(self, timeout_sec: float) -> VerificationResult:
+        self.budgets.append(timeout_sec)
+        return VerificationResult(success=False, elapsed_time=0.0, reason="stub", name=self.name)
+
+
+def test_chaos_referenced_assert_mode_entry_evaluates_single_shot() -> None:
+    """A chaos ``verify:`` referencing an assert-mode safeguard polls exactly once.
+
+    Before this fix, the manager unwrapped the entry's ``check`` node and
+    always converge-polled it via ``wait_for_condition``, which would give an
+    already-happened safeguard violation up to ``VERIFICATION_TIMEOUT_SEC``
+    (120s) to heal. Routing through ``VerifierAgent.run_entry`` instead makes
+    the entry's resolved mode govern: an assert-mode safeguard evaluates once
+    with a zero budget, regardless of the timeout passed in.
+    """
+    entries, errors = parse_entries(
+        [
+            {
+                "name": "planned-verify",
+                "role": "safeguard",
+                "severity": "catastrophic",
+                "check": {"type": "scenario_counting", "budgets": []},
+            }
+        ]
+    )
+    assert errors == []
+    entry = entries[0]
+    assert entry.resolved_mode == "assert"
+
+    spec = _build_spec(verify_key="planned-verify")
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(
+            GenerateLoadFault,
+            "inject",
+            lambda self, ctx, event: ChaosResult(
+                success=True, injected_fault=self.type, elapsed_time=0.0
+            ),
+        ),
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            verification_mapping={"planned-verify": entry},
+            skip_port_forward=True,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    # Called exactly once, with a zero budget — single-shot, not a 120s poll.
+    assert entry.check.budgets == [0.0]
+
+    chaos_report, _ = manager.get_reports()
+    assert chaos_report["verification"]["success"] is False
 
 
 def test_scenario_unknown_verify_key_surfaces_failure_into_report() -> None:
@@ -269,7 +342,7 @@ def test_scenario_unknown_verify_key_surfaces_failure_into_report() -> None:
                 success=True, injected_fault=self.type, elapsed_time=0.0
             ),
         ),
-        patch.object(VerifierAgent, "wait_for_condition") as mock_wait,
+        patch.object(VerifierAgent, "run_entry") as mock_run_entry,
     ):
         manager = ScenarioManager(
             target_deployment="dep",
@@ -280,7 +353,7 @@ def test_scenario_unknown_verify_key_surfaces_failure_into_report() -> None:
         manager.run_chaos_and_verification(spec, _build_ctx())
 
     # Never called — the unknown key short-circuited before dispatch.
-    mock_wait.assert_not_called()
+    mock_run_entry.assert_not_called()
     chaos_report, _ = manager.get_reports()
     assert chaos_report["status"] == "success"
     verification = chaos_report["verification"]

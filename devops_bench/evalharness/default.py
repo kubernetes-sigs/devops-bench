@@ -22,6 +22,7 @@ import json
 import shutil
 import tempfile
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -49,11 +50,17 @@ from devops_bench.evalharness.base import Harness
 from devops_bench.evalharness.reporter import ResultReporter
 from devops_bench.evalharness.scenario import (
     VERIFICATION_TIMEOUT_SEC,
+    VERIFICATION_TOTAL_BUDGET_SEC,
     ScenarioManager,
     pick_free_port,
 )
 from devops_bench.tasks import Task
-from devops_bench.verification import VerificationSpec
+from devops_bench.verification import (
+    MIN_LEAF_BUDGET_SECONDS,
+    VerificationEntry,
+    VerifierAgent,
+    parse_entries,
+)
 
 __all__ = ["DefaultEvalHarness"]
 
@@ -350,9 +357,7 @@ class DefaultEvalHarness(Harness):
         ns = namespace or self.namespace
         return (
             text.replace("{{PROJECT_ID}}", self.project_id)
-            .replace("{{GCP_PROJECT_ID}}", self.project_id)
             .replace("{{CLUSTER_NAME}}", cluster_name)
-            .replace("{{GKE_CLUSTER_NAME}}", cluster_name)
             .replace("{{APP_LOCATION}}", self.app_location)
             .replace("{{TARGET_DEPLOYMENT_NAME}}", target_dep)
             .replace("{{NAMESPACE}}", ns)
@@ -367,6 +372,11 @@ class DefaultEvalHarness(Harness):
     ) -> Any:
         """Walk a nested spec and substitute placeholders in every string leaf.
 
+        Substitution runs before parsing because a template string like
+        ``{{NAMESPACE}}`` is not a valid value for a typed field, so
+        placeholders are resolved on the raw payload before the caller parses
+        it into a typed structure.
+
         Args:
             spec: An opaque chaos / verification spec value (mapping, list,
                 scalar, or ``None``).
@@ -379,8 +389,6 @@ class DefaultEvalHarness(Harness):
             A new structure with placeholders resolved. ``None`` round-trips
             unchanged so a missing spec stays missing.
         """
-        if spec is None:
-            return None
         if isinstance(spec, str):
             return self.replace_placeholders(spec, cluster_name, target_deployment, namespace)
         if isinstance(spec, list):
@@ -427,98 +435,99 @@ class DefaultEvalHarness(Harness):
         entries = resolved if isinstance(resolved, list) else [resolved]
         return [ChaosSpec.model_validate(entry) for entry in entries if entry]
 
-    def _build_verification_mapping(
+    def _run_verification(
         self,
-        raw: Any,
-        cluster_name: str,
-        target_deployment: str | None = None,
-        namespace: str | None = None,
-    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-        """Build a name-keyed verification mapping the chaos seam consumes.
+        entries: list[VerificationEntry],
+        timeout_sec: float = VERIFICATION_TIMEOUT_SEC,
+    ) -> list[dict[str, Any]]:
+        """Evaluate every entry against the live cluster after the agent finishes.
 
-        Canonical authoring shape is a list of wrapped entries::
+        Every entry runs, unconditionally, whether or not a chaos fault
+        references it. One entry that raises is recorded as a failure and the
+        rest still run, matching how the metrics pipeline isolates a failing
+        evaluator.
 
-            verification_spec:
-              - name: "Planned Load Spike Verification"
-                spec:
-                  type: parallel
-                  checks: [...]
-
-        ``name`` is the cross-reference key the chaos ``verify:`` field
-        resolves against; ``spec`` carries the typed verification node. When no
-        ``spec`` key is present the entry mapping itself is accepted as the
-        node. Every authoring failure is **surfaced** — both warn-logged and
-        accumulated into the returned ``errors`` list so the harness can
-        record it on the run result, instead of silently dropping a
-        verification (which would make a typo'd cross-reference invisible to
-        the operator).
+        Two budgets apply. ``timeout_sec`` is the per-entry cap for a single
+        converging entry's checks. :data:`VERIFICATION_TOTAL_BUDGET_SEC` is
+        the wall-clock cap for this whole pass across every entry; without it
+        a task with many failing converge objectives burns entries x
+        ``timeout_sec`` (12 entries x 120s is 22+ minutes). A single monotonic
+        deadline is computed from the total budget once at the top, and each
+        converging entry gets ``min(timeout_sec, remaining)``. Assert entries
+        ignore the total budget and always run: they are single evaluations,
+        and a safeguard that goes unchecked defeats the point of having it.
+        A converging entry with less than :data:`MIN_LEAF_BUDGET_SECONDS`
+        remaining is recorded here as budget-exhausted rather than handed to
+        ``run_entry``: the runner's own leaf guard uses that same threshold
+        to short-circuit an under-budget leaf as a definite "deadline
+        exhausted" outcome, and this entry was never observed either way.
 
         Args:
-            raw: The task's ``verification_spec`` blob.
-            cluster_name: Active cluster name for placeholder substitution.
-            target_deployment: Optional target deployment name override.
-            namespace: Optional namespace override.
+            entries: The task's parsed verification entries.
+            timeout_sec: Per-entry budget for converging entries.
 
         Returns:
-            A pair ``(mapping, errors)``:
-
-            * ``mapping`` — ``{name -> parsed VerificationSpec}``.
-            * ``errors`` — one ``{"name", "reason"}`` entry per authoring
-              failure (a non-mapping entry, a missing ``name``, a JSON
-              parse failure on a string blob, or a ``VerificationSpec``
-              validation failure). Empty when every entry parsed.
+            One raw mapping per entry, in declaration order, carrying the
+            scoring vocabulary alongside the outcome. This is the exact shape
+            :func:`devops_bench.verification.rollup.rollup` consumes.
         """
-        if not raw:
-            return {}, []
+        agent = VerifierAgent()
+        report: list[dict[str, Any]] = []
+        total_deadline = time.monotonic() + VERIFICATION_TOTAL_BUDGET_SEC
 
-        errors: list[dict[str, str]] = []
-        resolved = self._resolve_spec_placeholders(raw, cluster_name, target_deployment, namespace)
-        if isinstance(resolved, str):
-            try:
-                resolved = json.loads(resolved)
-            except json.JSONDecodeError as exc:
-                _log.warning("could not parse verification_spec JSON string: %s", exc)
-                errors.append({"name": "<root>", "reason": f"json parse: {exc}"})
-                return {}, errors
-        entries = resolved if isinstance(resolved, list) else [resolved]
+        for entry in entries:
+            remaining = total_deadline - time.monotonic()
+            if entry.resolved_mode != "assert" and remaining < MIN_LEAF_BUDGET_SECONDS:
+                # Never evaluated, not a condition observed false.
+                report.append(
+                    {
+                        "name": entry.name,
+                        "role": entry.role,
+                        "severity": entry.severity,
+                        "weight": entry.weight,
+                        "mode": entry.resolved_mode,
+                        "success": False,
+                        "status": "error",
+                        "reason": "verification total budget exhausted before evaluation",
+                        "elapsed_time": 0.0,
+                        "children": [],
+                    }
+                )
+                continue
 
-        mapping: dict[str, Any] = {}
-        for index, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                msg = (
-                    f"verification_spec entry [{index}] must be a mapping, "
-                    f"got {type(entry).__name__}"
-                )
-                _log.warning(msg)
-                errors.append({"name": f"<index {index}>", "reason": msg})
-                continue
-            name = entry.get("name")
-            if not name:
-                msg = f"verification_spec entry [{index}] missing required ``name`` key"
-                _log.warning(msg)
-                errors.append({"name": f"<index {index}>", "reason": msg})
-                continue
-            if name in mapping:
-                msg = (
-                    f"verification_spec entry [{index}] has a duplicate name {name!r}; "
-                    "names must be unique so a chaos ``verify`` reference is unambiguous"
-                )
-                _log.warning(msg)
-                errors.append({"name": str(name), "reason": msg})
-                continue
-            # Canonical shape ``{name, spec: <typed-node>}``; an entry without
-            # a ``spec`` key is itself treated as the typed node.
-            node = entry.get("spec") if "spec" in entry else entry
             try:
-                mapping[name] = VerificationSpec(node)
-            except Exception as exc:  # noqa: BLE001 - surface every failure
-                _log.warning(
-                    "verification entry %r failed to validate; skipping: %s",
-                    name,
-                    exc,
+                result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
+                success = result.success
+                status = result.status
+                reason = result.reason
+                elapsed = result.elapsed_time
+                children = [child.model_dump() for child in result.children]
+            except Exception as exc:  # noqa: BLE001 - one entry must not abort the rest
+                _log.exception("verification entry %r failed to evaluate", entry.name)
+                success, status, reason, elapsed, children = (
+                    False,
+                    "error",
+                    f"evaluation error: {exc}",
+                    0.0,
+                    [],
                 )
-                errors.append({"name": str(name), "reason": str(exc)})
-        return mapping, errors
+
+            report.append(
+                {
+                    "name": entry.name,
+                    "role": entry.role,
+                    "severity": entry.severity,
+                    "weight": entry.weight,
+                    "mode": entry.resolved_mode,
+                    "success": success,
+                    "status": status,
+                    "reason": reason,
+                    "elapsed_time": elapsed,
+                    "children": children,
+                }
+            )
+
+        return report
 
     # -- scenario (background chaos) --------------------------------------
 
@@ -703,11 +712,16 @@ class DefaultEvalHarness(Harness):
         result: dict[str, Any] | None = None
         workspace_path: Path | None = None
         verification_parse_errors: list[dict[str, str]] = []
+        entries: list[VerificationEntry] = []
         # Track the substituted prompt / expectation as they are computed so a
         # failed record can carry the same resolved strings a success record
         # would, falling back to the raw task fields before substitution.
         prompt: str | None = None
         expected_output: str | None = None
+        # Whether deployer.up() returned, i.e. there is a cluster verification
+        # could target. Distinguishes "infra never came up" from "infra came
+        # up but the agent step itself failed" on the exception path below.
+        infra_up = False
 
         try:
             # Build the deployer inside the try so a factory failure (e.g. an
@@ -716,6 +730,7 @@ class DefaultEvalHarness(Harness):
             deployer = get_deployer(infra_config, self.project_id, self.cluster_name)
             _log.info("provisioning infrastructure for: %s", task.name)
             deployer.up()
+            infra_up = True
             cluster_info = deployer.get_cluster_info()
             active_cluster_name = cluster_info.name or self.cluster_name
             # Own a real per-run workspace so the artifact diff is rooted at
@@ -731,9 +746,19 @@ class DefaultEvalHarness(Harness):
             chaos_specs = self._parse_chaos_specs(
                 task.chaos_spec, active_cluster_name, target_dep, ns
             )
-            verification_mapping, verification_parse_errors = self._build_verification_mapping(
-                task.verification_spec, active_cluster_name, target_dep, ns
+            entries, verification_parse_errors = parse_entries(
+                self._resolve_spec_placeholders(
+                    task.verification_spec, active_cluster_name, target_dep, ns
+                )
             )
+            if verification_parse_errors:
+                _log.warning(
+                    "%d verification entry/entries failed to parse and will not be "
+                    "scored, which lowers the objective denominator: %s",
+                    len(verification_parse_errors),
+                    verification_parse_errors,
+                )
+            verification_mapping = {entry.name: entry for entry in entries}
 
             # Hand the background scenario its own context with an isolated
             # env dict so its in-thread env mutations never touch the context
@@ -783,6 +808,16 @@ class DefaultEvalHarness(Harness):
 
             chaos_report, perf_report = self._drain_scenario(scenario_manager, scenario_thread)
 
+            if self.no_infra:
+                # no_infra means no real cluster to check; issuing kubectl
+                # calls against whatever is ambient would score noise, not
+                # this task.
+                verification_report: list[dict[str, Any]] = []
+                verification_status = "skipped_no_infra"
+            else:
+                verification_report = self._run_verification(entries)
+                verification_status = "evaluated"
+
             result = self._build_success_record(
                 task=task,
                 prompt=prompt,
@@ -791,16 +826,40 @@ class DefaultEvalHarness(Harness):
                 chaos_report=chaos_report,
                 perf_report=perf_report,
                 verification_parse_errors=verification_parse_errors,
+                verification_report=verification_report,
+                verification_status=verification_status,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
             _log.error("critical error during task %s: %s", task.name, exc)
+            exception_verification_report: list[dict[str, Any]] = []
+            if self.no_infra:
+                exception_verification_status = "skipped_no_infra"
+            elif infra_up and entries:
+                try:
+                    exception_verification_report = self._run_verification(entries)
+                    exception_verification_status = "evaluated"
+                except Exception:  # noqa: BLE001 - a crash here must not mask the original failure
+                    _log.exception(
+                        "verification crashed while building the failed record for %s", task.name
+                    )
+                    exception_verification_status = "not_evaluated"
+            elif infra_up:
+                # Infra came up but the task declared no entries: verification
+                # ran trivially over nothing, the same as the success path
+                # records for this case, rather than reading as "never ran".
+                exception_verification_status = "evaluated"
+            else:
+                # Infra never came up.
+                exception_verification_status = "not_evaluated"
             result = self._build_failed_record(
                 task,
                 exc,
                 prompt=prompt,
                 expected_output=expected_output,
                 verification_parse_errors=verification_parse_errors,
+                verification_report=exception_verification_report,
+                verification_status=exception_verification_status,
             )
         finally:
             if scenario_manager is not None:
@@ -828,6 +887,8 @@ class DefaultEvalHarness(Harness):
         chaos_report: dict[str, Any],
         perf_report: dict[str, Any],
         verification_parse_errors: list[dict[str, str]] | None = None,
+        verification_report: list[dict[str, Any]] | None = None,
+        verification_status: str = "evaluated",
     ) -> dict[str, Any]:
         """Shape a typed :class:`AgentResult` + reports into the on-disk schema.
 
@@ -876,6 +937,8 @@ class DefaultEvalHarness(Harness):
                 "chaos_report": chaos_report,
                 "perf_report": perf_report,
                 "verification_parse_errors": list(verification_parse_errors or []),
+                "verification_report": list(verification_report or []),
+                "verification_status": verification_status,
             }
         )
         return record
@@ -888,6 +951,8 @@ class DefaultEvalHarness(Harness):
         prompt: str | None = None,
         expected_output: str | None = None,
         verification_parse_errors: list[dict[str, str]] | None = None,
+        verification_report: list[dict[str, Any]] | None = None,
+        verification_status: str = "not_evaluated",
     ) -> dict[str, Any]:
         """Build a failed-task record so the failure stays visible.
 
@@ -906,6 +971,12 @@ class DefaultEvalHarness(Harness):
             expected_output: The substituted expectation if computed; falls back
                 to the raw ``task.expected_output``.
             verification_parse_errors: Any spec-parse errors collected so far.
+            verification_report: The verification report, if verification ran
+                on the exception path (infra was up and entries existed).
+                Empty when it did not run.
+            verification_status: "evaluated" when the report above is real,
+                "not_evaluated" when it could not run, "skipped_no_infra"
+                under ``no_infra``.
         """
         error_text = str(exc)
         record = self._empty_record(task)
@@ -921,6 +992,8 @@ class DefaultEvalHarness(Harness):
                 # A failed run never promotes, even on a vetted task.
                 "validated": False,
                 "verification_parse_errors": list(verification_parse_errors or []),
+                "verification_report": list(verification_report or []),
+                "verification_status": verification_status,
             }
         )
         return record
@@ -966,6 +1039,8 @@ class DefaultEvalHarness(Harness):
                 "skills": list(self._granted_skill_paths),
             },
             "verification_parse_errors": [],
+            "verification_report": [],
+            "verification_status": "",
             # Generation-only tasks have no cluster, so the OutcomeValidity judge
             # must not penalize them for "not applying". This holds both when the
             # task declares ``deployer: noop`` and when ``BENCH_NO_INFRA`` skips
