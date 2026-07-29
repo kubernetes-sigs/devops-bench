@@ -78,7 +78,27 @@ def test_fallback_reports_failure_when_no_pods_match() -> None:
         result = PodHealthyVerifier(selector="app=ghost").verify(timeout_sec=5)
 
     assert result.success is False
+    assert result.status == "fail"
     assert "no match" in result.reason
+
+
+def test_fallback_fetch_failure_is_an_error_not_a_fail() -> None:
+    # The fallback get_resource call itself failing means the condition was
+    # never observed, unlike no pods matching (a real, observed answer).
+    with (
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.wait",
+            side_effect=SubprocessError(["kubectl"], returncode=1, stderr="timeout"),
+        ),
+        patch(
+            "devops_bench.verification.verifiers.pod_healthy.get_resource",
+            side_effect=RuntimeError("connection refused"),
+        ),
+    ):
+        result = PodHealthyVerifier(selector="app=web").verify(timeout_sec=5)
+
+    assert result.success is False
+    assert result.status == "error"
 
 
 def test_null_status_does_not_crash_phase_check() -> None:

@@ -66,6 +66,7 @@ def test_null_status_does_not_crash_check() -> None:
         result = ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=0)
 
     assert result.success is False
+    assert result.status == "fail"
     assert "Ready replicas (0) < min replicas (1)" in result.reason
 
 
@@ -77,6 +78,7 @@ def test_subprocess_error_is_reported_in_reason() -> None:
         result = ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=0)
 
     assert result.success is False
+    assert result.status == "error"
     assert "Failed to get deployment" in result.reason
 
 

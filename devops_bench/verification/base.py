@@ -23,20 +23,27 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from devops_bench.core import Registry
 from devops_bench.k8s import poll_until
 
-__all__ = ["VERIFIERS", "VerificationResult", "BaseVerifier"]
+__all__ = ["VERIFIERS", "BaseVerifier", "VerificationResult", "VerificationStatus"]
 
 # Registry keyed by the ``type`` discriminator literal. Entry-point discovery
 # lets external packages register a verifier without touching this tree.
 VERIFIERS: Registry[type[BaseModel]] = Registry(
     "verifiers", entry_point_group="devops_bench.verifiers"
 )
+
+# "error" is not a third outcome of the condition, it is the absence of an
+# observation: the check could not run (kubectl/subprocess failure, unhandled
+# exception) rather than ran and found the condition false. Keeping it
+# distinct from "fail" is what stops an environmental hiccup from reading as
+# an observed violation.
+VerificationStatus = Literal["pass", "fail", "error"]
 
 
 class VerificationResult(BaseModel):
@@ -47,7 +54,15 @@ class VerificationResult(BaseModel):
     echoed from the originating spec node's optional label.
 
     Attributes:
-        success: True when every condition the check covers was met.
+        success: True when every condition the check covers was met. Kept for
+            backward compatibility; always equal to ``status == "pass"``.
+        status: The tri-state outcome. ``"error"`` means the check could not
+            be evaluated (environmental), not that the condition was observed
+            false. Left unset, it is derived from ``success`` (``"pass"`` /
+            ``"fail"``) so existing ``VerificationResult(success=...)`` call
+            sites keep working; a caller that needs to report an error must
+            pass ``status="error"`` explicitly (and, for the invariant above,
+            ``success=False``).
         elapsed_time: Wall-clock seconds spent evaluating the check.
         reason: Human-readable summary of the outcome or failure.
         name: Optional label echoed from the spec node, for result rendering.
@@ -56,11 +71,24 @@ class VerificationResult(BaseModel):
     """
 
     success: bool
+    status: VerificationStatus | None = None
     elapsed_time: float
     reason: str
     name: str | None = None
     children: list[VerificationResult] = Field(default_factory=list)
     raw: dict | None = None
+
+    @model_validator(mode="after")
+    def _resolve_status(self) -> VerificationResult:
+        """Derive ``status`` from ``success`` when unset; enforce the invariant otherwise."""
+        if self.status is None:
+            self.status = "pass" if self.success else "fail"
+        elif (self.status == "pass") != self.success:
+            raise ValueError(
+                f"status='pass' iff success=True; got status={self.status!r}, "
+                f"success={self.success!r}"
+            )
+        return self
 
 
 VerificationResult.model_rebuild()
@@ -101,7 +129,7 @@ class BaseVerifier(BaseModel, ABC):
 
     def _poll_to_result(
         self,
-        check: Callable[[], tuple[bool, str, dict[str, Any] | None]],
+        check: Callable[[], tuple[VerificationStatus, str, dict[str, Any] | None]],
         timeout_sec: float,
     ) -> VerificationResult:
         """Poll ``check`` to a :class:`VerificationResult`.
@@ -112,28 +140,34 @@ class BaseVerifier(BaseModel, ABC):
         (e.g. ``kubectl wait``) build their result directly instead.
 
         Args:
-            check: Evaluated once per poll, returning ``(success, reason, raw)``
-                where ``reason`` describes the latest observation and ``raw``
-                carries optional diagnostics.
+            check: Evaluated once per poll, returning ``(status, reason, raw)``
+                where ``status`` is "pass" when the condition currently holds,
+                "fail" when it was observed not to hold, or "error" when the
+                check itself could not be evaluated (e.g. a kubectl failure);
+                ``reason`` describes the latest observation and ``raw`` carries
+                optional diagnostics.
             timeout_sec: Maximum seconds to keep polling.
 
         Returns:
-            A result whose ``success`` reflects whether the predicate held
-            before the timeout, carrying the last observed ``reason`` and
-            ``raw``.
+            A result reflecting the last observed ``status`` before the
+            timeout (last observation wins, even if that observation is
+            "error"), carrying the last observed ``reason`` and ``raw``.
         """
         start_time = time.monotonic()
-        last: dict[str, Any] = {"reason": "", "raw": None}
+        last: dict[str, Any] = {"status": "fail", "reason": "", "raw": None}
 
         def predicate() -> bool:
-            success, reason, raw = check()
+            status, reason, raw = check()
+            last["status"] = status
             last["reason"] = reason
             last["raw"] = raw
-            return success
+            return status == "pass"
 
-        converged = poll_until(predicate, timeout_sec=timeout_sec)
+        poll_until(predicate, timeout_sec=timeout_sec)
+        status: VerificationStatus = last["status"]
         return VerificationResult(
-            success=converged,
+            success=status == "pass",
+            status=status,
             elapsed_time=time.monotonic() - start_time,
             reason=last["reason"],
             name=self.name,

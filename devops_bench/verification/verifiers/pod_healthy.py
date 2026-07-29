@@ -93,6 +93,19 @@ class PodHealthyVerifier(BaseVerifier):
                 )
 
             stderr = (exc.stderr or "").strip()
+            if "error" in raw:
+                # The fallback fetch itself failed, so the condition was never
+                # observed one way or the other; this is a check error, not a
+                # pod found unhealthy.
+                return VerificationResult(
+                    success=False,
+                    status="error",
+                    elapsed_time=elapsed,
+                    reason=f"kubectl wait failed or timed out: {stderr}; "
+                    f"fallback fetch also failed: {raw['error']}",
+                    name=self.name,
+                    raw=raw,
+                )
             return VerificationResult(
                 success=False,
                 elapsed_time=elapsed,
