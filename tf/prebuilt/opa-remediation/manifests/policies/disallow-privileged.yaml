@@ -1,0 +1,37 @@
+# Security policy: containers must not run privileged. Audit mode so existing
+# violations are *reported* (PolicyReports) rather than blocked; the agent must
+# detect and remediate them. (The agent may flip this to Enforce to prevent
+# future violations.)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged-containers
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: no-privileged-containers
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+                - local-path-storage
+      validate:
+        message: "Privileged containers are not allowed (set securityContext.privileged to false)."
+        pattern:
+          spec:
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"

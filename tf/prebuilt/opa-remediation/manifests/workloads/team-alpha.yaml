@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-alpha
+  labels:
+    owner: alpha-team
+    env: non-prod
+---
+# VIOLATION (security): runs privileged
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: team-alpha
+  labels:
+    app: cache
+    owner: alpha-team
+spec:
+  # revisionHistoryLimit: 0 keeps no old ReplicaSets around. Otherwise a
+  # superseded ReplicaSet keeps its Kyverno PolicyReport (result: fail) alive,
+  # so a namespace-wide report check could never pass even after a correct fix.
+  revisionHistoryLimit: 0
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+        - name: cache
+          image: redis:7@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+---
+# VIOLATION (governance): no resource limits
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: team-alpha
+  labels:
+    app: web
+    owner: alpha-team
+spec:
+  revisionHistoryLimit: 0
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.25@sha256:a484819eb60211f5299034ac80f6a681b06f89e65866ce91f356ed7c72af059c

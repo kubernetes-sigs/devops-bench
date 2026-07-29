@@ -1,0 +1,39 @@
+# Governance policy: every container must declare CPU and memory limits. Audit
+# mode so existing violations are reported, not blocked.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-cpu-memory-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+                - local-path-storage
+      validate:
+        message: "CPU and memory resource limits are required on every container."
+        pattern:
+          spec:
+            =(initContainers):
+              - resources:
+                  limits:
+                    memory: "?*"
+                    cpu: "?*"
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
+                    cpu: "?*"

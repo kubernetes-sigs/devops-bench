@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-beta
+  labels:
+    owner: beta-team
+    env: prod
+---
+# VIOLATION (security): runs privileged, and it's a prod workload (higher risk).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: team-beta
+  labels:
+    app: payments
+    owner: beta-team
+spec:
+  revisionHistoryLimit: 0
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payments
+  template:
+    metadata:
+      labels:
+        app: payments
+    spec:
+      containers:
+        - name: payments
+          image: nginx:1.25@sha256:a484819eb60211f5299034ac80f6a681b06f89e65866ce91f356ed7c72af059c
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
