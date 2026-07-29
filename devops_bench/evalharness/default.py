@@ -713,11 +713,14 @@ class DefaultEvalHarness(Harness):
         workspace_path: Path | None = None
         verification_parse_errors: list[dict[str, str]] = []
         entries: list[VerificationEntry] = []
-        # Track the substituted prompt / expectation as they are computed so a
-        # failed record can carry the same resolved strings a success record
-        # would, falling back to the raw task fields before substitution.
+        # Track the substituted prompt / expectation / safety checklists as they
+        # are computed so a failed record can carry the same resolved strings a
+        # success record would, falling back to the raw task fields before
+        # substitution.
         prompt: str | None = None
         expected_output: str | None = None
+        recoverable_safety: list[str] | None = None
+        catastrophic: list[str] | None = None
         # Whether deployer.up() returned, i.e. there is a cluster verification
         # could target. Distinguishes "infra never came up" from "infra came
         # up but the agent step itself failed" on the exception path below.
@@ -742,6 +745,17 @@ class DefaultEvalHarness(Harness):
             target_dep, ns = self._resolve_deployment_and_namespace(task)
 
             prompt = self.replace_placeholders(task.prompt, active_cluster_name, target_dep, ns)
+            # Resolved here, before the agent runs, so a failure mid-execution
+            # still records the substituted checklists rather than raw
+            # placeholders.
+            recoverable_safety = [
+                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
+                for item in task.recoverable_safety
+            ]
+            catastrophic = [
+                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
+                for item in task.catastrophic
+            ]
 
             chaos_specs = self._parse_chaos_specs(
                 task.chaos_spec, active_cluster_name, target_dep, ns
@@ -805,14 +819,6 @@ class DefaultEvalHarness(Harness):
             expected_output = self.replace_placeholders(
                 task.expected_output, active_cluster_name, target_dep, ns
             )
-            recoverable_safety = [
-                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
-                for item in task.recoverable_safety
-            ]
-            catastrophic = [
-                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
-                for item in task.catastrophic
-            ]
 
             chaos_report, perf_report = self._drain_scenario(scenario_manager, scenario_thread)
 
@@ -867,6 +873,8 @@ class DefaultEvalHarness(Harness):
                 exc,
                 prompt=prompt,
                 expected_output=expected_output,
+                recoverable_safety=recoverable_safety,
+                catastrophic=catastrophic,
                 verification_parse_errors=verification_parse_errors,
                 verification_report=exception_verification_report,
                 verification_status=exception_verification_status,
@@ -972,6 +980,8 @@ class DefaultEvalHarness(Harness):
         *,
         prompt: str | None = None,
         expected_output: str | None = None,
+        recoverable_safety: list[str] | None = None,
+        catastrophic: list[str] | None = None,
         verification_parse_errors: list[dict[str, str]] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "not_evaluated",
@@ -992,6 +1002,10 @@ class DefaultEvalHarness(Harness):
                 the record matches the success shape when substitution had run.
             expected_output: The substituted expectation if computed; falls back
                 to the raw ``task.expected_output``.
+            recoverable_safety: The substituted recoverable-safety checklist if
+                computed; falls back to the raw ``task.recoverable_safety``.
+            catastrophic: The substituted catastrophic checklist if computed;
+                falls back to the raw ``task.catastrophic``.
             verification_parse_errors: Any spec-parse errors collected so far.
             verification_report: The verification report, if verification ran
                 on the exception path (infra was up and entries existed).
@@ -1011,6 +1025,14 @@ class DefaultEvalHarness(Harness):
                 "status": "failed",
                 "error": error_text,
                 "errors": [error_text],
+                "recoverable_safety": (
+                    list(recoverable_safety)
+                    if recoverable_safety is not None
+                    else list(task.recoverable_safety)
+                ),
+                "catastrophic": (
+                    list(catastrophic) if catastrophic is not None else list(task.catastrophic)
+                ),
                 # A failed run never promotes, even on a vetted task.
                 "validated": False,
                 "verification_parse_errors": list(verification_parse_errors or []),
