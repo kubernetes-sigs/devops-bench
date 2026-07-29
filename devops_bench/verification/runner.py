@@ -168,7 +168,136 @@ class VerifierAgent:
             children=children,
         )
 
-    def _run_parallel(self, node: ParallelSpec, deadline: float) -> VerificationResult:
+    def _run_any(
+        self, node: AnySpec, deadline: float, *, single_shot: bool = False
+    ) -> VerificationResult:
+        """Evaluate members, succeeding once some child passes.
+
+        Under ``single_shot`` (assert, or one round of a converge poll) this is
+        exactly one bounded pass: evaluate members in order, stop at the first
+        success. Under converge, handing the whole shared deadline to child 1
+        (the pre-fix behavior) means a later, passing child is never reached;
+        instead this repolls in ROUNDS via :meth:`_poll_rounds`, each round a
+        fresh bounded pass over every needed child, until some round succeeds
+        or the deadline expires. The reported result reflects the last round
+        evaluated.
+        """
+        if single_shot:
+            return self._eval_any_round(node, deadline)
+        return self._poll_rounds(lambda: self._eval_any_round(node, deadline), deadline)
+
+    def _eval_any_round(self, node: AnySpec, deadline: float) -> VerificationResult:
+        """Run one bounded pass over ``node``'s children, stopping at the first success.
+
+        Every child is evaluated with ``single_shot=True`` (compound children
+        propagate it), so this pass is safe to call repeatedly as one round of
+        a converge poll without any child's own I/O overrunning the round.
+        ``deadline`` is threaded through (not zeroed) so a nested parallel
+        child's single_shot wait stays bounded by whatever remains on the
+        converge deadline instead of always waiting up to the ceiling; see
+        :meth:`_run_parallel`.
+        """
+        start = time.monotonic()
+        children: list[VerificationResult] = []
+        reasons: list[str] = []
+
+        for i, child in enumerate(node.checks):
+            res = self._run(child, deadline, single_shot=True)
+            children.append(res)
+            if res.success:
+                reasons.append(f"[{i}] succeeded")
+                break
+            reasons.append(f"[{i}] failed: {res.reason}")
+
+        status = _combine_disjunction([c.status for c in children])
+        return VerificationResult(
+            success=status == "pass",
+            status=status,
+            elapsed_time=time.monotonic() - start,
+            reason="; ".join(reasons),
+            name=node.name,
+            children=children,
+        )
+
+    def _run_none(
+        self, node: NoneSpec, deadline: float, *, single_shot: bool = False
+    ) -> VerificationResult:
+        """Evaluate members, succeeding once a round finds nothing holds.
+
+        Under ``single_shot`` this is exactly one bounded pass, same shape as
+        :meth:`_run_any`. Under converge it repolls in ROUNDS: a child passing
+        mid-poll does not fail the group outright (the desired state "nothing
+        holds" may still be converging), so polling continues until a round
+        has every child fail, or the deadline expires with every round seeing
+        some child pass. The reported result reflects the last round
+        evaluated.
+        """
+        if single_shot:
+            return self._eval_none_round(node, deadline)
+        return self._poll_rounds(lambda: self._eval_none_round(node, deadline), deadline)
+
+    def _eval_none_round(self, node: NoneSpec, deadline: float) -> VerificationResult:
+        """Run one bounded pass over ``node``'s children, stopping at the first pass.
+
+        Mirrors :meth:`_eval_any_round`'s bounded-pass shape; a child that
+        passes ends the round immediately, since the round has already
+        answered "not everything is false" for this pass. ``deadline`` is
+        threaded through for the same reason: a nested parallel child's
+        single_shot wait stays bounded by whatever remains on the converge
+        deadline, capped at the ceiling; see :meth:`_run_parallel`.
+        """
+        start = time.monotonic()
+        children: list[VerificationResult] = []
+        reasons: list[str] = []
+
+        for i, child in enumerate(node.checks):
+            res = self._run(child, deadline, single_shot=True)
+            children.append(res)
+            if res.success:
+                reasons.append(f"[{i}] unexpectedly succeeded: {res.reason}")
+                break
+            reasons.append(f"[{i}] did not hold, as required")
+
+        status = _combine_negated_disjunction([c.status for c in children])
+        return VerificationResult(
+            success=status == "pass",
+            status=status,
+            elapsed_time=time.monotonic() - start,
+            reason="; ".join(reasons),
+            name=node.name,
+            children=children,
+        )
+
+    @staticmethod
+    def _poll_rounds(
+        run_round: Callable[[], VerificationResult], deadline: float
+    ) -> VerificationResult:
+        """Poll ``run_round`` until it succeeds or ``deadline`` passes.
+
+        Shared by the converge branches of :meth:`_run_any` and
+        :meth:`_run_none`: each call to ``run_round`` is one bounded pass over
+        every needed child, so repolling here (rather than inside a single
+        child's own ``verify``) is what keeps one child's patience from coming
+        out of another's budget. Always evaluates at least one round, even
+        against an already-past deadline, mirroring how a single_shot round
+        would run. The elapsed time reported spans every round polled, not
+        just the last one.
+        """
+        start = time.monotonic()
+        last: VerificationResult | None = None
+
+        def predicate() -> bool:
+            nonlocal last
+            last = run_round()
+            return last.success
+
+        poll_until(predicate, timeout_sec=max(0.0, deadline - time.monotonic()))
+        assert last is not None  # predicate always runs at least once
+        return last.model_copy(update={"elapsed_time": time.monotonic() - start})
+
+    def _run_parallel(
+        self, node: ParallelSpec, deadline: float, *, single_shot: bool = False
+    ) -> VerificationResult:
         """Run children concurrently; each sees the full remaining deadline.
 
         A parallel child still blocked in ``kubectl wait`` / ``poll_until`` when
@@ -178,14 +307,6 @@ class VerifierAgent:
         one bad leaf does not abort the rest of the group.
         """
         start = time.monotonic()
-        if not node.checks:
-            return VerificationResult(
-                success=True,
-                elapsed_time=time.monotonic() - start,
-                reason="no checks",
-                name=node.name,
-                children=[],
-            )
         results: list[VerificationResult] = [
             _failed(child, "deadline reached") for child in node.checks
         ]

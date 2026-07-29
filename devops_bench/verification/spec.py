@@ -18,7 +18,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, RootModel, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 
 from devops_bench.core import NotRegisteredError
@@ -26,11 +34,16 @@ from devops_bench.verification import verifiers as _verifiers  # noqa: F401
 from devops_bench.verification.base import VERIFIERS
 
 __all__ = [
+    "AllSpec",
+    "AnySpec",
+    "NoneSpec",
     "ParallelSpec",
     "SequenceSpec",
+    "VerificationEntry",
     "VerificationNode",
     "VerificationSpec",
     "json_schema",
+    "parse_entries",
     "parse_node",
 ]
 
@@ -81,9 +94,11 @@ class SequenceSpec(BaseModel):
         checks: Ordered child nodes; each is itself a parsed verifier node.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["sequence"]
     name: str | None = None
-    checks: list[Any]
+    checks: list[Any] = Field(min_length=1)
 
     _parse_children = model_validator(mode="before")(_parse_compound_children)
 
@@ -98,9 +113,57 @@ class ParallelSpec(BaseModel):
         checks: Sibling child nodes; each is itself a parsed verifier node.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["parallel"]
     name: str | None = None
-    checks: list[Any]
+    checks: list[Any] = Field(min_length=1)
+
+    _parse_children = model_validator(mode="before")(_parse_compound_children)
+
+
+@VERIFIERS.register("all")
+class AllSpec(ParallelSpec):
+    """Vocabulary-correct alias of ``parallel``: every member must pass.
+
+    Subclassing ``ParallelSpec`` is deliberate. The runner dispatches on
+    ``isinstance``, so an ``all`` node routes to the existing parallel branch
+    with no change to the dispatcher.
+    """
+
+    type: Literal["all"]  # type: ignore[assignment]
+
+
+@VERIFIERS.register("any")
+class AnySpec(BaseModel):
+    """Disjunction: passes when at least one member passes.
+
+    Members run in declaration order and evaluation stops at the first success,
+    so cheap checks should be listed first.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["any"]
+    name: str | None = None
+    checks: list[Any] = Field(min_length=1)
+
+    _parse_children = model_validator(mode="before")(_parse_compound_children)
+
+
+@VERIFIERS.register("none")
+class NoneSpec(BaseModel):
+    """Negation: passes when no member passes.
+
+    Evaluation stops at the first member that passes, since one success is
+    enough to fail the group.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["none"]
+    name: str | None = None
+    checks: list[Any] = Field(min_length=1)
 
     _parse_children = model_validator(mode="before")(_parse_compound_children)
 
@@ -188,6 +251,31 @@ def _validation_error(code: str, message: str, *, input_value: Any) -> Validatio
     )
 
 
+_VALUE_ERROR_PREFIX = "Value error, "
+
+
+def _clean_validation_message(exc: ValidationError) -> str:
+    """Extract a readable message from a ``ValidationError``, dropping the boilerplate.
+
+    ``str(exc)`` stringifies the full pydantic error report: a header naming the
+    model, a per-field trailer with error codes and input echoes, and a
+    "For further information" URL. None of that is useful to a task author; only
+    the first error's own message is. Pydantic prefixes that message with
+    ``"Value error, "`` when it wraps a plain ``ValueError`` (as opposed to a
+    ``PydanticCustomError``), so that prefix is stripped when present.
+    """
+    details = exc.errors()
+    if not details:
+        return str(exc)
+    detail = details[0]
+    message = detail.get("msg") or str(exc)
+    if message.startswith(_VALUE_ERROR_PREFIX):
+        message = message[len(_VALUE_ERROR_PREFIX) :]
+    if detail.get("type") == "extra_forbidden" and detail.get("loc"):
+        message = f"{message}: {detail['loc'][-1]!r}"
+    return message
+
+
 class VerificationSpec(RootModel[Any]):
     """Entry-point wrapper; ``VerificationSpec(data).root`` yields a concrete node.
 
@@ -204,3 +292,108 @@ class VerificationSpec(RootModel[Any]):
     def _parse(cls, data: Any) -> Any:
         """Route the raw root payload through the registry parser."""
         return parse_node(data)
+
+
+class VerificationEntry(BaseModel):
+    """One named, scored unit of a task's ``verification_spec``.
+
+    An entry pairs a check subtree with the scoring vocabulary: what the check
+    is for (``role``), how badly it matters when it fails (``severity``), how
+    much it counts (``weight``), and how it is evaluated (``mode``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    role: Literal["objective", "safeguard"]
+    severity: Literal["recoverable", "catastrophic"] | None = None
+    mode: Literal["converge", "assert", "hold"] | None = None
+    weight: float = Field(default=1.0, gt=0)
+    check: Any
+
+    @field_validator("check", mode="before")
+    @classmethod
+    def _parse_check(cls, value: Any) -> Any:
+        """Route the check subtree through the registry parser."""
+        try:
+            return parse_node(value)
+        except ValidationError as exc:
+            raise ValueError(_clean_validation_message(exc)) from exc
+
+    @model_validator(mode="after")
+    def _check_role_and_mode(self) -> VerificationEntry:
+        """Enforce the role/severity pairing and reject the unbuilt mode."""
+        if self.role == "safeguard" and self.severity is None:
+            raise ValueError("severity is required when role is 'safeguard'")
+        if self.role == "objective" and self.severity is not None:
+            raise ValueError("severity is not allowed when role is 'objective'")
+        if self.mode == "hold":
+            raise ValueError("mode 'hold' is not yet supported; use 'converge' or 'assert'")
+        return self
+
+    @property
+    def resolved_mode(self) -> str:
+        """The effective mode: explicit if set, otherwise derived from role.
+
+        Objectives converge because they describe a state the agent is working
+        toward. Safeguards assert because they describe a state that must never
+        have been entered, and polling one would just wait for a violation to
+        heal.
+        """
+        if self.mode is not None:
+            return self.mode
+        return "converge" if self.role == "objective" else "assert"
+
+
+def parse_entries(raw: Any) -> tuple[list[VerificationEntry], list[dict[str, str]]]:
+    """Parse a task's raw ``verification_spec`` into entries plus per-entry errors.
+
+    Parsing is per entry and never raises. One malformed entry is reported and
+    skipped while its siblings still load, because a single bad entry must not
+    sink a whole benchmark run. Callers surface the errors on the result record
+    as ``verification_parse_errors``.
+
+    Args:
+        raw: The task's ``verification_spec`` value, normally a list of mappings.
+
+    Returns:
+        A ``(entries, errors)`` pair. Each error is a ``{"name", "reason"}``
+        mapping, matching the shape already written to result records.
+    """
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], [
+            {
+                "name": "<root>",
+                "reason": (
+                    f"verification_spec must be a list of entries, got {type(raw).__name__}"
+                ),
+            }
+        ]
+
+    entries: list[VerificationEntry] = []
+    errors: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for index, item in enumerate(raw):
+        label = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(label, str) or not label:
+            label = f"<index {index}>"
+        try:
+            entry = VerificationEntry.model_validate(item)
+        except ValidationError as exc:
+            errors.append({"name": label, "reason": _clean_validation_message(exc)})
+            continue
+        if entry.name in seen:
+            errors.append(
+                {
+                    "name": entry.name,
+                    "reason": f"duplicate verification entry name {entry.name!r}",
+                }
+            )
+            continue
+        seen.add(entry.name)
+        entries.append(entry)
+
+    return entries, errors

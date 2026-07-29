@@ -233,13 +233,37 @@ def test_parallel_leaf_exception_becomes_failed_child(agent: VerifierAgent) -> N
     assert "boom:2" in failed[0].reason
 
 
-def test_parallel_empty_checks_is_vacuously_true(agent: VerifierAgent) -> None:
-    """An empty parallel group succeeds vacuously."""
-    res = agent.wait_for_condition({"type": "parallel", "checks": []})
+def test_parallel_single_shot_bounds_the_wait_at_the_ceiling(agent: VerifierAgent) -> None:
+    """A single_shot parallel group's futures_wait is bounded, not unbounded.
 
-    assert res.success is True
-    assert res.reason == "no checks"
-    assert res.children == []
+    ``None`` would let one hung child stall the run forever; assert-mode
+    (single_shot) passes :data:`_SINGLE_SHOT_WAIT_CEILING_SEC` instead.
+    """
+    entries, errors = parse_entries(
+        [
+            {
+                "name": "e",
+                "role": "safeguard",
+                "severity": "catastrophic",
+                "check": {
+                    "type": "parallel",
+                    "checks": [_leaf(succeed=True, tag="1")],
+                },
+            }
+        ]
+    )
+    assert errors == []
+
+    recorded: dict[str, float | None] = {}
+
+    def fake_wait(futs: Any, timeout: float | None = None) -> Any:
+        recorded["timeout"] = timeout
+        return real_futures_wait(futs, timeout=timeout)
+
+    with patch("devops_bench.verification.runner.futures_wait", side_effect=fake_wait):
+        agent.run_entry(entries[0], timeout_sec=30)
+
+    assert recorded["timeout"] == _SINGLE_SHOT_WAIT_CEILING_SEC
 
 
 # --- nesting --------------------------------------------------------------

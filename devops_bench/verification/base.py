@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from devops_bench.core import Registry
 from devops_bench.k8s import poll_until
@@ -78,6 +78,11 @@ class BaseVerifier(BaseModel, ABC):
             ``devops_bench.k8s`` wrappers so a check can target a specific
             cluster. When ``None`` the wrappers use the ambient kubeconfig.
     """
+
+    # Reject any key the concrete verifier does not declare. A typo'd or
+    # stale field would otherwise be silently dropped and the check would
+    # run with defaults instead of the author's intent.
+    model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     kubeconfig: str | None = None
