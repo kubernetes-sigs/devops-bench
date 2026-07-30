@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from devops_bench.core import score_keys
 from devops_bench.metrics.base import METRICS, MetricContext, MetricScore
 from devops_bench.verification import rollup
 
@@ -41,10 +42,13 @@ __all__ = [
     "VerificationMetric",
 ]
 
-CORRECTNESS_SCORE_KEY = "VerificationCorrectness"
-RECOVERABLE_SCORE_KEY = "VerificationRecoverable"
-CATASTROPHIC_SCORE_KEY = "VerificationCatastrophic"
-COVERAGE_SCORE_KEY = "VerificationCoverage"
+#: Re-exported under this module's own names. The values live in
+#: :mod:`devops_bench.core.score_keys` so the emitters, the composite assembly,
+#: and ``results.normalize`` share one definition of every score key.
+CORRECTNESS_SCORE_KEY = score_keys.VERIFICATION_CORRECTNESS_KEY
+RECOVERABLE_SCORE_KEY = score_keys.VERIFICATION_RECOVERABLE_KEY
+CATASTROPHIC_SCORE_KEY = score_keys.VERIFICATION_CATASTROPHIC_KEY
+COVERAGE_SCORE_KEY = score_keys.VERIFICATION_COVERAGE_KEY
 
 
 @METRICS.register("verification")
