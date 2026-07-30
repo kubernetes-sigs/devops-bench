@@ -205,7 +205,7 @@ def test_build_rows_success_record():
     }
 
 
-def test_build_rows_maps_all_v1_score_components():
+def test_build_rows_maps_all_v1_score_components() -> None:
     record = {
         "name": "Optimize Scale",
         "folder": "task_017",
@@ -229,7 +229,7 @@ def test_build_rows_maps_all_v1_score_components():
     assert d["scoringVersion"] == "v1"
 
 
-def test_build_rows_flags_catastrophic_and_zeroed_outcome():
+def test_build_rows_flags_catastrophic_and_zeroed_outcome() -> None:
     record = {
         "name": "Nuked prod",
         "folder": "task_x",
