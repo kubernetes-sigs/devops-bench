@@ -26,6 +26,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
+from devops_bench.core import score_keys
 from devops_bench.results.row import Manifest, ResultRow
 
 __all__ = [
@@ -44,18 +45,18 @@ __all__ = [
     "slugify",
 ]
 
-#: ``res["scores"]`` keys the flat row fields are read from. These match the
-#: ``MetricScore.name`` (and the composite key) emitted by the metrics layer;
-#: kept as literals here so the results layer stays free of the metrics/SDK
-#: import (it only extracts, never scores).
-OUTCOME_SCORE_KEY = "OutcomeScore"
-TOOL_SCORE_KEY = "ToolInvocation"
+#: ``res["scores"]`` keys the flat row fields are read from, re-exported under
+#: this module's historical names. The values live in
+#: :mod:`devops_bench.core.score_keys` so the metrics and results layers share
+#: one definition without importing each other.
+OUTCOME_SCORE_KEY = score_keys.OUTCOME_SCORE_KEY
+TOOL_SCORE_KEY = score_keys.TOOL_INVOCATION_KEY
 #: Correctness ``c`` is the checklist score, falling back to OutcomeValidity for
 #: tasks that define no checklist.
-CORRECTNESS_SCORE_KEY = "ChecklistScore"
-CORRECTNESS_FALLBACK_KEY = "OutcomeValidity"
-RECOVERABLE_SAFETY_SCORE_KEY = "RecoverableSafety"
-CATASTROPHIC_SCORE_KEY = "Catastrophic"
+CORRECTNESS_SCORE_KEY = score_keys.CHECKLIST_SCORE_KEY
+CORRECTNESS_FALLBACK_KEY = score_keys.OUTCOME_VALIDITY_KEY
+RECOVERABLE_SAFETY_SCORE_KEY = score_keys.RECOVERABLE_SAFETY_KEY
+CATASTROPHIC_SCORE_KEY = score_keys.CATASTROPHIC_KEY
 
 # Token usage aliases per provider, in lookup priority. The canonical keys
 # (``input`` / ``cached`` / ``reasoning`` / ``output``; see

@@ -681,3 +681,53 @@ def test_batch_survives_a_failing_composite_assembly(mocker) -> None:
     # Both records still scored; neither was dropped by the raise.
     assert "OutcomeValidity" in results[0]["scores"]
     assert "OutcomeValidity" in results[1]["scores"]
+
+
+def test_finalize_propagates_the_real_validation_error() -> None:
+    """An out-of-range sub-score raises out of the real scoring formula.
+
+    The batch-level guard above stubs the raise; this pins that
+    ``compute_outcome_score_v1`` is what actually rejects a malformed
+    sub-score, so the guard is protecting against a real failure mode rather
+    than a hypothetical one.
+    """
+    scores = {
+        "ChecklistScore": {"score": 1.4, "success": True},  # outside [0, 1]
+        "RecoverableSafety": {"score": 0.55, "success": True},
+    }
+    with pytest.raises(ValueError, match=r"correctness must be in \[0, 1\]"):
+        pipeline._finalize_outcome_score(scores)  # noqa: SLF001 - testing internals
+    assert pipeline.OUTCOME_SCORE_KEY not in scores
+
+
+def test_batch_survives_a_real_out_of_range_sub_score(
+    registry: Registry[Any], mocker: MockerFixture
+) -> None:
+    """End to end: a genuinely malformed sub-score costs one record its composite.
+
+    Nothing is stubbed on the scoring path here, so the guard in
+    ``evaluate_metrics_batch`` is exercised against the real ``ValueError``
+    ``compute_outcome_score_v1`` raises.
+    """
+
+    class _BadCorrectness:
+        """Emits a correctness score outside the unit interval."""
+
+        name = "checklist"
+
+        def applies(self, ctx: MetricContext) -> bool:
+            return True
+
+        def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+            yield MetricScore(name="ChecklistScore", score=1.4, success=True)
+
+    registry.register("checklist")(_BadCorrectness)
+    results = [_result("t1"), _result("t2")]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    # The offending record keeps its sub-score but loses only the composite,
+    # and the batch still reaches the second record.
+    assert results[0]["scores"]["ChecklistScore"]["score"] == pytest.approx(1.4)
+    assert pipeline.OUTCOME_SCORE_KEY not in results[0]["scores"]
+    assert "ChecklistScore" in results[1]["scores"]

@@ -21,7 +21,7 @@ from typing import Any
 
 from deepeval.test_case import LLMTestCase
 
-from devops_bench.core import get_bool, get_logger
+from devops_bench.core import get_bool, get_logger, score_keys
 
 # Imported for their @METRICS.register side effects.
 from devops_bench.metrics import (
@@ -58,16 +58,16 @@ _log = get_logger("metrics.pipeline")
 #: ``res["scores"]`` key carrying the v1 composite outcome score. Assembled from
 #: the sub-scores after all metrics run (see :func:`_finalize_outcome_score`);
 #: the flat leaderboard row reads its ``outcomeScore`` from this key.
-OUTCOME_SCORE_KEY = "OutcomeScore"
+OUTCOME_SCORE_KEY = score_keys.OUTCOME_SCORE_KEY
 
-# Sub-score keys read to assemble the composite. These mirror the ``MetricScore``
-# names emitted by the checklist / outcome-validity / safety metrics; kept as
-# literals here (rather than imported) so the assembly does not couple to those
-# modules' internals, matching how ``results.normalize`` reads score keys.
-_CORRECTNESS_KEY = "ChecklistScore"
-_CORRECTNESS_FALLBACK_KEY = "OutcomeValidity"
-_RECOVERABLE_SAFETY_KEY = "RecoverableSafety"
-_CATASTROPHIC_KEY = "Catastrophic"
+# Sub-score keys read to assemble the composite. Sourced from
+# ``core.score_keys`` so the emitters, this assembly, and ``results.normalize``
+# share one definition; reading them by name still keeps the assembly from
+# importing the metric modules that emit them.
+_CORRECTNESS_KEY = score_keys.CHECKLIST_SCORE_KEY
+_CORRECTNESS_FALLBACK_KEY = score_keys.OUTCOME_VALIDITY_KEY
+_RECOVERABLE_SAFETY_KEY = score_keys.RECOVERABLE_SAFETY_KEY
+_CATASTROPHIC_KEY = score_keys.CATASTROPHIC_KEY
 
 # Order in which builtin metric keys appear in results.json.
 _BUILTIN_METRIC_KEYS: tuple[str, ...] = (
