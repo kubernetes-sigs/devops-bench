@@ -43,12 +43,12 @@ Both are listed in the `PROVIDERS` registry.
 
 1. The `INFRA_PROVIDER` environment variable.
 2. An explicit `provider:` key in the task's `infrastructure:` block.
-3. Deduced from the stack name: if `kind` appears in the name it's the `kind` provider, otherwise `gcp`.
+3. Deduced from the stack name, in exactly one case: an in-repo (relative) stack whose final path segment is `kind` resolves to the `kind` provider.
 
 The env var outranks the config key so a task can pin a default `provider:` while runs stay overridable from the environment (the same way `TARGET_DEPLOYMENT_NAME` and `NAMESPACE` resolve).
 
 > [!IMPORTANT]
-> Deduction only applies to in-repo (relative) stacks. An absolute or external stack path **must** name its provider explicitly (via `provider:` or `INFRA_PROVIDER`) — the harness will not guess. An unknown provider name is a configuration error.
+> There is no default cloud. Any stack that does not deduce to `kind` — including every absolute or external path — **must** name its provider explicitly via `provider:` or `INFRA_PROVIDER`, or `_select_provider` raises a `ConfigError`. Nothing falls back to `gcp`, so a new provider never silently inherits another's defaults. An unknown provider name is likewise a configuration error.
 
 ## What the Terraform provisions
 
