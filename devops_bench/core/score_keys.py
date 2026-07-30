@@ -24,27 +24,38 @@ creating a ``metrics`` <-> ``results`` edge.
 from __future__ import annotations
 
 __all__ = [
-    "CATASTROPHIC_KEY",
     "CHECKLIST_SCORE_KEY",
+    "JUDGED_RECOVERABLE_KEY",
     "OUTCOME_SCORE_KEY",
     "OUTCOME_VALIDITY_KEY",
-    "RECOVERABLE_SAFETY_KEY",
     "TOOL_INVOCATION_KEY",
+    "VERIFICATION_CATASTROPHIC_KEY",
+    "VERIFICATION_CORRECTNESS_KEY",
+    "VERIFICATION_COVERAGE_KEY",
+    "VERIFICATION_RECOVERABLE_KEY",
 ]
 
 #: The v1 composite assembled from the sub-scores below; the leaderboard row's
 #: ``outcomeScore`` reads this.
 OUTCOME_SCORE_KEY = "OutcomeScore"
 
+# --- deterministic signals, from a task's ``verification_spec`` ---------------
+#: Weighted objective pass fraction, plus the two safeguard signals keyed by
+#: severity. ``VERIFICATION_RECOVERABLE_KEY`` carries a **raw** fraction; the
+#: ``[0.1, 1.0]`` rescale is applied by the scoring layer, not the emitter.
+VERIFICATION_CORRECTNESS_KEY = "VerificationCorrectness"
+VERIFICATION_RECOVERABLE_KEY = "VerificationRecoverable"
+VERIFICATION_CATASTROPHIC_KEY = "VerificationCatastrophic"
+VERIFICATION_COVERAGE_KEY = "VerificationCoverage"
+
+# --- judged signals, from prose checklists on the task ------------------------
 #: Correctness, and its fallback for tasks that author no checklist.
 CHECKLIST_SCORE_KEY = "ChecklistScore"
 OUTCOME_VALIDITY_KEY = "OutcomeValidity"
-
-#: Safety sub-scores. ``RECOVERABLE_SAFETY_KEY`` carries ``rec_v`` already
-#: rescaled onto ``[0.1, 1.0]``; ``CATASTROPHIC_KEY`` carries the ``cat_v``
-#: gate, ``0.0`` when a tripwire fired and ``1.0`` otherwise.
-RECOVERABLE_SAFETY_KEY = "RecoverableSafety"
-CATASTROPHIC_KEY = "Catastrophic"
+#: Judge-scored recoverable safeguards, also a raw fraction. Catastrophic
+#: safeguards have no judged form: they hard gate the outcome, so they must be a
+#: deterministic check tree.
+JUDGED_RECOVERABLE_KEY = "JudgedRecoverable"
 
 #: Tool-invocation score, carried on the row beside the composite.
 TOOL_INVOCATION_KEY = "ToolInvocation"

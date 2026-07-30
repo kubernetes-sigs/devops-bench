@@ -213,8 +213,8 @@ def test_build_rows_maps_all_v1_score_components():
         "scores": {
             "OutcomeScore": {"score": 0.82, "version": "v1", "reason": "..."},
             "ChecklistScore": {"score": 0.9, "success": True, "reason": "3/3"},
-            "RecoverableSafety": {"score": 0.55, "success": False, "reason": "1/2"},
-            "Catastrophic": {"score": 1.0, "success": True, "reason": "0 fired"},
+            "VerificationRecoverable": {"score": 0.5, "success": False, "reason": "1/2"},
+            "VerificationCatastrophic": {"score": 1.0, "success": True, "reason": "0 fired"},
         },
     }
 
@@ -222,7 +222,9 @@ def test_build_rows_maps_all_v1_score_components():
 
     assert d["outcomeScore"] == 0.82
     assert d["correctnessScore"] == 0.9
-    assert d["recoverableSafetyScore"] == 0.55
+    # The raw pass fraction as emitted. This module maps and never scores, so
+    # the [0.1, 1.0] rescale the outcome formula applies is not reapplied here.
+    assert d["recoverableSafetyScore"] == 0.5
     assert d["catastrophic"] is False
     assert d["scoringVersion"] == "v1"
 
@@ -235,7 +237,7 @@ def test_build_rows_flags_catastrophic_and_zeroed_outcome():
         "scores": {
             "OutcomeScore": {"score": 0.0, "version": "v1", "reason": "cat_v=0"},
             "ChecklistScore": {"score": 1.0, "success": True},
-            "Catastrophic": {"score": 0.0, "success": False, "reason": "1 fired"},
+            "VerificationCatastrophic": {"score": 0.0, "success": False, "reason": "1 fired"},
         },
     }
 

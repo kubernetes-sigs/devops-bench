@@ -31,10 +31,7 @@ from devops_bench.results.row import Manifest, ResultRow
 
 __all__ = [
     "CATASTROPHIC_SCORE_KEY",
-    "CORRECTNESS_FALLBACK_KEY",
-    "CORRECTNESS_SCORE_KEY",
     "OUTCOME_SCORE_KEY",
-    "RECOVERABLE_SAFETY_SCORE_KEY",
     "TOOL_SCORE_KEY",
     "NormalizedTokens",
     "build_rows",
@@ -51,12 +48,22 @@ __all__ = [
 #: one definition without importing each other.
 OUTCOME_SCORE_KEY = score_keys.OUTCOME_SCORE_KEY
 TOOL_SCORE_KEY = score_keys.TOOL_INVOCATION_KEY
-#: Correctness ``c`` is the checklist score, falling back to OutcomeValidity for
-#: tasks that define no checklist.
-CORRECTNESS_SCORE_KEY = score_keys.CHECKLIST_SCORE_KEY
-CORRECTNESS_FALLBACK_KEY = score_keys.OUTCOME_VALIDITY_KEY
-RECOVERABLE_SAFETY_SCORE_KEY = score_keys.RECOVERABLE_SAFETY_KEY
-CATASTROPHIC_SCORE_KEY = score_keys.CATASTROPHIC_KEY
+
+#: Preference chains mirroring the composite assembly, so a row's components
+#: name the same signals the headline score was built from: a deterministic
+#: verification score wins over the judged equivalent. ``recoverableSafetyScore``
+#: carries the raw pass fraction, since this module maps and never scores; the
+#: ``[0.1, 1.0]`` rescale the formula applies belongs to the metrics layer.
+_CORRECTNESS_KEYS = (
+    score_keys.VERIFICATION_CORRECTNESS_KEY,
+    score_keys.CHECKLIST_SCORE_KEY,
+    score_keys.OUTCOME_VALIDITY_KEY,
+)
+_RECOVERABLE_KEYS = (
+    score_keys.VERIFICATION_RECOVERABLE_KEY,
+    score_keys.JUDGED_RECOVERABLE_KEY,
+)
+CATASTROPHIC_SCORE_KEY = score_keys.VERIFICATION_CATASTROPHIC_KEY
 
 # Token usage aliases per provider, in lookup priority. The canonical keys
 # (``input`` / ``cached`` / ``reasoning`` / ``output``; see
@@ -233,6 +240,23 @@ def extract_score(scores: Mapping[str, Any] | None, key: str) -> float | None:
     return None
 
 
+def _first_score(scores: Mapping[str, Any] | None, keys: tuple[str, ...]) -> float | None:
+    """Return the score under the first key in ``keys`` that carries one.
+
+    Args:
+        scores: The record's ``scores`` mapping, or ``None``.
+        keys: Candidate score keys in preference order.
+
+    Returns:
+        The first numeric score found, or ``None`` when no key carries one.
+    """
+    for key in keys:
+        value = extract_score(scores, key)
+        if value is not None:
+            return value
+    return None
+
+
 def _scoring_version(scores: Mapping[str, Any] | None) -> str:
     """Read the scoring-framework version stamped on the composite entry.
 
@@ -268,9 +292,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
     for record in records:
         scores = record.get("scores")
         tokens = normalize_tokens(record.get("tokens"))
-        correctness = extract_score(scores, CORRECTNESS_SCORE_KEY)
-        if correctness is None:
-            correctness = extract_score(scores, CORRECTNESS_FALLBACK_KEY)
+        correctness = _first_score(scores, _CORRECTNESS_KEYS)
         catastrophic_score = extract_score(scores, CATASTROPHIC_SCORE_KEY)
         rows.append(
             ResultRow(
@@ -285,7 +307,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 iteration=0,
                 outcome_score=extract_score(scores, OUTCOME_SCORE_KEY),
                 correctness_score=correctness,
-                recoverable_safety_score=extract_score(scores, RECOVERABLE_SAFETY_SCORE_KEY),
+                recoverable_safety_score=_first_score(scores, _RECOVERABLE_KEYS),
                 catastrophic=catastrophic_score == 0.0,
                 scoring_version=_scoring_version(scores),
                 tool_score=extract_score(scores, TOOL_SCORE_KEY),
