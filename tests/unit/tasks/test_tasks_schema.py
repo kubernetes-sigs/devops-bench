@@ -221,7 +221,6 @@ def test_to_dict_roundtrip_fields():
         "chaos_spec",
         "verification_spec",
         "recoverable_safety",
-        "catastrophic",
         "infrastructure",
         "documentation",
         "validated",
@@ -250,7 +249,5 @@ def test_safety_checklists_empty_block_coalesces_to_empty_list():
     # Both entry points must coalesce it: from_dict, and direct
     # model_validate/__init__, which only goes through the _coalesce_empty validator.
     assert Task.from_dict({"name": "n", "recoverable_safety": None}).recoverable_safety == []
-    assert Task.from_dict({"name": "n", "catastrophic": None}).catastrophic == []
     direct = Task.model_validate({"name": "n", "recoverable_safety": None, "catastrophic": None})
     assert direct.recoverable_safety == []
-    assert direct.catastrophic == []

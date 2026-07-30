@@ -720,7 +720,6 @@ class DefaultEvalHarness(Harness):
         prompt: str | None = None
         expected_output: str | None = None
         recoverable_safety: list[str] | None = None
-        catastrophic: list[str] | None = None
         # Whether deployer.up() returned, i.e. there is a cluster verification
         # could target. Distinguishes "infra never came up" from "infra came
         # up but the agent step itself failed" on the exception path below.
@@ -751,10 +750,6 @@ class DefaultEvalHarness(Harness):
             recoverable_safety = [
                 self.replace_placeholders(item, active_cluster_name, target_dep, ns)
                 for item in task.recoverable_safety
-            ]
-            catastrophic = [
-                self.replace_placeholders(item, active_cluster_name, target_dep, ns)
-                for item in task.catastrophic
             ]
 
             chaos_specs = self._parse_chaos_specs(
@@ -843,7 +838,6 @@ class DefaultEvalHarness(Harness):
                 verification_report=verification_report,
                 verification_status=verification_status,
                 recoverable_safety=recoverable_safety,
-                catastrophic=catastrophic,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
@@ -874,7 +868,6 @@ class DefaultEvalHarness(Harness):
                 prompt=prompt,
                 expected_output=expected_output,
                 recoverable_safety=recoverable_safety,
-                catastrophic=catastrophic,
                 verification_parse_errors=verification_parse_errors,
                 verification_report=exception_verification_report,
                 verification_status=exception_verification_status,
@@ -908,7 +901,6 @@ class DefaultEvalHarness(Harness):
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "evaluated",
         recoverable_safety: list[str] | None = None,
-        catastrophic: list[str] | None = None,
     ) -> dict[str, Any]:
         """Shape a typed :class:`AgentResult` + reports into the on-disk schema.
 
@@ -961,9 +953,6 @@ class DefaultEvalHarness(Harness):
                     if recoverable_safety is not None
                     else list(task.recoverable_safety)
                 ),
-                "catastrophic": (
-                    list(catastrophic) if catastrophic is not None else list(task.catastrophic)
-                ),
                 "chaos_report": chaos_report,
                 "perf_report": perf_report,
                 "verification_parse_errors": list(verification_parse_errors or []),
@@ -981,7 +970,6 @@ class DefaultEvalHarness(Harness):
         prompt: str | None = None,
         expected_output: str | None = None,
         recoverable_safety: list[str] | None = None,
-        catastrophic: list[str] | None = None,
         verification_parse_errors: list[dict[str, str]] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "not_evaluated",
@@ -1004,8 +992,6 @@ class DefaultEvalHarness(Harness):
                 to the raw ``task.expected_output``.
             recoverable_safety: The substituted recoverable-safety checklist if
                 computed; falls back to the raw ``task.recoverable_safety``.
-            catastrophic: The substituted catastrophic checklist if computed;
-                falls back to the raw ``task.catastrophic``.
             verification_parse_errors: Any spec-parse errors collected so far.
             verification_report: The verification report, if verification ran
                 on the exception path (infra was up and entries existed).
@@ -1029,9 +1015,6 @@ class DefaultEvalHarness(Harness):
                     list(recoverable_safety)
                     if recoverable_safety is not None
                     else list(task.recoverable_safety)
-                ),
-                "catastrophic": (
-                    list(catastrophic) if catastrophic is not None else list(task.catastrophic)
                 ),
                 # A failed run never promotes, even on a vetted task.
                 "validated": False,
@@ -1076,7 +1059,6 @@ class DefaultEvalHarness(Harness):
             "chaos_spec": task.chaos_spec,
             "verification_spec": task.verification_spec,
             "recoverable_safety": list(task.recoverable_safety),
-            "catastrophic": list(task.catastrophic),
             "chaos_report": {},
             "perf_report": {},
             "documentation": [doc.model_dump() for doc in task.documentation],

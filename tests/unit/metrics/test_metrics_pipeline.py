@@ -564,20 +564,16 @@ def test_build_context_missing_expected_output_defaults_and_warns(
 # --- the safety metric, driven through the batch pipeline --------------------
 
 
-def test_safety_metric_scores_both_checklists_through_the_batch(
+def test_safety_metric_scores_the_recoverable_checklist_through_the_batch(
     registry: Registry[Any], mocker: MockerFixture
 ) -> None:
-    """The registered ``safety`` metric writes both sub-scores onto the record.
+    """The registered ``safety`` metric writes its sub-score onto the record.
 
     Covers the seam the per-metric tests cannot: that ``safety`` is a builtin
-    key the batch actually builds and runs, and that its emitted score names
-    land in ``result["scores"]`` for the composite to read.
+    key the batch actually builds and runs, and that its emitted score name
+    lands in ``result["scores"]`` for the composite to read.
     """
-    from devops_bench.metrics.safety import (
-        CATASTROPHIC_SCORE_KEY,
-        RECOVERABLE_SAFETY_SCORE_KEY,
-        SafetyMetric,
-    )
+    from devops_bench.metrics.safety import JUDGED_RECOVERABLE_SCORE_KEY, SafetyMetric
 
     # Stand in for GEval so construction skips DeepEval's judge-type validation.
     def _fake_geval(**kwargs: Any) -> SimpleNamespace:
@@ -594,13 +590,11 @@ def test_safety_metric_scores_both_checklists_through_the_batch(
 
     results = [_result()]
     results[0]["recoverable_safety"] = ["kept the service reachable"]
-    results[0]["catastrophic"] = ["deleted the cluster"]
 
     evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
 
     scores = results[0]["scores"]
-    assert scores[RECOVERABLE_SAFETY_SCORE_KEY]["score"] == pytest.approx(1.0)
-    assert scores[CATASTROPHIC_SCORE_KEY]["score"] == pytest.approx(1.0)
+    assert scores[JUDGED_RECOVERABLE_SCORE_KEY]["score"] == pytest.approx(1.0)
     # A registered metric runs either way, so pin the builtin membership too —
     # that is what orders safety ahead of third-party metrics in the batch.
     assert "safety" in pipeline._BUILTIN_METRIC_KEYS  # noqa: SLF001
@@ -610,11 +604,7 @@ def test_safety_metric_skipped_when_task_declares_no_constraints(
     registry: Registry[Any], mocker: MockerFixture
 ) -> None:
     """A task with neither checklist leaves no safety scores and calls no judge."""
-    from devops_bench.metrics.safety import (
-        CATASTROPHIC_SCORE_KEY,
-        RECOVERABLE_SAFETY_SCORE_KEY,
-        SafetyMetric,
-    )
+    from devops_bench.metrics.safety import JUDGED_RECOVERABLE_SCORE_KEY, SafetyMetric
 
     run_geval = mocker.patch("devops_bench.metrics.safety.run_geval")
     registry.register("safety")(SafetyMetric)
@@ -622,6 +612,5 @@ def test_safety_metric_skipped_when_task_declares_no_constraints(
     results = [_result()]
     evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
 
-    assert RECOVERABLE_SAFETY_SCORE_KEY not in results[0]["scores"]
-    assert CATASTROPHIC_SCORE_KEY not in results[0]["scores"]
+    assert JUDGED_RECOVERABLE_SCORE_KEY not in results[0]["scores"]
     run_geval.assert_not_called()

@@ -156,13 +156,9 @@ def test_success_record_carries_substituted_safety_checklists(isolated_env: None
     task = Task(
         name="t",
         recoverable_safety=["kept {{TARGET_DEPLOYMENT_NAME}} available"],
-        catastrophic=["touched something outside {{NAMESPACE}}"],
     )
     substituted_recoverable = [
         harness.replace_placeholders(item, cluster_name="cl") for item in task.recoverable_safety
-    ]
-    substituted_catastrophic = [
-        harness.replace_placeholders(item, cluster_name="cl") for item in task.catastrophic
     ]
 
     record = harness._build_success_record(  # noqa: SLF001 - testing the record shape
@@ -173,17 +169,15 @@ def test_success_record_carries_substituted_safety_checklists(isolated_env: None
         chaos_report={},
         perf_report={},
         recoverable_safety=substituted_recoverable,
-        catastrophic=substituted_catastrophic,
     )
 
     assert record["recoverable_safety"] == ["kept my-app available"]
-    assert record["catastrophic"] == ["touched something outside custom-ns"]
 
 
 def test_success_record_falls_back_to_raw_safety_checklists(isolated_env: None) -> None:
     # Callers that pass nothing keep the raw task values seeded by _empty_record.
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
-    task = Task(name="t", recoverable_safety=["raw item"], catastrophic=["raw trip"])
+    task = Task(name="t", recoverable_safety=["raw item"])
 
     record = harness._build_success_record(  # noqa: SLF001
         task=task,
@@ -195,7 +189,6 @@ def test_success_record_falls_back_to_raw_safety_checklists(isolated_env: None) 
     )
 
     assert record["recoverable_safety"] == ["raw item"]
-    assert record["catastrophic"] == ["raw trip"]
 
 
 def test_failed_record_carries_substituted_safety_checklists(isolated_env: None) -> None:
@@ -214,36 +207,29 @@ def test_failed_record_carries_substituted_safety_checklists(isolated_env: None)
     task = Task(
         name="t",
         recoverable_safety=["kept {{TARGET_DEPLOYMENT_NAME}} available"],
-        catastrophic=["touched something outside {{NAMESPACE}}"],
     )
     substituted_recoverable = [
         harness.replace_placeholders(item, cluster_name="cl") for item in task.recoverable_safety
-    ]
-    substituted_catastrophic = [
-        harness.replace_placeholders(item, cluster_name="cl") for item in task.catastrophic
     ]
 
     record = harness._build_failed_record(  # noqa: SLF001 - testing the record shape
         task,
         RuntimeError("agent died"),
         recoverable_safety=substituted_recoverable,
-        catastrophic=substituted_catastrophic,
     )
 
     assert record["status"] == "failed"
     assert record["recoverable_safety"] == ["kept my-app available"]
-    assert record["catastrophic"] == ["touched something outside custom-ns"]
 
 
 def test_failed_record_falls_back_to_raw_safety_checklists(isolated_env: None) -> None:
     """A failure before substitution keeps the raw task values, never a KeyError."""
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
-    task = Task(name="t", recoverable_safety=["raw item"], catastrophic=["raw trip"])
+    task = Task(name="t", recoverable_safety=["raw item"])
 
     record = harness._build_failed_record(task, RuntimeError("infra died"))  # noqa: SLF001
 
     assert record["recoverable_safety"] == ["raw item"]
-    assert record["catastrophic"] == ["raw trip"]
 
 
 def test_granted_skill_paths_snapshot_captured_once(
@@ -707,7 +693,6 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "chaos_spec",
         "verification_spec",
         "recoverable_safety",
-        "catastrophic",
         "chaos_report",
         "perf_report",
         "documentation",
