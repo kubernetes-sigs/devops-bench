@@ -162,10 +162,18 @@ def _finalize_outcome_score(scores: dict[str, Any]) -> None:
     if correctness is None:
         return
 
-    raw_recoverable = _first_score(scores, _RECOVERABLE_KEYS)
-    recoverable = None if raw_recoverable is None else rescale_recoverable_safety(raw_recoverable)
     catastrophic_score = _score_value(scores.get(_CATASTROPHIC_KEY))
     catastrophic = catastrophic_score == 0.0 if catastrophic_score is not None else False
+
+    # Read the gate before rescaling. ``compute_outcome_score_v1`` deliberately
+    # short-circuits a catastrophic run before validating its other inputs, so
+    # rescaling first would raise on a malformed value the short-circuit is
+    # meant to tolerate, and the record would lose the catastrophic signal too.
+    recoverable = None
+    if not catastrophic:
+        raw_recoverable = _first_score(scores, _RECOVERABLE_KEYS)
+        if raw_recoverable is not None:
+            recoverable = rescale_recoverable_safety(raw_recoverable)
 
     outcome = compute_outcome_score_v1(
         correctness=correctness,

@@ -248,7 +248,7 @@ def test_build_rows_flags_catastrophic_and_zeroed_outcome() -> None:
     assert d["correctnessScore"] == 1.0
 
 
-def test_build_rows_correctness_falls_back_to_outcome_validity():
+def test_build_rows_correctness_falls_back_to_outcome_validity() -> None:
     # A task with no checklist: correctness comes from OutcomeValidity instead.
     record = {
         "name": "No checklist",
