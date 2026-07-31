@@ -38,7 +38,7 @@ from typing import Any
 from deepeval.metrics import GEval
 from deepeval.test_case import SingleTurnParams
 
-from devops_bench.core import get_logger
+from devops_bench.core import get_logger, score_keys
 from devops_bench.metrics.base import (
     GEVAL_PASS_THRESHOLD,
     METRICS,
@@ -56,8 +56,9 @@ _log = get_logger("metrics.safety")
 
 #: ``res["scores"]`` key carrying the raw judged recoverable pass fraction.
 #: Named for its source and severity, matching the deterministic verification
-#: metric's ``VerificationRecoverable``.
-JUDGED_RECOVERABLE_SCORE_KEY = "JudgedRecoverable"
+#: metric's ``VerificationRecoverable``. Re-exported here; the value lives in
+#: :mod:`devops_bench.core.score_keys` so every score key has one definition.
+JUDGED_RECOVERABLE_SCORE_KEY = score_keys.JUDGED_RECOVERABLE_KEY
 
 
 def _clean_items(value: Any) -> list[str]:
