@@ -344,9 +344,11 @@ def test_parallel_converge_hung_child_alongside_an_observed_fail_stays_fail(
     agent: VerifierAgent,
 ) -> None:
     """An observed fail still wins the group verdict over an unfinished sibling."""
-    # The deadline must clear _MIN_LEAF_BUDGET_SECONDS so the hung leaf's
-    # verify() is actually invoked (and outlasts the wait) rather than being
-    # short-circuited by the per-leaf min-budget guard before it ever runs.
+    # The deadline must clear _MIN_LEAF_BUDGET_SECONDS by a real margin so both
+    # leaves' verify() calls are actually invoked (and the hung one outlasts
+    # the wait) rather than being short-circuited by the per-leaf min-budget
+    # guard before they ever run; 1.5s leaves ~0.25s of that margin after the
+    # child-deadline clamp, same as the neighboring converge tests.
     spec = {
         "type": "parallel",
         "checks": [
@@ -355,7 +357,7 @@ def test_parallel_converge_hung_child_alongside_an_observed_fail_stays_fail(
         ],
     }
 
-    res = agent.wait_for_condition(spec, timeout_sec=1.2)
+    res = agent.wait_for_condition(spec, timeout_sec=1.5)
 
     assert res.status == "fail"
     assert res.success is False
@@ -395,6 +397,63 @@ def test_parallel_single_shot_bounds_the_wait_at_the_ceiling(agent: VerifierAgen
         agent.run_entry(entries[0], timeout_sec=30)
 
     assert recorded["timeout"] == _SINGLE_SHOT_WAIT_CEILING_SEC
+
+
+def test_parallel_converge_close_race_uses_straggler_grace_pass(
+    agent: VerifierAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child converging just past the parent's first wait is caught by the grace pass.
+
+    Without the straggler grace pass, this real observed failure would be
+    replaced by the generic incomplete-evaluation placeholder purely because
+    the child's future was not yet in ``done`` when the parent's first wait
+    returned, even though the child had already computed a real result.
+    """
+    # The grace pass returns as soon as the child future completes, so
+    # widening its ceiling does not slow the test down; it only removes the
+    # upper-bound race against a fixed collection-window close time, leaving
+    # only the (deterministic, since time.sleep is a lower bound) guarantee
+    # that the child is still running when the parent's first wait expires.
+    # ``raising=False``: this constant does not exist on the pre-fix runner,
+    # and this test must still fail (on the pre-fix placeholder substitution,
+    # not on the patch itself) rather than erroring out on a missing attr.
+    monkeypatch.setattr(
+        "devops_bench.verification.runner._STRAGGLER_GRACE_SEC", 30.0, raising=False
+    )
+    spec = {
+        "type": "parallel",
+        "checks": [_leaf(succeed=False, tag="closerace", sleep_for=1.8)],
+    }
+
+    res = agent.wait_for_condition(spec, timeout_sec=1.5)
+
+    assert res.status == "fail"
+    assert res.children[0].status == "fail"
+    assert res.children[0].reason == "leaf:closerace"
+    assert res.children[0].raw is not None
+
+
+def test_parallel_converge_still_hung_after_grace_yields_placeholder(
+    agent: VerifierAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child still pending after the straggler grace pass keeps the placeholder.
+
+    The grace pass is a brief straggler catch, not a second budget; a child
+    that genuinely never converges must still fall back to the same
+    unobserved "error" placeholder as before.
+    """
+    monkeypatch.setattr("devops_bench.verification.runner._STRAGGLER_GRACE_SEC", 0.05)
+    spec = {
+        "type": "parallel",
+        "checks": [_leaf(succeed=True, tag="hung", sleep_for=5.0)],
+    }
+
+    res = agent.wait_for_condition(spec, timeout_sec=1.5)
+
+    assert res.status == "error"
+    assert res.children[0].status == "error"
+    assert res.children[0].reason == "evaluation did not complete before the deadline"
+    assert res.children[0].raw is None
 
 
 # --- nesting --------------------------------------------------------------
