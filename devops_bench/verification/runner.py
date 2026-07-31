@@ -78,6 +78,15 @@ _SINGLE_SHOT_WAIT_CEILING_SEC = 120.0
 # path and the single-shot wait-ceiling path in :meth:`VerifierAgent._run_parallel`.
 _PARALLEL_INCOMPLETE_REASON = "evaluation did not complete before the deadline"
 
+# Hold-mode defaults used when an entry sets mode: hold but does not override
+# the window / interval. Explicit-only: resolved_mode never derives "hold"
+# from a role, so these apply only to an entry that opts in by name. These
+# join the timing vocabulary (_MIN_LEAF_BUDGET_SECONDS,
+# _SINGLE_SHOT_WAIT_CEILING_SEC) a future shared timing module will
+# consolidate.
+_DEFAULT_HOLD_WINDOW_SEC = 30.0
+_DEFAULT_HOLD_INTERVAL_SEC = 5.0
+
 
 def _node_name(node: Any) -> str | None:
     """Echo the optional ``name`` label from a spec node, if any."""
@@ -195,18 +204,34 @@ class VerifierAgent:
         what an objective wants: the agent is working toward the state and the
         check should wait for it. ``assert`` evaluates once with a zero budget,
         which is what a safeguard wants: a violation that has already happened
-        will not heal, and polling one would only waste the run's time.
+        will not heal, and polling one would only waste the run's time. ``hold``
+        verifies a state STAYS true: where converge gives a condition time to
+        become true, hold denies it time to stop being true, sampling the
+        subtree repeatedly across a window instead of evaluating it once.
 
         Args:
             entry: The parsed entry to evaluate.
-            timeout_sec: Total budget for a converging entry. Ignored under
-                ``assert``.
+            timeout_sec: Total budget for a converging or holding entry.
+                Ignored under ``assert``.
 
         Returns:
             The subtree's result, including per-child results.
         """
-        single_shot = entry.resolved_mode == "assert"
+        mode = entry.resolved_mode
+        single_shot = mode == "assert"
         deadline = time.monotonic() + (0.0 if single_shot else timeout_sec)
+        if mode == "hold":
+            window_sec = (
+                entry.hold_window_sec
+                if entry.hold_window_sec is not None
+                else _DEFAULT_HOLD_WINDOW_SEC
+            )
+            interval_sec = (
+                entry.hold_poll_interval_sec
+                if entry.hold_poll_interval_sec is not None
+                else _DEFAULT_HOLD_INTERVAL_SEC
+            )
+            return self._hold(entry.check, window_sec, interval_sec, deadline)
         return self._run(entry.check, deadline, single_shot=single_shot)
 
     def _run(self, node: Any, deadline: float, *, single_shot: bool = False) -> VerificationResult:
@@ -244,6 +269,124 @@ class VerifierAgent:
         if remaining < _MIN_LEAF_BUDGET_SECONDS:
             return _failed(node, "deadline exhausted before evaluation")
         return node.verify(remaining)
+
+    def _hold(
+        self, node: Any, window_sec: float, interval_sec: float, deadline: float
+    ) -> VerificationResult:
+        """Sample ``node`` repeatedly, verifying a condition STAYS true over a window.
+
+        Every sample runs through :meth:`_run` with ``single_shot=True`` (not a
+        bare ``node.verify(0.0)``), so a compound subtree samples correctly and
+        each leaf's own I/O stays bounded to one snapshot instead of a poll.
+
+        A truncated or partially observed window is never reported as a pass:
+        this repo's no-vacuous-truth doctrine treats "we did not actually watch
+        the whole window" as unknown, not as success. Two guards enforce that.
+        Upfront, if the remaining budget to ``deadline`` cannot cover the full
+        ``window_sec``, the window is rejected before sampling starts (zero
+        samples, status "error"). The window itself is then timed from its own
+        fresh clock read rather than reusing the upfront check's read, so a
+        caller-supplied ``deadline`` that turns out not to cover the full
+        window despite passing that check is still caught: during sampling,
+        if ``deadline`` is reached before the window completes, the samples
+        taken so far are reported as an incomplete observation (status
+        "error"), not a pass.
+
+        A sample that observes the condition false ends the hold immediately
+        with status "fail": a hold's job is to catch the state slipping, and
+        it just did. A sample that could not be evaluated (status "error")
+        does not end the hold early, since the condition may still be holding;
+        sampling continues, but the window can then never report a plain pass
+        once observation was incomplete at any sample, so a window that
+        completes with no fail but at least one error sample reports status
+        "error", naming how many samples were unobserved.
+
+        Args:
+            node: The parsed check subtree to sample.
+            window_sec: Seconds to keep sampling.
+            interval_sec: Seconds to sleep between samples.
+            deadline: Absolute monotonic deadline for the whole entry.
+
+        Returns:
+            "fail" on the first failing sample; "error" when the window could
+            not be fully observed (truncated upfront, cut short mid-window, or
+            tainted by one or more error samples); "pass" only once every
+            sample across the full window passed.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining < window_sec:
+            return VerificationResult(
+                success=False,
+                status="error",
+                elapsed_time=0.0,
+                reason=(
+                    f"hold window of {window_sec:.1f}s cannot be observed within "
+                    f"the remaining entry budget ({remaining:.1f}s)"
+                ),
+                name=_node_name(node),
+            )
+
+        start = time.monotonic()
+        window_end = start + window_sec
+        samples = 0
+        error_samples = 0
+        last: VerificationResult | None = None
+        while True:
+            last = self._run(node, deadline, single_shot=True)
+            samples += 1
+            if last.status == "fail":
+                return VerificationResult(
+                    success=False,
+                    status="fail",
+                    elapsed_time=time.monotonic() - start,
+                    reason=f"hold failed at sample {samples}: {last.reason}",
+                    name=_node_name(node),
+                    children=[last],
+                )
+            if last.status == "error":
+                error_samples += 1
+            now = time.monotonic()
+            if now >= window_end:
+                break
+            if now >= deadline:
+                return VerificationResult(
+                    success=False,
+                    status="error",
+                    elapsed_time=now - start,
+                    reason=(
+                        f"hold window of {window_sec:.1f}s was cut short by the "
+                        f"entry deadline after {now - start:.1f}s "
+                        f"({samples} sample(s) observed)"
+                    ),
+                    name=_node_name(node),
+                    children=[last],
+                )
+            sleep_time = min(interval_sec, window_end - now, deadline - now)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        elapsed = time.monotonic() - start
+        if error_samples:
+            return VerificationResult(
+                success=False,
+                status="error",
+                elapsed_time=elapsed,
+                reason=(
+                    f"hold window completed with {error_samples} error sample(s) "
+                    f"out of {samples}: the condition may have held, but it was "
+                    "not observed at every sample"
+                ),
+                name=_node_name(node),
+                children=[last],
+            )
+        return VerificationResult(
+            success=True,
+            status="pass",
+            elapsed_time=elapsed,
+            reason=f"hold passed: {samples} sample(s) over {elapsed:.1f}s",
+            name=_node_name(node),
+            children=[last],
+        )
 
     @staticmethod
     def _skip_rest(
