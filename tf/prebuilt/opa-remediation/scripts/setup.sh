@@ -35,12 +35,97 @@ if [[ "${INFRA_PROVIDER}" == "gcp" ]]; then
   gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone "${LOCATION}" --project "${PROJECT_ID}"
 fi
 
-REPO_PATH="${REPO_PATH:?REPO_PATH is required}"
-REPO_PATH="${REPO_PATH/#\~/$HOME}"
+REPO_NAME="${REPO_NAME:?REPO_NAME is required}"
+# Fixed default, not ${TMPDIR:-/tmp}: TMPDIR is randomized per-user on macOS,
+# but this path is echoed verbatim into the task prompt (see task.yaml),
+# which must resolve to the same string on every process that reads it.
+# Override the root, never the full path, via DEVOPS_BENCH_SCRATCH_ROOT.
+SCRATCH_ROOT="${DEVOPS_BENCH_SCRATCH_ROOT:-/tmp/devops-bench}"
+
+# Validate the root itself, not just containment under it: an unvalidated
+# root makes every safe_remove containment check below vacuous (e.g.
+# DEVOPS_BENCH_SCRATCH_ROOT=/ would make safe_remove willing to touch any
+# absolute path, since everything resolves "under" /). A relative override
+# is rejected outright rather than silently resolved against whatever
+# directory this script happens to be invoked from. Validation runs against
+# a resolved copy, never SCRATCH_ROOT itself: SCRATCH_ROOT stays the literal
+# value so REPO_PATH still matches the literal path baked into the task
+# prompt even when /tmp is itself a symlink (e.g. to /private/tmp on macOS).
+if [[ "${SCRATCH_ROOT}" != /* ]]; then
+  echo "ERROR: DEVOPS_BENCH_SCRATCH_ROOT must be an absolute path, got '${SCRATCH_ROOT}'" >&2
+  exit 1
+fi
+mkdir -p "${SCRATCH_ROOT}"
+_resolved_scratch_root="$(cd "${SCRATCH_ROOT}" && pwd -P)"
+_resolved_home="$(cd "${HOME}" && pwd -P)"
+_scratch_root_stripped="${_resolved_scratch_root#/}"
+if [[ -z "${_scratch_root_stripped}" ]]; then
+  _scratch_root_depth=0
+else
+  IFS='/' read -r -a _scratch_root_parts <<< "${_scratch_root_stripped}"
+  _scratch_root_depth=${#_scratch_root_parts[@]}
+fi
+if [[ "${_scratch_root_depth}" -lt 2 ]]; then
+  echo "ERROR: DEVOPS_BENCH_SCRATCH_ROOT must resolve at least two levels below the filesystem root, got '${SCRATCH_ROOT}' (resolved: '${_resolved_scratch_root}')" >&2
+  exit 1
+fi
+if [[ "${_resolved_scratch_root}" == "${_resolved_home}" ]]; then
+  echo "ERROR: DEVOPS_BENCH_SCRATCH_ROOT must not resolve to the home directory, got '${SCRATCH_ROOT}'" >&2
+  exit 1
+fi
+
+REPO_PATH="${SCRATCH_ROOT}/${REPO_NAME}"
 MANIFESTS_DIR="${MANIFESTS_DIR:?MANIFESTS_DIR is required}"
 MANIFESTS_DIR="$(cd "${MANIFESTS_DIR}" && pwd)"
 KYVERNO_VERSION="${KYVERNO_VERSION:-v1.12.7}"
 
+# Mint-don't-guard: rather than sanitizing an arbitrary caller-supplied path,
+# only ever delete a path this script minted under its own scratch root, and
+# assert that invariant immediately before deleting it.
+safe_remove() {
+  local target="$1"
+  local root="$2"
+  local target_parent target_base resolved_root resolved_parent resolved_target
+
+  # Reject a top-level symlink explicitly rather than relying on rm's own
+  # non-follow default for its argument: that default is an implementation
+  # detail of rm, not an assertion this script makes, and the resolution
+  # below only canonicalizes target's parent, never target itself.
+  if [[ -L "${target}" ]]; then
+    echo "ERROR: safe_remove: ${target} is a symlink; refusing to remove it" >&2
+    exit 1
+  fi
+
+  resolved_root="$(cd "${root}" && pwd -P)"
+  target_parent="$(dirname -- "${target}")"
+  target_base="$(basename -- "${target}")"
+  if ! resolved_parent="$(cd "${target_parent}" 2>/dev/null && pwd -P)"; then
+    echo "ERROR: safe_remove: parent directory of ${target} does not exist" >&2
+    exit 1
+  fi
+  resolved_target="${resolved_parent}/${target_base}"
+
+  if [[ "${resolved_target}/" != "${resolved_root}/"* ]]; then
+    echo "ERROR: safe_remove: ${target} is not under the scratch root ${root}" >&2
+    exit 1
+  fi
+  # Safety-load-bearing, not cosmetic: resolved_target above is built by
+  # string-concatenating the resolved parent with the literal basename
+  # (target may not exist yet, so it cannot be cd'd into directly), so a
+  # basename of ".." would satisfy the prefix check above as a string while
+  # actually resolving outside the root. Requiring a *.git suffix is what
+  # rules that out, since ".." can never end in ".git".
+  if [[ "${target_base}" != *.git ]]; then
+    echo "ERROR: safe_remove: ${target} does not look like a minted GitOps repo (*.git)" >&2
+    exit 1
+  fi
+  if [[ "${resolved_target}" == "${resolved_root}" || "${resolved_target}" == "${HOME}" || "${resolved_target}" == "/" ]]; then
+    echo "ERROR: safe_remove: refusing to remove ${target}, it resolves to a root, not a minted leaf" >&2
+    exit 1
+  fi
+
+  rm -rf -- "${resolved_target}"
+}
 
 echo "==> Installing Kyverno ${KYVERNO_VERSION}..."
 # Server-side apply: the Kyverno CRDs are large and exceed the client-side
@@ -128,7 +213,7 @@ if [ "${reports_ready}" != true ]; then
 fi
 
 echo "==> Seeding GitOps repo at ${REPO_PATH}..."
-rm -rf "${REPO_PATH}"
+safe_remove "${REPO_PATH}" "${SCRATCH_ROOT}"
 git init --bare "${REPO_PATH}"
 WORK="$(mktemp -d)"
 (

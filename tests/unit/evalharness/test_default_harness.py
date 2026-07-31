@@ -388,6 +388,46 @@ def test_run_one_collects_files_the_agent_writes_to_its_workspace(
         AGENTS._items.pop("fake-workspace-writer", None)  # noqa: SLF001
 
 
+def test_run_one_survives_a_workspace_containment_bug_during_teardown(
+    isolated_env: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A remove_minted containment ValueError logs loudly but never aborts the batch.
+
+    Regression test: results are only persisted after every task in a batch
+    completes, so letting a teardown ValueError escape ``_run_one`` would
+    silently discard every prior task's results, not just this task's
+    cleanup. The containment check must still fire (it means a real bug),
+    but it must surface as a loud log, not an exception out of teardown.
+    """
+    AGENTS.register("fake-workspace-writer-teardown-bug")(_WorkspaceWritingAgent)
+
+    def _boom(_path: Path) -> None:
+        raise ValueError("not a path this run minted")
+
+    monkeypatch.setattr(harness_default, "remove_minted", _boom)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-workspace-writer-teardown-bug",
+            no_infra=True,
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        with caplog.at_level(logging.ERROR):
+            record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert any("not a path this run minted" in message for message in caplog.messages)
+    finally:
+        AGENTS._items.pop("fake-workspace-writer-teardown-bug", None)  # noqa: SLF001
+
+
 def test_run_one_warns_when_a_verification_entry_fails_to_parse(
     isolated_env: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

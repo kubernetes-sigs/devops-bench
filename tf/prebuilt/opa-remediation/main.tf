@@ -37,11 +37,15 @@ provider "google" {
 provider "kind" {}
 
 locals {
-  # GitOps repo path on the shared bastion host. setup.sh rm -rf's + reseeds it,
-  # so a fixed path would let one run wipe a concurrent run's repo. cluster_name
-  # is run-token-prefixed, making this per-run unique. The task prompt references
-  # the same path via the {{CLUSTER_NAME}} placeholder. An explicit override wins.
-  repo_path = var.repo_path != "" ? var.repo_path : "~/opa-repo-${var.cluster_name}.git"
+  # GitOps repo lives under a scratch root setup.sh owns, not an arbitrary
+  # path: setup.sh mints "<scratch_root>/<repo_name>" itself and only ever
+  # deletes what it minted (mint-don't-guard), so this variable is a leaf
+  # name, never a path. cluster_name is run-token-prefixed, making the
+  # derived name per-run unique so concurrent runs on the shared bastion
+  # don't collide. The task prompt references the same name via the
+  # {{CLUSTER_NAME}} placeholder, against setup.sh's fixed default scratch
+  # root (see setup.sh for why that root does not read $TMPDIR).
+  repo_name = var.repo_name != "" ? var.repo_name : "opa-repo-${var.cluster_name}.git"
 }
 
 # GKE/KinD cluster. Kyverno + the workloads are installed by setup.sh.
@@ -76,7 +80,7 @@ resource "null_resource" "setup" {
       CLUSTER_NAME   = module.cluster.cluster_name
       LOCATION       = var.location
       KUBECONFIG     = pathexpand(var.kubeconfig_path)
-      REPO_PATH      = pathexpand(local.repo_path)
+      REPO_NAME      = local.repo_name
       MANIFESTS_DIR  = "${path.module}/manifests"
     }
   }

@@ -56,8 +56,13 @@ variable "kubeconfig_path" {
   default     = "~/.kube/config"
 }
 
-variable "repo_path" {
+variable "repo_name" {
   type        = string
-  description = "Local bare git repo (GitOps source of truth). Empty (default) derives a per-run-unique path from cluster_name so concurrent runs on the shared bastion don't collide (see locals)."
+  description = "Leaf name (never a path) for the local bare git repo (GitOps source of truth). Empty (default) derives a per-run-unique name from cluster_name so concurrent runs on the shared bastion don't collide (see locals). setup.sh always constructs the full path as <scratch_root>/<repo_name>; scratch_root defaults to /tmp/devops-bench and is overridable only as a root via the DEVOPS_BENCH_SCRATCH_ROOT environment variable."
   default     = ""
+
+  validation {
+    condition     = var.repo_name == "" || can(regex("^[A-Za-z0-9._-]+$", var.repo_name))
+    error_message = "repo_name must be a bare leaf name (letters, digits, '.', '_', '-'), never a path."
+  }
 }
