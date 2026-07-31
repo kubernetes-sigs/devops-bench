@@ -452,8 +452,17 @@ class DefaultEvalHarness(Harness):
         the wall-clock cap for this whole pass across every entry; without it
         a task with many failing converge objectives burns entries x
         ``timeout_sec`` (12 entries x 120s is 22+ minutes). A single monotonic
-        deadline is computed from the total budget once at the top, and each
-        converging entry gets ``min(timeout_sec, remaining)``. Assert entries
+        deadline is computed from the total budget once at the top, and the
+        converging entries **share** what remains of it: each gets
+        ``min(timeout_sec, remaining / converging_entries_left)``. Sharing is
+        what keeps the total cap from being consumed first-come-first-served,
+        where a handful of early entries polling to their own cap leave the
+        rest unevaluated and silently drop out of the score's denominator.
+        The share is recomputed from the live remaining time, so an entry that
+        finishes early hands its unused budget back to the ones after it, and
+        the deadline is pushed out by however long each assert entry took so a
+        slow single evaluation does not shorten the converging entries after
+        it. Assert entries
         ignore the total budget and always run: they are single evaluations,
         and a safeguard that goes unchecked defeats the point of having it.
         A converging entry with less than :data:`MIN_LEAF_BUDGET_SECONDS`
@@ -474,6 +483,12 @@ class DefaultEvalHarness(Harness):
         agent = VerifierAgent()
         report: list[dict[str, Any]] = []
         total_deadline = time.monotonic() + VERIFICATION_TOTAL_BUDGET_SEC
+        # Converging entries share what is left of the total budget evenly, so an
+        # early entry that polls to its own cap cannot starve the ones after it.
+        # Only converging entries count toward the divisor: assert entries
+        # evaluate once and consume no budget, so including them would shrink
+        # everyone's share for nothing.
+        converging_left = sum(1 for e in entries if e.resolved_mode != "assert")
 
         for entry in entries:
             remaining = total_deadline - time.monotonic()
@@ -495,8 +510,17 @@ class DefaultEvalHarness(Harness):
                 )
                 continue
 
+            if entry.resolved_mode == "assert":
+                entry_budget = remaining
+            else:
+                # Recomputed from the live remaining time, so an entry that
+                # finishes early hands its unused share back to the rest.
+                entry_budget = max(remaining / converging_left, MIN_LEAF_BUDGET_SECONDS)
+                converging_left -= 1
+
+            started = time.monotonic()
             try:
-                result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
+                result = agent.run_entry(entry, timeout_sec=min(timeout_sec, entry_budget))
                 success = result.success
                 status = result.status
                 reason = result.reason
@@ -511,6 +535,13 @@ class DefaultEvalHarness(Harness):
                     0.0,
                     [],
                 )
+            finally:
+                if entry.resolved_mode == "assert":
+                    # An assert entry is outside the total budget, so it must not
+                    # spend it either: push the deadline out by however long it
+                    # took. Otherwise a slow single evaluation silently shortens
+                    # every converging entry that follows.
+                    total_deadline += time.monotonic() - started
 
             report.append(
                 {
