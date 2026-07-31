@@ -1,0 +1,85 @@
+# Known issues, recovery & workarounds
+
+Failure recovery and deliberate workarounds for the eval pipeline (`python -m devops_bench`, `devops_bench/`). Section 1 is a recovery router: match your symptom, apply the action. Section 2 catalogues the hacks currently in the code path and what would let us remove them.
+
+> [!NOTE]
+> This page is migrated in step with the code. Rows that describe the bastion matrix runner are held back until `scripts/bastion/` and the bastion docs land, so the router covers single-host runs today and will grow.
+
+## Section 1 — Issue router (recover from eval failures)
+
+If an eval fails, find the symptom below and apply the action. Many failures are transient infrastructure flakes — those are marked **Retry** and should simply be retried (after cleaning stale state), not debugged.
+
+> [!TIP]
+> **Class** tells you what to do without reading the row. `Infra flake — retry`: re-run the combo after the *Before any retry* cleanup; do **not** open the code. `Config / auth`: a credential or settings fix is required before it will ever pass. `Setup`: a one-time host or cloud-project prerequisite is missing.
+
+| Symptom / error signature | Root cause | Fix / recovery action | Class |
+|---|---|---|---|
+| `ConfigError: TF stack not found under <tf_root>: prebuilt/minimum`, raised before any cluster is created | `tasks/gcp/deploy-hello-app` declares `stack: "prebuilt/minimum"`, but `tf/prebuilt/minimum/` is not in this repo yet — the task migrated ahead of its stack | Run a task whose stack exists (`tasks/common/opa-remediation`, or any `deployer: noop` task) until the stack lands | **Setup** |
+| `Vertex AI API error (429): Resource exhausted` (`RESOURCE_EXHAUSTED`), agent run ends mid-trajectory | Transient Vertex per-minute quota on long, high-token agentic runs | Not a model miss — **retry the combo**. If it recurs, lower the parallelism or raise the Vertex quota | **Infra flake — retry** |
+| GCP `409 already exists` on cluster (re)create, naming a `gke-nodes-*` service account | `gke-nodes-<cluster>` node SA is **not** random-suffixed; a failed teardown orphaned it | Delete the orphan SA (`gcloud iam service-accounts delete gke-nodes-<cluster>@<project>.iam.gserviceaccount.com`), then **retry**. Durable fix still open (see §2) | **Setup** (run retries once cleaned) |
+| Task fails in ~2 min at `tofu plan`: `could not locate any control plane nodes for cluster '<hash>-eval'` | A prior run's per-run state under `/tmp/devops-bench-runs/<task>__<model>__<arm>` is reused and references an already-torn-down cluster | **Wipe stale run state before re-running**: `rm -rf /tmp/devops-bench-runs/*` plus the kind/cluster cleanup in *Before any retry*, then retry | **Setup** |
+| `gemini subprocess error: ... exit code -1` | This is a **timeout, not a crash** — `core.subprocess.run` returns `-1` on `TimeoutExpired` (usually an MCP approval hang) | Fix the *hang* (set `--approval-mode yolo` + folder trust below) rather than just raising `AGENT_TIMEOUT_SEC`; only raise the timeout after | **Config / auth** |
+| gemini `mcp list` shows server `Disabled`; model writes its own MCP client; or run hangs to timeout with MCP configured (`--skip-trust` alone insufficient) | Untrusted per-run cwd suppresses MCP, **and** with no approval mode MCP calls block on interactive confirmation | Needs **both**: set `security.folderTrust.enabled=false` in user-level `~/.gemini/settings.json`, **and** pass `--approval-mode yolo` in argv | **Config / auth** |
+| oc on Vertex: `No API key found for provider "google-vertex"` under parallel runs | The ADC marker lives only in the global sqlite auth store; an isolated `OPENCLAW_STATE_DIR` can't see it | Export `GOOGLE_CLOUD_API_KEY=gcp-vertex-credentials`, the portable env marker | **Config / auth** |
+| oc on Vertex: `401 Incorrect API key` (request sent to `platform.openai.com`) | The per-run provider entry **replaces** the built-in one and is missing the Vertex transport, so oc falls back to the OpenAI transport | Run on current code — the harness writes a per-run `openclaw.json` pinning `"api": "google-vertex"` (+ `"baseUrl"`); combine with the ADC marker above. If seen, you are on stale code — sync/reinstall | **Config / auth** |
+| Vertex `404 Publisher model ... not found`; judge silently fails / 404s | Wrong location or non-`-preview` model id — `gemini-3.x` previews 404 on regional endpoints | Use the **`global`** location (`GOOGLE_CLOUD_LOCATION=global` / `GCP_VERTEX_LOCATION=global`) and a `-preview` model id; the judge default needs `JUDGE_MODEL=gemini-3.1-pro-preview` | **Config / auth** |
+| GKE task: `Error 403: <API> has not been used in project … or it is disabled` | A required GCP API isn't enabled in the eval project | `gcloud services enable <api>.googleapis.com`, wait a few min to propagate, then retry | **Setup** |
+| Multi-node kind task fails: `failed to join node with kubeadm … exit status 1` | Host `fs.inotify.max_user_instances` (default 128) exhausted by a multi-node cluster | `sudo sysctl -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches=1048576` (persist in `/etc/sysctl.d/`), then retry | **Setup** |
+| kind task fails instantly: `docker: executable file not found in $PATH` | Docker not installed / socket missing on the host (kind tasks run on the host) | Install `docker.io`, start the daemon, grant the runner socket access (`setfacl -m u:$USER:rw /var/run/docker.sock`, or the `docker` group + fresh login) | **Setup** |
+| Chaos `generate_load` injects nothing; HPA never scales (load is a silent no-op) | `fortio` is not on `PATH` — it is installed at provision time, not baked into any image | Install `fortio` onto the runner's `PATH`, then retry | **Setup** |
+| Standalone test on a remote host sees **stale code** (e.g. a flag still showing its pre-fix value) | The host venv has an *installed* `devops_bench`; `python3 /tmp/x.py` imports the package, not the synced source | Run with `PYTHONPATH=<repo>`, or `python -m devops_bench` from the source dir | **Setup** |
+| **All trajectories empty** (`trajectory: []`, `tools: []`), `ToolInvocation` 0.0 — though the agent clearly acted; run log shows `oc sessions exited 127: /usr/bin/env: 'node': No such file or directory` | The `oc sessions` / `export-trajectory` extraction runs `oc` as a **direct argv subprocess** (no nvm sourced), so on an nvm-managed host Node isn't on `PATH` → exit 127 → trajectory **silently emptied** → every tool/checklist check fails | Put Node on the runner `PATH` (`ln -s "$(command -v node)" ~/bin/node`). Current code also prepends the nvm Node dir for these calls (`_ensure_node_on_path` in `devops_bench/agents/cli/openclaw/agent.py`); if seen, sync/reinstall | **Config / setup** |
+| Verification records `budget exhausted` for most objectives and the score looks confidently low | The post-run pass shares a total wall-clock budget across converging entries; an entry that polls to its own cap can starve the ones after it | Check `VerificationCoverage` before trusting `VerificationCorrectness` — an abandoned entry leaves both the numerator and the denominator, so a low score computed over a handful of entries reads the same as a real failure | **Infra flake — retry** |
+
+After applying a fix, retry the run. For any infra-flake row, run the cleanup below first.
+
+### Before any retry
+
+> [!IMPORTANT]
+> Stale run state and orphaned cloud resources are the most common cause of a "fresh" run failing instantly. Clean them before every (re)launch.
+
+On the runner host:
+
+```bash
+# 1. Wipe stale per-run scratch + state (fixes "could not locate any control plane nodes")
+rm -rf /tmp/devops-bench-runs/*
+
+# 2. Delete leftover kind clusters and orphaned -eval containers (kind get clusters
+#    does not track leaked node containers)
+for c in $(kind get clusters); do kind delete cluster --name "$c"; done
+docker rm -f $(docker ps -aq --filter name=-eval) 2>/dev/null || true
+
+# 3. Kill stale harness / agent processes from a prior launch
+pkill -f devops_bench ; pkill -f 'oc agent' 2>/dev/null || true
+```
+
+Then delete orphaned cloud resources left by a failed teardown:
+
+- **Clusters** — any `<hash>-eval` GKE clusters from a crashed run.
+- **`gke-nodes-*` service accounts** — the deterministic node-SA name causes `409 already exists` on re-run until deleted.
+- **Task-specific leftovers** — Artifact Registry repos, Cloud SQL instances (note the ~1-week name tombstone), and orphan auto-mode VPCs.
+
+The [`cleanup-orphaned-resources`](../../.agents/skills/cleanup-orphaned-resources/SKILL.md) skill walks this end to end, in list-then-confirm order.
+
+## Section 2 — Known hacks & workarounds
+
+Deliberate workarounds currently in the code path. Each notes what it does and what would let us remove it.
+
+| What | Where (file / area) | Why | Removal condition |
+|---|---|---|---|
+| **Per-run tofu isolation** copies the whole `tf/` tree into `<run_dir>/tf/` and writes state to `<run_dir>/terraform.tfstate` | `devops_bench/deployers/tofu.py` (`_isolated_work_dir`); `devops_bench/core/run_env.py` (`TF_DATA_DIR`) | Stacks use relative module sources, and concurrent runs would otherwise contend on a shared `.terraform.lock.hcl` + state in `tf/prebuilt/<stack>` | Module sources made run-relocatable without a full-tree copy (this is the principled isolation fix, not pure debt — low priority) |
+| **Stale-state manual pre-flight wipe** (`rm -rf /tmp/devops-bench-runs/*` + kind/container cleanup) | Operator step | The per-run state dir is keyed deterministically by `task__model__arm`; a prior run's state references a deleted cluster and is reused, failing at `tofu plan` | `RunEnv` (or a `devops-bench clean` subcommand) self-detects dangling state and re-inits instead of relying on a human `rm -rf` |
+| **Deterministic node-SA name** `gke-nodes-<cluster>` (no random suffix) | `tf/` cluster modules | Cluster GCP names are run-scoped, but the node SA name is not suffixed; a failed teardown orphans it → `409 already exists` on re-run. Multi-cluster stacks truncate to `substr(cluster_name,0,15)`, collapsing per-region SAs to one id | Add a `random_id` suffix (or `create_ignore_already_exists`) to the node SA, carry the discriminator in the first 15 chars, and always sweep `gke-nodes-*` on teardown — multi-cluster GKE tasks are not parallel-safe until this lands |
+| **Kyverno/OPA admission-webhook retry loop** (bounded retry on policy apply) | `tf/prebuilt/opa-remediation/scripts/setup.sh` | The Kyverno webhook can take seconds to start serving after the deployment is Available; applying too early fails with `context deadline exceeded` | Poll the `Validating`/`MutatingWebhookConfiguration` (or the service endpoint) readiness instead of a fixed-attempt sleep loop |
+| **MCP tool-name normalization** strips the `<server>__` prefix before matching | `devops_bench/metrics/pipeline.py` (`_canonical_tool_name`) | MCP tools surface as `<server>__<tool>`; without stripping, `bash` vs `default__bash` scored 0 on tool-invocation | Strip the prefix only against the *known* set of configured MCP server names (from the agent config / `capabilities_granted`), not a blind `split("__")` that would also truncate a legit `my__tool` |
+| **KUBECONFIG explicitly passed to MCP server processes** (per-agent, per-spawn) | `devops_bench/agents/cli/openclaw/agent.py` | `RunEnv` sets `KUBECONFIG` in process env, but MCP server spawn didn't inherit it, so MCP servers used the ambient `~/.kube/config` and mixed cluster targets under parallelism | Centralize MCP-server-environment construction in one shared `agents/` helper that always derives env from `RunEnv`, so a new agent can't silently regress to ambient config |
+| **`generation_only` inferred from the run** (`no_infra` **or** `deployer == "noop"`) to soften `OutcomeValidity` | `devops_bench/evalharness/default.py`; `devops_bench/metrics/pipeline.py` | Manifest-only runs never apply to a cluster, so they would score 0 on `OutcomeValidity`; the harness infers "generation-only" from the run flag and the deployer string | Make `generation_only` an explicit (or explicitly-derivable) `Task` field so a non-noop generation-only task isn't mis-judged and the metric layer needn't know deployer names |
+| **`validated` flag defaults `false`** (gates leaderboard promotion only) | `devops_bench/tasks/schema.py`; `devops_bench/results/row.py`, `normalize.py` | Keeps unvetted tasks off the leaderboard until a human sets `validated: true` | The flag gates promotion but **not running** — an unvetted task still burns quota. Add a CI `validate-task` pass (schema + spec parse + unique id) and a `--require-validated` run mode |
+| **Swallowed scoring / per-metric errors** (broad `except Exception` so an already-written `results.json` survives a judge crash) | `devops_bench/evalharness/default.py`; `devops_bench/metrics/pipeline.py` | A judge/GEval crash must not discard an already-completed execution record (raw `results.json` is written before scoring) | Keep the isolation but record a typed scoring-error sentinel in `scores` and surface a distinct exit/manifest flag, so unscored runs are visibly degraded rather than silently empty |
+
+> [!NOTE]
+> **Observability caveat.** `results.json` carries no token fields (tokens live only in `rows.json` / `manifest.json`), and a run that times out is killed before `oc sessions export-trajectory` runs, so the heaviest runs can persist `tokens: {}`. Treat token/cost figures as the clean-completion subset only until a durable per-turn token checkpoint lands.
+
+---
+
+See also: [infra.md](../components/infra.md) for how stacks are provisioned and torn down, which is the lifecycle most of the leaks above escape from.
