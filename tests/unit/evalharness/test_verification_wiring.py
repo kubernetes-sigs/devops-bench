@@ -206,6 +206,37 @@ def test_converge_entry_is_recorded_as_budget_exhausted_in_the_sub_second_window
     assert report[1]["reason"] == "verification total budget exhausted before evaluation"
 
 
+def test_hold_entry_is_recorded_as_budget_exhausted_once_the_total_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold entry needs budget like a converge entry: it is not assert's carve-out."""
+    hold_spec = {**_SPEC[0], "name": "web-stays-ready", "mode": "hold", "hold_window_sec": 5}
+    entries, errors = parse_entries([_SPEC[0], hold_spec])
+    assert errors == []
+    # Above MIN_LEAF_BUDGET_SECONDS so the first entry clears the guard; the
+    # sleep below then drops the remainder under it for the hold entry.
+    total_budget = MIN_LEAF_BUDGET_SECONDS * 1.2
+    monkeypatch.setattr(
+        "devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", total_budget
+    )
+
+    def fake_run_entry(entry: object, timeout_sec: float = 120) -> VerificationResult:
+        sleep_sec = MIN_LEAF_BUDGET_SECONDS * 0.3  # outruns the tiny total budget
+        time.sleep(sleep_sec)
+        return VerificationResult(success=True, elapsed_time=sleep_sec, reason="ok")
+
+    with patch(
+        "devops_bench.evalharness.default.VerifierAgent.run_entry", side_effect=fake_run_entry
+    ):
+        report = _harness()._run_verification(entries, timeout_sec=120)
+
+    assert report[0]["success"] is True
+    assert report[1]["mode"] == "hold"
+    assert report[1]["success"] is False
+    assert report[1]["status"] == "error"
+    assert report[1]["reason"] == "verification total budget exhausted before evaluation"
+
+
 def test_assert_entry_still_evaluates_after_the_total_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -60,10 +60,42 @@ def test_objective_with_severity_is_an_error() -> None:
     assert "severity is not allowed" in errors[0]["reason"]
 
 
-def test_mode_hold_is_rejected_with_a_specific_message() -> None:
+def test_mode_hold_is_accepted() -> None:
     entries, errors = parse_entries([_entry(mode="hold")])
+    assert errors == []
+    assert entries[0].resolved_mode == "hold"
+
+
+def test_hold_window_sec_is_rejected_on_a_converge_entry() -> None:
+    entries, errors = parse_entries([_entry(hold_window_sec=10)])
     assert entries == []
-    assert "not yet supported" in errors[0]["reason"]
+    assert "hold_window_sec" in errors[0]["reason"]
+
+
+def test_hold_poll_interval_sec_is_rejected_on_an_assert_entry() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="safeguard", severity="recoverable", mode="assert", hold_poll_interval_sec=5)]
+    )
+    assert entries == []
+    assert "hold_poll_interval_sec" in errors[0]["reason"]
+
+
+def test_hold_fields_are_accepted_with_mode_hold() -> None:
+    entries, errors = parse_entries(
+        [_entry(mode="hold", hold_window_sec=10, hold_poll_interval_sec=2)]
+    )
+    assert errors == []
+    assert entries[0].hold_window_sec == 10
+    assert entries[0].hold_poll_interval_sec == 2
+
+
+def test_resolved_mode_never_derives_hold_from_role_defaults() -> None:
+    entries, errors = parse_entries([_entry()])
+    assert errors == []
+    assert entries[0].resolved_mode != "hold"
+    entries, errors = parse_entries([_entry(role="safeguard", severity="recoverable")])
+    assert errors == []
+    assert entries[0].resolved_mode != "hold"
 
 
 def test_duplicate_names_keep_the_first_and_report_the_second() -> None:
