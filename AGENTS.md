@@ -8,6 +8,7 @@
 - **Linting & Formatting**: Do NOT use `black` or `flake8`. Exclusively use **`ruff`**.
 - **Documentation**: Provide clear, concise docstrings for public functions and classes.
 - **Vendor neutrality**: User-facing text (docstrings, CLI help, error messages, docs) and the generic framework layers must be vendor-neutral. Provider-specific terms and environment variables (GKE, GCP, `gcloud`, `GCP_PROJECT_ID`, ...) belong only in provider-specific modules (`devops_bench/providers/`, deployer implementations, `tf/`) or where they name a real provider artifact.
+- **Destructive operations**: Never delete or overwrite a path the code did not itself mint. Shell scripts construct the target under an owned scratch root and delete through a `safe_remove` that asserts the target lives under that root before touching it. Python code uses `devops_bench.core.scratch` (`mint_dir` / `remove_minted`) for a lifecycle that outlives one function, or a plain `tempfile.TemporaryDirectory` for a lifecycle scoped to a single block. Config knobs that feed a destructive path expose names, never paths.
 
 ## Development Workflow
 All commands should be run from the project root.
