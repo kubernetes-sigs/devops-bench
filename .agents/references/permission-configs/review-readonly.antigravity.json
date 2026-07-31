@@ -1,0 +1,54 @@
+{
+  "$comment": "SAMPLE PROFILE (Antigravity / agy) — read-only static review (devops-bench-review, task-review, diagnose-eval-failure). Reads + tests/lint only; NO file writes, NO infra. Merge the permissions block into ~/.gemini/antigravity-cli/settings.json. RE2 regex targets matched against the whole command line. Precedence: deny > ask > allow. NOTE: agy auto-allows workspace file writes, so this profile DENIES write_file(.*) to stay read-only. See README.md.",
+  "permissions": {
+    "allow": [
+      "command(ls( .*)?)",
+      "command(cat( .*)?)",
+      "command(head( .*)?)",
+      "command(tail( .*)?)",
+      "command(grep( .*)?)",
+      "command(rg( .*)?)",
+      "command(find( .*)?)",
+      "command(jq( .*)?)",
+      "command(yq( .*)?)",
+      "command(sed( .*)?)",
+      "command(awk( .*)?)",
+      "command(echo( .*)?)",
+      "command(which( .*)?)",
+      "command(pwd)",
+      "command(env)",
+      "command(date)",
+      "command(git (status|diff|log|show|branch|blame|ls-files|rev-parse)( .*)?)",
+      "command(gh pr (view|diff|list)( .*)?)",
+      "command(uv( .*)?)",
+      "command(uvx( .*)?)",
+      "command((python|python3)( .*)?)",
+      "command(pytest( .*)?)",
+      "command(ruff( .*)?)",
+      "read_url(.*)"
+    ],
+    "ask": [
+      "execute_url(.*)"
+    ],
+    "deny": [
+      "write_file(.*)",
+      "command(sudo( .*)?)",
+      "command(doas( .*)?)",
+      "command(rm( .*)?)",
+      "command(gcloud( .*)?)",
+      "command(gsutil( .*)?)",
+      "command(kubectl( .*)?)",
+      "command((terraform|tofu)( .*)?)",
+      "command(kind( .*)?)",
+      "command(docker( .*)?)",
+      "command(ssh( .*)?)",
+      "command(scp( .*)?)",
+      "command(rsync( .*)?)",
+      "command((bash|sh)( .*)?)",
+      "command(git (push|commit)( .*)?)",
+      "command(.*(curl|wget).*\\|.*(ba)?sh.*)",
+      "read_file(.*\\.ssh/id_.*)",
+      "read_file(.*(id_rsa|id_ed25519|id_ecdsa).*)"
+    ]
+  }
+}
