@@ -153,13 +153,26 @@ task_extra_env() {
 # read as "not finished yet" and retried next tick, so brief drops don't abort
 # (the run itself is detached via nohup and unaffected). Arg: expected combo count.
 _poll_until_done() {
-  local expected="$1" done_n
+  local expected="$1" done_n waited=0
+  local max_wait="${MATRIX_POLL_TIMEOUT_SEC:-86400}"
   echo "==> waiting for ${expected} run(s) (poll 60s; runs continue if this exits)"
   while true; do
     if host_exec "test -f \$HOME/${REMOTE_OUT}/.done" 2>/dev/null; then break; fi
     done_n="$(host_exec "ls \$HOME/${REMOTE_OUT}/*/status 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+    # The runner only writes .done after `wait`, so if it dies (reboot, OOM,
+    # manual kill) the marker never lands. Every combo having a status file
+    # means the work is finished either way, so stop rather than block forever.
+    if [ "${done_n}" -ge "${expected}" ]; then
+      echo "    all ${expected} combos have a status file but no .done marker; the runner likely died"
+      break
+    fi
+    if [ "${waited}" -ge "${max_wait}" ]; then
+      echo "    giving up after ${waited}s (MATRIX_POLL_TIMEOUT_SEC); pulling whatever finished" >&2
+      break
+    fi
     echo "    ${done_n}/${expected} finished... ($(date +%H:%M:%S))"
     sleep 60
+    waited=$((waited + 60))
   done
 }
 
@@ -296,20 +309,23 @@ matrix_dispatch() {
     echo "echo ALL_DONE >\"\$HOME/${REMOTE_OUT}/.done\""
   } >"${runner}"
 
-  # Per-stamp runner path so two matrices (e.g. refactored + legacy) can be
-  # launched in parallel without clobbering each other's runner script.
-  local staged_runner="/tmp/matrix-runner-${STAMP}.sh"
+  # Staged under $HOME, not /tmp: the runner is executed, and a shared /tmp lets
+  # any other local user pre-create the path (or symlink it) and hijack what
+  # runs. Per-stamp so two matrices can be launched in parallel without
+  # clobbering each other's runner script.
+  local staged_runner="\$HOME/.matrix-runner-${STAMP}.sh"
+  local local_staged_runner="${HOME}/.matrix-runner-${STAMP}.sh"
   # Create the output dir (and its parent) BEFORE the nohup redirect — the
   # ``>...${REMOTE_OUT}.out`` target dir must exist or the job never starts.
   if [ -n "${BENCH_REMOTE}" ]; then
     echo "==> uploading + launching remote runner (detached)"
-    push_file "${runner}" "${staged_runner}"
-    remote_exec "mkdir -p \$HOME/${REMOTE_OUT}; chmod +x ${staged_runner}; nohup ${staged_runner} >\$HOME/${REMOTE_OUT}.out 2>&1 & echo launched pid=\$!"
+    push_file "${runner}" ".matrix-runner-${STAMP}.sh"
+    remote_exec "mkdir -p \$HOME/${REMOTE_OUT}; chmod 700 ${staged_runner}; nohup ${staged_runner} >\$HOME/${REMOTE_OUT}.out 2>&1 & echo launched pid=\$!"
   else
     echo "==> launching local runner (detached)"
-    cp "${runner}" "${staged_runner}"; chmod +x "${staged_runner}"
+    install -m 700 "${runner}" "${local_staged_runner}"
     mkdir -p "$HOME/${REMOTE_OUT}"
-    nohup "${staged_runner}" >"$HOME/${REMOTE_OUT}.out" 2>&1 & echo "launched pid=$!"
+    nohup "${local_staged_runner}" >"$HOME/${REMOTE_OUT}.out" 2>&1 & echo "launched pid=$!"
   fi
   echo "    (to re-attach if this exits: RESUME_STAMP=${STAMP} re-run the same command)"
 

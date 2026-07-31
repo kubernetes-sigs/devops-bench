@@ -66,6 +66,12 @@ done
 ARCHIVE="$(mktemp -t bench-sync-XXXXXX).tgz"
 trap 'rm -f "${ARCHIVE}"' EXIT
 
+# Upload into the login user's home, not the shared /tmp: a fixed /tmp name lets
+# any other local user on the VM pre-create the path (or symlink it elsewhere)
+# and swap what gets extracted. Per-invocation suffix so two concurrent syncs
+# do not collide.
+REMOTE_ARCHIVE=".bench-sync-$$-$(date +%s).tgz"
+
 echo "==> packing $(printf '%s ' "${PRESENT[@]}")"
 # COPYFILE_DISABLE=1 stops macOS bsdtar from emitting AppleDouble (``._*``) entries
 # that extract as junk files on Linux and break manifest globs (e.g. kubectl
@@ -101,13 +107,13 @@ if [ -n "${BASTION_SSH_HOST:-}" ] || [ "${BASTION_USE_GCPNODE:-}" = "1" ]; then
   SSH_USER="${BASTION_SSH_USER:-$(id -un)_google_com}"
   SSH_TARGET="${SSH_USER}@${SSH_HOST}"
   echo "==> transport: direct ssh to ${SSH_TARGET}"
-  upload_archive() { scp "${ARCHIVE}" "${SSH_TARGET}:/tmp/bench-sync.tgz"; }
+  upload_archive() { scp "${ARCHIVE}" "${SSH_TARGET}:${REMOTE_ARCHIVE}"; }
   remote_exec() { ssh "${SSH_TARGET}" "$1"; }
 else
   echo "==> transport: gcloud compute ssh over IAP"
   upload_archive() {
     gcloud compute scp --tunnel-through-iap --zone "${BASTION_ZONE}" \
-      --project "${BASTION_PROJECT}" "${ARCHIVE}" "${BASTION_VM}:/tmp/bench-sync.tgz"
+      --project "${BASTION_PROJECT}" "${ARCHIVE}" "${BASTION_VM}:${REMOTE_ARCHIVE}"
   }
   remote_exec() {
     gcloud compute ssh "${BASTION_VM}" --tunnel-through-iap --zone "${BASTION_ZONE}" \
@@ -119,6 +125,6 @@ echo "==> uploading archive to ${BASTION_VM}"
 upload_archive
 
 echo "==> extracting into ~/${REMOTE_DIR} on the VM"
-remote_exec "set -e; mkdir -p ~/${REMOTE_DIR}; tar --no-xattrs -xzf /tmp/bench-sync.tgz -C ~/${REMOTE_DIR}; rm -f /tmp/bench-sync.tgz; echo 'synced to ~/${REMOTE_DIR}'"
+remote_exec "set -e; mkdir -p ~/${REMOTE_DIR}; tar --no-xattrs -xzf ~/${REMOTE_ARCHIVE} -C ~/${REMOTE_DIR}; rm -f ~/${REMOTE_ARCHIVE}; echo 'synced to ~/${REMOTE_DIR}'"
 
 echo "==> done. Next: SSH in and run scripts/bastion/vm-setup.sh"

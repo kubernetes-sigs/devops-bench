@@ -48,10 +48,12 @@ fi
 
 cd "${REPO_DIR}"
 
-echo "==> creating venv + installing the harness (uv sync --extra all)"
+echo "==> creating venv + installing the harness"
 # uv is installed system-wide by the VM startup script. It creates/manages .venv
-# from the lockfile, so we don't hand-roll a venv or use pip here.
-uv sync --frozen --extra all
+# from the lockfile, so we don't hand-roll a venv or use pip here. The dev group
+# already pulls devops-bench[anthropic,openai], so a plain sync covers every
+# provider adapter.
+uv sync --frozen
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
@@ -93,15 +95,20 @@ else
   echo "    installing fortio to ~/bin..."
   FORTIO_VERSION="${FORTIO_VERSION:-1.66.4}"
   mkdir -p "${HOME}/bin"
-  if curl -fsSL -o /tmp/fortio.tgz \
+  # Unpack in a private mktemp dir: the shared /tmp is writable by every local
+  # user, so a fixed download path can be pre-created and the `find` below could
+  # otherwise pick up a planted binary and install it as ~/bin/fortio.
+  FORTIO_TMP="$(mktemp -d)"
+  if curl -fsSL -o "${FORTIO_TMP}/fortio.tgz" \
        "https://github.com/fortio/fortio/releases/download/v${FORTIO_VERSION}/fortio-linux_amd64-${FORTIO_VERSION}.tgz" \
-     && tar -xzf /tmp/fortio.tgz -C /tmp 2>/dev/null \
-     && cp "$(find /tmp -maxdepth 4 -name fortio -type f 2>/dev/null | head -1)" "${HOME}/bin/fortio" \
+     && tar -xzf "${FORTIO_TMP}/fortio.tgz" -C "${FORTIO_TMP}" 2>/dev/null \
+     && cp "$(find "${FORTIO_TMP}" -maxdepth 4 -name fortio -type f 2>/dev/null | head -1)" "${HOME}/bin/fortio" \
      && chmod +x "${HOME}/bin/fortio"; then
     echo "    fortio installed: $("${HOME}/bin/fortio" version 2>/dev/null | head -1)"
   else
     echo "    WARN: fortio install failed; chaos generate_load faults (optimize-scale) will no-op."
   fi
+  rm -rf "${FORTIO_TMP}"
 fi
 
 # node on a stable PATH — the oc trajectory extraction (`oc sessions` /
@@ -179,6 +186,9 @@ PY
 
 if [ ! -f "${ENV_FILE}" ]; then
   echo "==> writing ${ENV_FILE} template (fill in values, then 'source ~/bench.env')"
+  # Mode 600 before the write: the template invites provider API keys and
+  # JUDGE_API_KEY, which the default umask would leave world-readable.
+  install -m 600 /dev/null "${ENV_FILE}"
   cat > "${ENV_FILE}" <<'EOF'
 # DevOps Bench harness environment. Fill in, then: source ~/bench.env
 # --- GCP target ---

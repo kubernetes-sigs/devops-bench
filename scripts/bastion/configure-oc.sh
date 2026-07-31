@@ -90,8 +90,11 @@ if [ -f "${SECRETS_ENV}" ]; then
   . "${SECRETS_ENV}"
   KEY="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}"
   if [ -n "${KEY}" ]; then
-    printf '%s\n' "${KEY}" | oc models auth paste-api-key --provider google >/dev/null \
-      && echo "==> oc model auth set (google)"
+    if printf '%s\n' "${KEY}" | oc models auth paste-api-key --provider google >/dev/null; then
+      echo "==> oc model auth set (google)"
+    else
+      echo "==> WARN: 'oc models auth paste-api-key --provider google' failed" >&2
+    fi
   else
     echo "==> WARN: no GEMINI_API_KEY/GOOGLE_API_KEY in ${SECRETS_ENV}; skipping oc auth"
   fi
@@ -104,6 +107,9 @@ fi
 # (google-genai) provider so the legacy arm can target `google/<model>`.
 # Idempotent; auth flows from the `oc models auth` paste above.
 if [ -n "${GENAI_MODELS}" ]; then
+  # oc is installed by the VM startup script but only writes its config on first
+  # use, so the directory can still be missing when this runs on a fresh bastion.
+  mkdir -p "${HOME}/.openclaw"
   OC_CONFIG="${HOME}/.openclaw/openclaw.json" GENAI_MODELS="${GENAI_MODELS}" \
   python3 - <<'PY'
 import json, os
@@ -175,14 +181,18 @@ if [ "${WANT_VERTEX}" = "1" ]; then
     && echo "==> oc google-vertex auth marker set (agent ${OPENCLAW_AGENT})"
   # Ensure the provider routes through the google-vertex transport (api field) and
   # the models are registered + allowlisted for the agent. Idempotent.
+  mkdir -p "${HOME}/.openclaw"
   OC_CONFIG="${HOME}/.openclaw/openclaw.json" VERTEX_MODELS="${VERTEX_MODELS}" \
   OPENCLAW_AGENT="${OPENCLAW_AGENT}" python3 - <<'PY'
 import json, os
 path = os.environ["OC_CONFIG"]
 models = os.environ["VERTEX_MODELS"].split()
 agent = os.environ["OPENCLAW_AGENT"]
-with open(path) as f:
-    cfg = json.load(f)
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except FileNotFoundError:
+    cfg = {}
 prov = cfg.setdefault("models", {}).setdefault("providers", {}).setdefault("google-vertex", {})
 prov["api"] = "google-vertex"
 prov["baseUrl"] = "https://{location}-aiplatform.googleapis.com"
