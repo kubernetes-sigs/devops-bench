@@ -49,7 +49,9 @@ agent_config_env() {
   type="${preset%%+*}"
   case "$type" in
     oc)   out+=("BENCH_AGENT_TYPE=openclaw" "AGENT_TARGET=oc" "OPENCLAW_BIN=oc" "OPENCLAW_AGENT=main") ;;
-    gcli) out+=("BENCH_AGENT_TYPE=cli" "AGENT_TARGET=gemini") ;;
+    # "gemini" is the registered agent key; "cli" matches neither a registered
+    # agent nor the gemini-cli alias, so it fails at agent resolution.
+    gcli) out+=("BENCH_AGENT_TYPE=gemini" "AGENT_TARGET=gemini") ;;
     *) echo "ERROR: unknown agent type '${type}' in preset '${preset}'" >&2; return 1 ;;
   esac
   for feat in $(echo "${preset}" | tr '+' ' '); do
