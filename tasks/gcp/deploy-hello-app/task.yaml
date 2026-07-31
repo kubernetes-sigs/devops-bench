@@ -2,6 +2,7 @@ task_id: 6
 name: "deploy-hello-app"
 infrastructure:
   deployer: "tofu"
+  provider: "gcp"
   stack: "prebuilt/minimum"
   teardown: true
   variables:
