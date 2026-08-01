@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import os
 import socket
 import threading
 import time
@@ -55,14 +56,29 @@ _log = get_logger("evalharness.scenario")
 # Per-entry budget for a converging entry: how long a single entry's (possibly
 # nested) checks may poll before giving up. Assert-mode entries ignore this,
 # since single_shot always evaluates once with a zero budget regardless.
-VERIFICATION_TIMEOUT_SEC = 120
+#
+# WHAT THIS BUDGET IS ACTUALLY FOR. Verification only ever runs AFTER the agent
+# has exited, so the only thing still changing the cluster is Kubernetes' own
+# controllers finishing whatever the agent's last action started. That is usually
+# seconds: a rollout completing, endpoints populating, a pod going Ready. But not
+# always: image pulls, PVC binding, and rollouts that have to pull can legitimately
+# take much longer, so the default stays at 120.
+#
+# The total budget below matters more than this per-entry timeout. It bounds the
+# whole pass, and if early entries consume it the later ones are starved and
+# report "evaluation did not complete before the deadline" without having
+# meaningfully run, which reads as a failed check rather than as an unmeasured one.
+#
+# Both are overridable via BENCH_VERIFY_TIMEOUT_SEC and BENCH_VERIFY_TOTAL_BUDGET_SEC
+# for tuning without a code change.
+VERIFICATION_TIMEOUT_SEC = int(os.environ.get("BENCH_VERIFY_TIMEOUT_SEC", "120"))
 
 # Total wall-clock budget for the whole post-run verification pass, across
 # every entry. Without a cap, a task with many failing converge objectives
-# burns entries x VERIFICATION_TIMEOUT_SEC (12 entries x 120s is 22+ minutes);
-# this bounds the pass as a whole. Assert-mode entries still always run, since
-# a safeguard that goes unchecked defeats the point of having it.
-VERIFICATION_TOTAL_BUDGET_SEC = 600
+# burns entries x VERIFICATION_TIMEOUT_SEC; this bounds the pass as a whole.
+# Assert-mode entries still always run, since a safeguard that goes unchecked
+# defeats the point of having it.
+VERIFICATION_TOTAL_BUDGET_SEC = int(os.environ.get("BENCH_VERIFY_TOTAL_BUDGET_SEC", "600"))
 
 # Seconds to wait for the target Service's external LoadBalancer IP to be
 # assigned by the cloud provider's load balancer controller. LB provisioning
