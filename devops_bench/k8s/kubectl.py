@@ -75,12 +75,27 @@ def _selector_args(selector: str | None) -> list[str]:
     return ["-l", selector] if selector else []
 
 
-def _run_kubectl(argv: list[str], kubeconfig: KubeconfigSource, **kwargs: Any) -> CompletedProcess:
+def _context_args(context: str | None) -> list[str]:
+    return ["--context", context] if context else []
+
+
+def _run_kubectl(
+    argv: list[str],
+    kubeconfig: KubeconfigSource,
+    *,
+    context: str | None = None,
+    **kwargs: Any,
+) -> CompletedProcess:
     """Run ``kubectl`` with the resolved kubeconfig overlaid on the environment.
 
     Args:
         argv: Full kubectl command and arguments, never a shell string.
         kubeconfig: Explicit path, a ``KubeconfigProvider``, or None.
+        context: Optional kubeconfig context to pin the call to (``--context``).
+            Pinning the file alone is not enough: a kubeconfig can carry
+            several contexts, or none selected as current, and an unpinned
+            context means the call silently reads whichever cluster the
+            ambient current-context happens to point at.
         **kwargs: Extra keyword arguments forwarded to ``core.subprocess.run``
             (e.g. ``timeout``).
 
@@ -92,7 +107,7 @@ def _run_kubectl(argv: list[str], kubeconfig: KubeconfigSource, **kwargs: Any) -
     """
     path = _resolve_kubeconfig(kubeconfig)
     extra_env = {"KUBECONFIG": path} if path else None
-    return run(argv, extra_env=extra_env, **kwargs)
+    return run([*argv, *_context_args(context)], extra_env=extra_env, **kwargs)
 
 
 def wait(
@@ -103,6 +118,7 @@ def wait(
     timeout_sec: float,
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
 ) -> CompletedProcess:
     """Block until a resource satisfies a condition via ``kubectl wait``.
 
@@ -113,6 +129,7 @@ def wait(
         timeout_sec: Maximum seconds to wait (``--timeout=<n>s``).
         namespace: Optional namespace (``-n``).
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to.
 
     Returns:
         The completed process.
@@ -129,7 +146,7 @@ def wait(
         f"--timeout={timeout_sec}s",
         *_namespace_args(namespace),
     ]
-    return _run_kubectl(argv, kubeconfig)
+    return _run_kubectl(argv, kubeconfig, context=context)
 
 
 def get_resource(
@@ -140,6 +157,7 @@ def get_resource(
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
     timeout: float | None = None,
+    context: str | None = None,
 ) -> dict[str, Any]:
     """Fetch a resource (or list) as parsed JSON via ``kubectl get -o json``.
 
@@ -152,6 +170,7 @@ def get_resource(
         timeout: Optional seconds before the subprocess is killed. ``None``
             (the default) blocks indefinitely, so pass one whenever the API
             server might accept a connection and never respond.
+        context: Optional kubeconfig context to pin the call to.
 
     Returns:
         The parsed JSON document.
@@ -170,7 +189,7 @@ def get_resource(
         "json",
         *_namespace_args(namespace),
     ]
-    completed = _run_kubectl(argv, kubeconfig, timeout=timeout)
+    completed = _run_kubectl(argv, kubeconfig, timeout=timeout, context=context)
     return json.loads(completed.stdout)
 
 
@@ -179,6 +198,7 @@ def apply(
     *,
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
 ) -> CompletedProcess:
     """Apply a manifest file or directory via ``kubectl apply -f``.
 
@@ -186,6 +206,7 @@ def apply(
         path: Manifest file, directory, or URL passed to ``-f``.
         namespace: Optional namespace (``-n``).
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to.
 
     Returns:
         The completed process.
@@ -194,7 +215,7 @@ def apply(
         SubprocessError: If kubectl exits non-zero or times out.
     """
     argv = ["kubectl", "apply", "-f", path, *_namespace_args(namespace)]
-    return _run_kubectl(argv, kubeconfig)
+    return _run_kubectl(argv, kubeconfig, context=context)
 
 
 def rollout_status(
@@ -203,6 +224,7 @@ def rollout_status(
     timeout_sec: float | None = None,
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
 ) -> CompletedProcess:
     """Wait for a rollout to finish via ``kubectl rollout status``.
 
@@ -211,6 +233,7 @@ def rollout_status(
         timeout_sec: Optional maximum seconds to wait (``--timeout=<n>s``).
         namespace: Optional namespace (``-n``).
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to.
 
     Returns:
         The completed process.
@@ -226,7 +249,7 @@ def rollout_status(
         *([f"--timeout={timeout_sec}s"] if timeout_sec is not None else []),
         *_namespace_args(namespace),
     ]
-    return _run_kubectl(argv, kubeconfig)
+    return _run_kubectl(argv, kubeconfig, context=context)
 
 
 @contextlib.contextmanager
@@ -238,6 +261,7 @@ def port_forward(
     namespace: str | None = None,
     settle_sec: float = _PORT_FORWARD_SETTLE_SEC,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
 ) -> Iterator[None]:
     """Hold a ``kubectl port-forward`` open for the duration of the ``with`` body.
 
@@ -256,6 +280,7 @@ def port_forward(
         namespace: Optional namespace (``-n``).
         settle_sec: Seconds to wait for the tunnel to establish before yielding.
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to.
 
     Yields:
         ``None`` once the tunnel has had time to settle.
@@ -271,6 +296,7 @@ def port_forward(
         target,
         f"{local_port}:{remote}",
         *_namespace_args(namespace),
+        *_context_args(context),
     ]
     path = _resolve_kubeconfig(kubeconfig)
     # Reuse core.subprocess env semantics so this Popen path never drifts from

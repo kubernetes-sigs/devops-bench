@@ -110,6 +110,7 @@ class ScalingCompleteVerifier(BaseVerifier):
                 self.deployment,
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
+                context=self.context,
                 timeout=single_call_timeout(timeout_sec),
             )
         except SubprocessError as exc:

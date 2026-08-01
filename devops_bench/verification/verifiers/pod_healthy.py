@@ -70,6 +70,7 @@ class PodHealthyVerifier(BaseVerifier):
                 timeout_sec=single_call_timeout(timeout_sec),
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
+                context=self.context,
             )
             return VerificationResult(
                 success=True,
@@ -127,6 +128,7 @@ class PodHealthyVerifier(BaseVerifier):
                 selector=self.selector,
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
+                context=self.context,
                 timeout=single_call_timeout(timeout_sec),
             )
         except Exception as exc:  # noqa: BLE001 - diagnostics path, never raises
