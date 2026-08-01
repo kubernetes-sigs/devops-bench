@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from devops_bench.agents import sandbox
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.cli.gemini_cli.parsing import parse_stream_json
 from devops_bench.agents.config import AgentConfig
@@ -240,10 +241,39 @@ class GeminiCliAgent(AgentHarness):
                 (gemini_dir / _GEMINI_SETTINGS_FILE).write_text(
                     json.dumps(settings, indent=2), encoding="utf-8"
                 )
+            # Containerised execution, opt-in via BENCH_AGENT_SANDBOX=docker.
+            #
+            # Everything above still runs on the host: GEMINI.md, settings.json and the
+            # skills tree are written into `workdir`, which is then mounted into the
+            # container as /workspace. Only the agent process itself moves.
+            #
+            # env_overlay is handed to wrap_argv rather than to run(). It is the
+            # RESOLVED configuration (provider-routed api key, GEMINI_MODEL, the OTLP
+            # disables), so it is exactly what should cross the boundary, and it crosses
+            # by value as explicit -e flags rather than as inherited process env.
+            run_argv = argv
+            sandboxed = False
+            if sandbox.sandbox_enabled():
+                cluster = sandbox.current_cluster_name()
+                kubeconfig = (
+                    sandbox.build_agent_kubeconfig(cluster, workdir) if cluster else None
+                )
+                if kubeconfig is None:
+                    # Refuse rather than silently running unsandboxed on the host: a
+                    # containment control that quietly degrades is worse than none.
+                    return AgentResult.errored(
+                        "BENCH_AGENT_SANDBOX is set but no sandbox kubeconfig could be "
+                        "built; refusing to fall back to an unsandboxed run"
+                    )
+                run_argv = sandbox.wrap_argv(
+                    argv, workspace=workdir, kubeconfig=kubeconfig, extra_env=env_overlay
+                )
+                sandboxed = True
+
             try:
                 completed = run(
-                    argv,
-                    extra_env=env_overlay,
+                    run_argv,
+                    extra_env=None if sandboxed else env_overlay,
                     cwd=workdir,
                     check=False,
                     timeout=self.config.timeout_sec,
