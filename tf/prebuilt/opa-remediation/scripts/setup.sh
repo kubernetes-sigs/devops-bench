@@ -94,36 +94,90 @@ echo "==> Waiting for Kyverno's background scan to populate PolicyReports..."
 # already compliant. Wait until failing results collectively name the exact
 # four (policy, resource) pairs seeded, not just the four resource names: a
 # resource name flagged by the wrong policy must not read as ready.
-reports_ready=false
-for _ in $(seq 1 36); do
-  if kubectl get policyreport -A -o json 2>/dev/null \
-       | python3 -c '
+# Prints the still-missing "policy/resource" pairs, one per line, and exits
+# non-zero if the cluster could not be queried at all. Empty output means ready.
+_missing_report_pairs() {
+  kubectl get policyreport -A -o json 2>/dev/null \
+    | python3 -c '
 import sys, json
-data = json.load(sys.stdin)
-pairs = {
-    (r.get("policy"), res.get("name"))
-    for it in data.get("items", [])
-    for r in it.get("results", [])
-    if r.get("result") == "fail"
-    for res in r.get("resources", [])
-    if res.get("name")
-}
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(2)
+pairs = set()
+for it in data.get("items", []):
+    scope = it.get("scope") or {}
+    for r in it.get("results", []):
+        if r.get("result") != "fail":
+            continue
+        policy = r.get("policy")
+        listed = r.get("resources") or []
+        if listed:
+            for res in listed:
+                if res.get("name"):
+                    pairs.add((policy, res["name"]))
+        # Kyverno 1.12 emits one PolicyReport per subject and names that subject
+        # in the report'"'"'s top-level scope, with no per-result resources list.
+        # Match on the Deployment-scoped reports: the ReplicaSet and Pod reports
+        # for the same workload carry generated names that never equal the four
+        # seeded ones.
+        elif scope.get("kind") == "Deployment" and scope.get("name"):
+            pairs.add((policy, scope["name"]))
 required = {
     ("disallow-privileged-containers", "cache"),
     ("disallow-privileged-containers", "payments"),
     ("require-resource-limits", "web"),
     ("require-resource-limits", "worker"),
 }
-sys.exit(0 if required <= pairs else 1)
-'; then
-    echo "    PolicyReports populated with violations for all seeded workloads."
-    reports_ready=true
-    break
+for policy, name in sorted(required - pairs):
+    print(f"{policy}/{name}")
+'
+}
+
+# A cold kind cluster whose API server is still settling routinely needs longer
+# than the 180s this used to allow, so the ceiling is 600s. But a scan that has
+# genuinely stalled should not burn the whole budget: if the missing set stops
+# shrinking for STALL_ATTEMPTS polls we fail early, and either way the error
+# names the pairs that never arrived rather than just "not all of them".
+POLL_INTERVAL=5
+MAX_ATTEMPTS=120 # 120 * 5s = 600s
+STALL_ATTEMPTS=18 # 18 * 5s = 90s with no new pair
+
+reports_ready=false
+missing=""
+seen_any_response=false
+prev_missing=""
+stalled=0
+
+for _ in $(seq 1 "${MAX_ATTEMPTS}"); do
+  if missing="$(_missing_report_pairs)"; then
+    if [ -z "${missing}" ]; then
+      echo "    PolicyReports populated with violations for all seeded workloads."
+      reports_ready=true
+      break
+    fi
+    if [ "${seen_any_response}" = true ] && [ "${missing}" = "${prev_missing}" ]; then
+      stalled=$((stalled + 1))
+    else
+      stalled=0
+    fi
+    seen_any_response=true
+    prev_missing="${missing}"
+    if [ "${stalled}" -ge "${STALL_ATTEMPTS}" ]; then
+      echo "ERROR: Kyverno background scan stalled — no new PolicyReport results in $((STALL_ATTEMPTS * POLL_INTERVAL))s." >&2
+      break
+    fi
   fi
-  sleep 5
+  sleep "${POLL_INTERVAL}"
 done
+
 if [ "${reports_ready}" != true ]; then
-  echo "ERROR: PolicyReports never showed failing results for all seeded workloads after 180s" >&2
+  if [ "${seen_any_response}" = true ]; then
+    echo "ERROR: PolicyReports incomplete; still missing (policy/resource):" >&2
+    echo "${missing}" | sed 's/^/  /' >&2
+  else
+    echo "ERROR: could not read PolicyReports from the cluster at all." >&2
+  fi
   exit 1
 fi
 
