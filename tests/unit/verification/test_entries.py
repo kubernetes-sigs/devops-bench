@@ -60,10 +60,28 @@ def test_objective_with_severity_is_an_error() -> None:
     assert "severity is not allowed" in errors[0]["reason"]
 
 
-def test_mode_hold_is_rejected_with_a_specific_message() -> None:
+def test_mode_hold_parses() -> None:
     entries, errors = parse_entries([_entry(mode="hold")])
+    assert errors == []
+    assert entries[0].resolved_mode == "hold"
+
+
+def test_hold_poll_interval_defaults_to_none() -> None:
+    entries, errors = parse_entries([_entry(mode="hold")])
+    assert errors == []
+    assert entries[0].hold_poll_interval_sec is None
+
+
+def test_hold_poll_interval_accepts_an_explicit_value() -> None:
+    entries, errors = parse_entries([_entry(mode="hold", hold_poll_interval_sec=2.5)])
+    assert errors == []
+    assert entries[0].hold_poll_interval_sec == 2.5
+
+
+def test_hold_poll_interval_must_be_positive() -> None:
+    entries, errors = parse_entries([_entry(mode="hold", hold_poll_interval_sec=0)])
     assert entries == []
-    assert "not yet supported" in errors[0]["reason"]
+    assert errors[0]["name"] == "e1"
 
 
 def test_duplicate_names_keep_the_first_and_report_the_second() -> None:

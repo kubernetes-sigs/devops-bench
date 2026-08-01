@@ -462,7 +462,7 @@ def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
     # exception path.
     monkeypatch.setattr(harness, "execute_agent", _boom)
     canned_report = [{"name": "web-ready", "success": True, "status": "pass"}]
-    monkeypatch.setattr(harness, "_run_verification", lambda entries: canned_report)
+    monkeypatch.setattr(harness, "_run_verification", lambda entries, **kwargs: canned_report)
     task = Task.from_dict(
         {
             "task_id": "t",
