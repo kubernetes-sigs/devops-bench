@@ -115,3 +115,18 @@ def test_as_text_handles_bytes_and_none():
     assert bench_subprocess._as_text(None) is None
     assert bench_subprocess._as_text("text") == "text"
     assert isinstance(bench_subprocess._as_text(b"\xff\xfe"), str)
+
+
+def test_child_does_not_inherit_parent_stdin() -> None:
+    """A child reading stdin must see EOF immediately, not block on the terminal.
+
+    Regression guard. With subprocess.run's default of ``stdin=None`` the child
+    inherits the parent's stdin, and a CLI that inspects it can hang until the
+    caller's timeout. ``cat`` blocks until EOF, so this only returns promptly when
+    stdin has been closed for the child.
+    """
+    completed = bench_subprocess.run(
+        ["sh", "-c", "cat > /dev/null; echo reached-eof"], check=False, timeout=10
+    )
+    assert completed.returncode == 0
+    assert "reached-eof" in completed.stdout
