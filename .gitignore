@@ -25,3 +25,12 @@ env/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# OpenTofu / Terraform local state and working directories
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
