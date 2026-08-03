@@ -48,7 +48,7 @@ from jsonpath_ng.jsonpath import Slice as _JsonPathSlice
 from jsonpath_ng.jsonpath import This as _JsonPathThis
 from pydantic import model_validator
 
-from devops_bench.k8s import get_resource
+from devops_bench.k8s import get_resource, is_not_found
 from devops_bench.verification.base import (
     VERIFIERS,
     BaseVerifier,
@@ -378,7 +378,14 @@ class ResourcePropertyVerifier(BaseVerifier):
                 timeout=single_call_timeout(timeout_sec),
             )
         except Exception as exc:  # noqa: BLE001 - a kubectl failure is a check error
-            return "error", f"kubectl get {self.kind} failed: {exc}", None
+            if not is_not_found(exc):
+                return "error", f"kubectl get {self.kind} failed: {exc}", None
+            # NotFound is the apiserver answering, not a failure to reach it, so
+            # absence here was observed. Naming a resource surfaces that as a
+            # non-zero exit while a selector returns an empty list; substituting
+            # an empty payload puts both on the same path below, so "absent"
+            # still passes and every other operator fails.
+            payload = {"items": []}
 
         items = payload.get("items")
         objects = items if isinstance(items, list) else [payload]

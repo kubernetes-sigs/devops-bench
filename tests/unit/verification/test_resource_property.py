@@ -20,6 +20,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
+from devops_bench.core import SubprocessError
 from devops_bench.verification.spec import parse_node
 from devops_bench.verification.verifiers.resource_property import (
     ResourcePropertyVerifier,
@@ -889,3 +890,58 @@ def test_converge_mode_polls_until_the_property_holds(monkeypatch: pytest.Monkey
             op="gte", value=2, path="status.readyReplicas", resource_name="web"
         ).verify(5.0)
     assert result.success is True
+
+
+_NOT_FOUND_STDERR = 'Error from server (NotFound): namespaces "hello-app" not found'
+
+
+def _not_found() -> SubprocessError:
+    """The exception kubectl raises when a *named* resource does not exist."""
+    return SubprocessError(
+        cmd=["kubectl", "get", "namespace", "hello-app", "-o", "json"],
+        returncode=1,
+        stderr=_NOT_FOUND_STDERR,
+    )
+
+
+def test_a_named_resource_that_does_not_exist_is_a_fail_not_an_error() -> None:
+    # Absence reaches the verifier as a non-zero exit when the resource is named
+    # (a selector would return an empty list and exit zero). Both are the same
+    # observation, so neither may drop the entry out of the correctness
+    # denominator the way an "error" does.
+    with patch(_GET, side_effect=_not_found()):
+        result = _verifier(op="exists", resource_name="hello-app").verify(0.0)
+    assert result.status == "fail"
+    assert result.success is False
+
+
+def test_absent_passes_when_the_named_resource_does_not_exist() -> None:
+    with patch(_GET, side_effect=_not_found()):
+        result = _verifier(op="absent", resource_name="hello-app").verify(0.0)
+    assert result.status == "pass"
+    assert result.success is True
+
+
+def test_a_kubectl_failure_that_is_not_notfound_still_errors() -> None:
+    exc = SubprocessError(
+        cmd=["kubectl", "get", "namespace", "hello-app"],
+        returncode=1,
+        stderr="Unable to connect to the server: dial tcp: connection refused",
+    )
+    with patch(_GET, side_effect=exc):
+        result = _verifier(op="exists", resource_name="hello-app").verify(0.0)
+    assert result.status == "error"
+
+
+def test_a_message_merely_containing_not_found_is_not_treated_as_notfound() -> None:
+    # A missing kubectl binary says "not found" too. Only the apiserver's
+    # "(NotFound)" reason code counts, or an environment problem would score as
+    # an observed absence.
+    exc = SubprocessError(
+        cmd=["kubectl", "get", "namespace", "hello-app"],
+        returncode=127,
+        stderr="bash: kubectl: command not found",
+    )
+    with patch(_GET, side_effect=exc):
+        result = _verifier(op="exists", resource_name="hello-app").verify(0.0)
+    assert result.status == "error"

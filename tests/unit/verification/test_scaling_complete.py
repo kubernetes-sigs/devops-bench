@@ -174,3 +174,23 @@ def test_name_is_echoed_onto_result() -> None:
         ).verify(timeout_sec=5)
 
     assert result.name == "scale-to-two"
+
+
+def test_a_deployment_that_does_not_exist_is_a_fail_not_an_error() -> None:
+    # A deployment the apiserver reports as NotFound has observably not scaled,
+    # so it must count against correctness rather than dropping out of the
+    # denominator the way an unobserved check does.
+    exc = SubprocessError(
+        ["kubectl", "get", "deployment", "web"],
+        returncode=1,
+        stderr='Error from server (NotFound): deployments.apps "web" not found',
+    )
+    with patch(
+        "devops_bench.verification.verifiers.scaling_complete.get_resource",
+        side_effect=exc,
+    ):
+        result = ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=0)
+
+    assert result.status == "fail"
+    assert result.success is False
+    assert "not found" in result.reason

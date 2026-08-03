@@ -21,7 +21,7 @@ from typing import Any, Literal
 from pydantic import model_validator
 
 from devops_bench.core import SubprocessError, get_logger
-from devops_bench.k8s import get_resource
+from devops_bench.k8s import get_resource, is_not_found
 from devops_bench.verification.base import (
     VERIFIERS,
     BaseVerifier,
@@ -114,6 +114,9 @@ class ScalingCompleteVerifier(BaseVerifier):
             )
         except SubprocessError as exc:
             stderr = (exc.stderr or "").strip()
+            if is_not_found(exc):
+                # A deployment that does not exist has observably not scaled.
+                return "fail", f"Deployment {self.deployment} not found", None
             _log.warning("Failed to get deployment %s: %s", self.deployment, stderr)
             return "error", f"Failed to get deployment: {stderr}", None
         except ValueError:

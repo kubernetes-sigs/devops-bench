@@ -29,12 +29,37 @@ from devops_bench.core.subprocess import CompletedProcess, _build_env, run
 __all__ = [
     "apply",
     "get_resource",
+    "is_not_found",
     "port_forward",
     "rollout_status",
     "wait",
 ]
 
 _log = get_logger("k8s.kubectl")
+
+# The apiserver's reason code, as kubectl renders it:
+#   Error from server (NotFound): namespaces "hello-app" not found
+# Matched in full, parentheses included, so an unrelated message that merely
+# contains the words "not found" (a missing binary, say) cannot pass for it.
+_NOT_FOUND_MARKER = "(NotFound)"
+
+
+def is_not_found(exc: BaseException) -> bool:
+    """Report whether ``exc`` is kubectl saying the resource does not exist.
+
+    Absence reaches a caller two different ways. A selector query returns an
+    empty item list and exits zero, whereas a query naming a resource exits
+    non-zero with ``NotFound`` on stderr. Both mean the same thing, so callers
+    use this to stop the second from looking like a failure to observe.
+
+    Args:
+        exc: The exception raised by a kubectl helper.
+
+    Returns:
+        ``True`` when the apiserver reported ``NotFound``.
+    """
+    return _NOT_FOUND_MARKER in (getattr(exc, "stderr", None) or "")
+
 
 # Seconds to let ``kubectl port-forward`` establish the tunnel before yielding.
 _PORT_FORWARD_SETTLE_SEC = 3
