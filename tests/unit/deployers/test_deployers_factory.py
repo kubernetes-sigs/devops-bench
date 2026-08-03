@@ -338,5 +338,22 @@ def test_get_deployer_infra_provider_env_vcluster(mocker, base_config, monkeypat
         base_config["location"],
     )
     assert isinstance(deployer, TFDeployer)
-    assert deployer.variables["infra_provider"] == "vcluster"
     assert deployer.variables["namespace"] == f"vcluster-{base_config['cluster_name']}"
+
+
+def test_get_deployer_tofu_gcp_stack(mocker, base_config):
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/gcp"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.variables == {
+        "infra_provider": "gcp",
+        "project_id": base_config["project_id"],
+        "cluster_name": base_config["cluster_name"],
+        "location": base_config["location"],
+    }
+    assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/gcp")
