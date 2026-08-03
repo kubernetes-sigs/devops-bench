@@ -78,6 +78,15 @@ _SINGLE_SHOT_WAIT_CEILING_SEC = 120.0
 # path and the single-shot wait-ceiling path in :meth:`VerifierAgent._run_parallel`.
 _PARALLEL_INCOMPLETE_REASON = "evaluation did not complete before the deadline"
 
+# Children are handed the same deadline the parent's wait uses, and a child
+# that polls to the very end overshoots it slightly: ``poll_until`` clamps its
+# final sleep but then re-checks the predicate once more before giving up.
+# Waiting only to the deadline therefore races every child that spent its whole
+# budget, and a child that loses is recorded as never observed even though it
+# did reach a verdict. This is the handoff window: wide enough to collect a
+# result that landed on time, far too narrow to rescue a genuinely hung child.
+_CHILD_HANDOFF_GRACE_SEC = 1.0
+
 
 def _node_name(node: Any) -> str | None:
     """Echo the optional ``name`` label from a spec node, if any."""
@@ -493,7 +502,11 @@ class VerifierAgent:
         observed to pass or fail, so it is recorded with status "error"
         (reason :data:`_PARALLEL_INCOMPLETE_REASON`), not "fail": a hung
         ``kubectl`` call under assert mode must not read as an observed
-        safeguard VIOLATION. A leaf that unexpectedly raises is converted to a
+        safeguard VIOLATION. The converge wait adds
+        :data:`_CHILD_HANDOFF_GRACE_SEC` on top of the deadline so that a child
+        which polled to the very end still gets to hand its verdict back;
+        without it a converging objective whose children legitimately observed
+        "not there" was recorded as unobserved and dropped out of the score. A leaf that unexpectedly raises is converted to a
         failed child result so one bad leaf does not abort the rest of the
         group. Under ``single_shot``
         the wait is capped at :data:`_SINGLE_SHOT_WAIT_CEILING_SEC`; without
@@ -530,7 +543,7 @@ class VerifierAgent:
                     else _SINGLE_SHOT_WAIT_CEILING_SEC
                 )
             else:
-                wait_timeout = max(0.0, deadline - time.monotonic())
+                wait_timeout = max(0.0, deadline - time.monotonic()) + _CHILD_HANDOFF_GRACE_SEC
             done, _ = futures_wait(futs, timeout=wait_timeout)
             for f, i in futs.items():
                 if f not in done:
