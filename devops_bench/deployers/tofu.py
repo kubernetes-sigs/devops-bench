@@ -295,6 +295,11 @@ class TFDeployer(Deployer):
         except json.JSONDecodeError as exc:
             raise ConfigError("failed to parse 'tofu output -json'") from exc
 
+        if not isinstance(raw_outputs, dict):
+            raise ConfigError(
+                f"Expected dict from 'tofu output -json', got {type(raw_outputs).__name__}"
+            )
+
         outputs = {
             k: v.get("value")
             for k, v in raw_outputs.items()

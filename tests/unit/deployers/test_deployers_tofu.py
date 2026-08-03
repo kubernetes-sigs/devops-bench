@@ -152,6 +152,13 @@ def test_down(mocker, monkeypatch, tf_deployer, provider):
         "node_count=3",
     ]
 
+    assert len(provider.cleanup_calls) == 1
+    cleanup_info, cleanup_vars = provider.cleanup_calls[0]
+    assert cleanup_info.name == "test-cluster"
+    assert cleanup_info.location == "us-central1-a"
+    assert cleanup_info.project == "test-project"
+    assert cleanup_vars == tf_deployer.variables
+
 
 def test_up_isolates_state_beside_tf_data_dir(mocker, monkeypatch, tmp_path, tf_deployer):
     monkeypatch.setenv("TF_DATA_DIR", str(tmp_path / "tf-data"))
@@ -207,6 +214,9 @@ def test_get_cluster_info_parses_and_delegates(mocker, monkeypatch, tf_deployer,
 
     # Parsed outputs are handed to the provider, which builds the ClusterInfo.
     assert provider.cluster_calls == [("test-cluster", "us-central1-a", tf_deployer.variables)]
+    assert provider.output_calls == [
+        {"cluster_name": "test-cluster", "cluster_location": "us-central1-a"}
+    ]
     assert info.name == "test-cluster"
     assert info.location == "us-central1-a"
     assert info.project == "test-project"
@@ -240,6 +250,15 @@ def test_get_cluster_info_bad_json_raises(mocker, tf_deployer):
     mocker.patch("devops_bench.deployers.tofu.run", side_effect=[MagicMock(), proc])
 
     with pytest.raises(ConfigError, match="tofu output"):
+        tf_deployer.get_cluster_info()
+
+
+def test_get_cluster_info_non_dict_json_raises(mocker, tf_deployer):
+    proc = MagicMock()
+    proc.stdout = '["not-a-dict"]'
+    mocker.patch("devops_bench.deployers.tofu.run", side_effect=[MagicMock(), proc])
+
+    with pytest.raises(ConfigError, match="Expected dict from 'tofu output -json'"):
         tf_deployer.get_cluster_info()
 
 

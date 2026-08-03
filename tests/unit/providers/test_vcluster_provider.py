@@ -289,3 +289,34 @@ def test_vcluster_cleanup_preserves_non_scratch_kubeconfig(
     )
 
     assert custom_file.exists()
+
+
+def test_vcluster_ensure_cluster_credentials_refuses_symlink_path(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "real_file.yaml"
+    target.write_text("hello", encoding="utf-8")
+    symlink_path = tmp_path / "symlink.yaml"
+    symlink_path.symlink_to(target)
+
+    with pytest.raises(ConfigError, match="Refusing to write kubeconfig to symlink"):
+        VClusterProvider().ensure_cluster_credentials(
+            "c",
+            "local",
+            {"kubeconfig_path": str(symlink_path)},
+            outputs={"kubeconfig": "foo"},
+        )
+
+
+def test_vcluster_cleanup_skips_pv_when_cluster_name_empty(
+    mocker: MockerFixture,
+) -> None:
+    mock_run = mocker.patch("devops_bench.providers.vcluster.run")
+    info = ClusterInfo(
+        name="",
+        location="local",
+        project="local-vcluster",
+        kubeconfig_path=None,
+    )
+    VClusterProvider().cleanup(info, variables={})
+    mock_run.assert_not_called()

@@ -181,8 +181,11 @@ class VClusterProvider(Provider):
                     Path(tempfile.gettempdir()) / f"vcluster-{cluster_name}-kubeconfig.yaml"
                 )
 
+        raw_target = Path(target_path).expanduser()
+        if raw_target.is_symlink():
+            raise ConfigError(f"Refusing to write kubeconfig to symlink: {target_path}")
         default_kubeconfig = str(Path("~/.kube/config").expanduser().resolve())
-        resolved_target = Path(target_path).expanduser().resolve()
+        resolved_target = raw_target.resolve()
         if resolved_target == Path(default_kubeconfig):
             raise ConfigError(
                 "Refusing to overwrite ~/.kube/config with virtual cluster kubeconfig."
@@ -208,6 +211,8 @@ class VClusterProvider(Provider):
                 _log.warning("Failed to rewrite 127.0.0.1 server URL in kubeconfig: %s", exc)
 
         resolved_target.parent.mkdir(parents=True, exist_ok=True)
+        if raw_target.is_symlink() or resolved_target.is_symlink():
+            raise ConfigError(f"Refusing to write kubeconfig to symlink: {target_path}")
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         fd = os.open(resolved_target, flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -234,9 +239,6 @@ class VClusterProvider(Provider):
 
         default_kubeconfig = Path("~/.kube/config").expanduser().resolve()
         if resolved == default_kubeconfig:
-            return False
-
-        if resolved == Path.cwd().resolve():
             return False
 
         if resolved.is_dir():
@@ -282,32 +284,35 @@ class VClusterProvider(Provider):
             except ConfigError:
                 host_context = None
 
-        label_selector = (
-            f"devops-bench/run-scoped=true,devops-bench/cluster-name={cluster_info.name}"
-        )
-        cmd = ["kubectl", f"--kubeconfig={host_kubeconfig_path}"]
-        if host_context:
-            cmd.append(f"--context={host_context}")
-        get_cmd = cmd + [
-            "get",
-            "pv",
-            "-l",
-            label_selector,
-            "-o",
-            "jsonpath={.items[*].metadata.name}",
-        ]
+        if not cluster_info.name or not cluster_info.name.strip():
+            _log.warning("Skipping VCluster PV cleanup: cluster_info.name is empty.")
+        else:
+            label_selector = (
+                f"devops-bench/run-scoped=true,devops-bench/cluster-name={cluster_info.name}"
+            )
+            cmd = ["kubectl", f"--kubeconfig={host_kubeconfig_path}"]
+            if host_context:
+                cmd.append(f"--context={host_context}")
+            get_cmd = cmd + [
+                "get",
+                "pv",
+                "-l",
+                label_selector,
+                "-o",
+                "jsonpath={.items[*].metadata.name}",
+            ]
 
-        res = run(get_cmd, capture=True, check=False)
-        if res.returncode == 0 and res.stdout.strip():
-            pv_names = res.stdout.strip().split()
-            if pv_names:
-                _log.info(
-                    "Deleting %d orphaned PersistentVolume(s) for cluster %s",
-                    len(pv_names),
-                    cluster_info.name,
-                )
-                del_cmd = cmd + ["delete", "pv", *pv_names]
-                run(del_cmd, capture=False, check=False)
+            res = run(get_cmd, capture=True, check=False)
+            if res.returncode == 0 and res.stdout.strip():
+                pv_names = res.stdout.strip().split()
+                if pv_names:
+                    _log.info(
+                        "Deleting %d orphaned PersistentVolume(s) for cluster %s",
+                        len(pv_names),
+                        cluster_info.name,
+                    )
+                    del_cmd = cmd + ["delete", "pv", *pv_names]
+                    run(del_cmd, capture=False, check=False)
 
         if cluster_info.kubeconfig_path:
             kube_path = Path(cluster_info.kubeconfig_path).expanduser().resolve()
