@@ -302,3 +302,41 @@ def test_get_deployer_absolute_stack_with_provider(tmp_path, base_config):
     )
     assert isinstance(deployer, TFDeployer)
     assert deployer.tf_dir == str(abs_stack)
+
+
+def test_get_deployer_tofu_vcluster_stack(mocker, base_config):
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    mocker.patch(
+        "devops_bench.providers.vcluster._get_current_context",
+        return_value="kind-test",
+    )
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/vcluster"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.variables["infra_provider"] == "vcluster"
+    assert deployer.variables["project_id"] == base_config["project_id"]
+    assert deployer.variables["cluster_name"] == base_config["cluster_name"]
+    assert deployer.variables["namespace"] == f"vcluster-{base_config['cluster_name']}"
+    assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/vcluster")
+
+
+def test_get_deployer_infra_provider_env_vcluster(mocker, base_config, monkeypatch):
+    monkeypatch.setenv("INFRA_PROVIDER", "vcluster")
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    mocker.patch(
+        "devops_bench.providers.vcluster._get_current_context",
+        return_value="kind-test",
+    )
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/kind"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.variables["infra_provider"] == "vcluster"
+    assert deployer.variables["namespace"] == f"vcluster-{base_config['cluster_name']}"

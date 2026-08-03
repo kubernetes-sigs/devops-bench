@@ -1,0 +1,11 @@
+id: "1"
+name: "vcluster-smoke-test"
+prompt: "Verify virtual cluster accessibility by listing namespaces with 'kubectl get ns' and checking default namespaces exist."
+expected_output: |
+  default
+  kube-system
+infrastructure:
+  deployer: "tofu"
+  provider: "vcluster"
+  stack: "prebuilt/vcluster"
+  variables: {}
