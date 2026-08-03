@@ -40,17 +40,31 @@ class StubProvider(Provider):
     def __init__(self) -> None:
         self.account_calls = 0
         self.cluster_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.output_calls: list[dict[str, Any] | None] = []
+        self.cleanup_calls: list[tuple[ClusterInfo, dict[str, Any] | None]] = []
 
     def ensure_account_credentials(self) -> None:
         self.account_calls += 1
 
     def ensure_cluster_credentials(
-        self, cluster_name: str, location: str, variables: dict[str, Any]
+        self,
+        cluster_name: str,
+        location: str,
+        variables: dict[str, Any],
+        outputs: dict[str, Any] | None = None,
     ) -> ClusterInfo:
         self.cluster_calls.append((cluster_name, location, variables))
+        self.output_calls.append(outputs)
         return ClusterInfo.from_dict(
             {"name": cluster_name, "location": location, "project": variables.get("project_id")}
         )
+
+    def cleanup(
+        self,
+        cluster_info: ClusterInfo,
+        variables: dict[str, Any] | None = None,
+    ) -> None:
+        self.cleanup_calls.append((cluster_info, variables))
 
     def resolve_variables(
         self, ctx: ResolveContext, custom_variables: dict[str, Any]

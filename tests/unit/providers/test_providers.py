@@ -26,6 +26,7 @@ from devops_bench.core import ConfigError
 from devops_bench.providers import PROVIDERS, ResolveContext
 from devops_bench.providers.gcp import GcpProvider
 from devops_bench.providers.kind import KindProvider
+from devops_bench.providers.vcluster import VClusterProvider
 
 
 @pytest.fixture
@@ -41,8 +42,10 @@ def ctx() -> ResolveContext:
 def test_registry_populated() -> None:
     assert PROVIDERS.get("gcp") is GcpProvider
     assert PROVIDERS.get("kind") is KindProvider
+    assert PROVIDERS.get("vcluster") is VClusterProvider
     assert "gcp" in PROVIDERS
     assert "kind" in PROVIDERS
+    assert "vcluster" in PROVIDERS
 
 
 # --- GcpProvider ---------------------------------------------------------------

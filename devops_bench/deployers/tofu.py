@@ -178,6 +178,7 @@ class TFDeployer(Deployer):
         self.provider = provider
         self.variables = variables or {}
         self.custom_keys = custom_keys or set()
+        self._cluster_info: ClusterInfo | None = None
 
     def _var_flags(self) -> list[str]:
         # Scan the directory tofu actually runs in (the isolated per-run copy
@@ -258,6 +259,18 @@ class TFDeployer(Deployer):
         ]
         run(cmd, cwd=self.work_dir, capture=False)
 
+        cluster_info = self._cluster_info
+        if cluster_info is None:
+            cluster_info = ClusterInfo.from_dict(
+                {
+                    "name": self.variables.get("cluster_name", ""),
+                    "location": self.variables.get("location", "local"),
+                    "project": self.variables.get("project_id"),
+                    "kubeconfig_path": self.variables.get("kubeconfig_path"),
+                }
+            )
+        self.provider.cleanup(cluster_info, variables=self.variables)
+
     def get_cluster_info(self) -> ClusterInfo:
         """Read cluster details from the stack outputs.
 
@@ -278,16 +291,25 @@ class TFDeployer(Deployer):
             capture=True,
         )
         try:
-            outputs = json.loads(result.stdout)
+            raw_outputs = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise ConfigError("failed to parse 'tofu output -json'") from exc
 
-        cluster_name = outputs.get("cluster_name", {}).get("value")
+        outputs = {
+            k: v.get("value")
+            for k, v in raw_outputs.items()
+            if isinstance(v, dict) and "value" in v
+        }
+
+        cluster_name = outputs.get("cluster_name")
         if not cluster_name:
             raise ConfigError("Failed to retrieve 'cluster_name' from TF outputs.")
 
-        location = outputs.get("cluster_location", {}).get("value")
+        location = outputs.get("cluster_location")
         if not location:
             raise ConfigError("Failed to retrieve 'cluster_location' from TF outputs.")
 
-        return self.provider.ensure_cluster_credentials(cluster_name, location, self.variables)
+        self._cluster_info = self.provider.ensure_cluster_credentials(
+            cluster_name, location, self.variables, outputs=outputs
+        )
+        return self._cluster_info
