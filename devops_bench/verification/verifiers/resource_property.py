@@ -90,6 +90,13 @@ _ORDERING_OPS = ("gt", "gte", "lt", "lte")
 _VALUE_OPS = ("eq", "ne", "gt", "gte", "lt", "lte", "contains", "matches")
 _SET_OPS = ("exists", "absent")
 
+# How many violating entries a selector/across_matches reason enumerates
+# before it switches to "and N more". A cluster-wide selector can match
+# dozens of objects; naming every one of them (conforming and violating
+# alike) produces a reason string that is unusable in a terminal and worse
+# in a grading pack a human reads.
+_REASON_ENUMERATION_CAP = 5
+
 
 def to_number(value: Any) -> float | None:
     """Coerce a scalar or Kubernetes quantity string to a float.
@@ -285,6 +292,24 @@ def _render_path(node: _JsonPath) -> str:
     return str(node)
 
 
+def _summarize_reason(total: int, mode: str | None, violations: list[str]) -> str:
+    """Summarize a multi-object/element evaluation into a bounded reason string.
+
+    Only the violating entries are named; the conforming majority is
+    collapsed into the leading count. Even the violations are capped at
+    :data:`_REASON_ENUMERATION_CAP`, with the remainder folded into an
+    accurate "and N more". The full, uncapped list still lands on
+    ``raw["violations"]`` for anything that needs it.
+    """
+    label = f"across_matches={mode}: " if mode else ""
+    if not violations:
+        return f"{label}checked {total}; none violate"
+    shown = violations[:_REASON_ENUMERATION_CAP]
+    remainder = len(violations) - len(shown)
+    more = f" (and {remainder} more)" if remainder else ""
+    return f"{label}checked {total}; {len(violations)} violate: {'; '.join(shown)}{more}"
+
+
 def _object_name(obj: Any) -> str:
     """Best-effort display name for a matched object."""
     if isinstance(obj, dict):
@@ -469,8 +494,9 @@ class ResourcePropertyVerifier(BaseVerifier):
                     raw,
                 )
             success = all(ok for ok, _ in evaluations)
-            detail = "; ".join(reason for _, reason in evaluations)
-            reason = f"across_matches={self.across_matches}: {detail}"
+            violations = [why for ok, why in evaluations if not ok]
+            raw["violations"] = violations
+            reason = _summarize_reason(len(evaluations), self.across_matches, violations)
             return ("pass" if success else "fail"), reason, raw
 
         flat: list[tuple[str, Any]] = [
@@ -534,18 +560,25 @@ class ResourcePropertyVerifier(BaseVerifier):
 
         results = [self._apply_check(value) for _, value in flat]
         if self.across_matches == "every":
+            # Under `every`, a violator is an element the op did NOT hold for.
             success = all(ok for ok, _ in results)
+            violating = {i for i, (ok, _) in enumerate(results) if not ok}
         elif self.across_matches == "none":
+            # Under `none`, a violator is an element the op DID hold for.
             success = not any(ok for ok, _ in results)
+            violating = {i for i, (ok, _) in enumerate(results) if ok}
         else:
-            (success, _) = results[0]  # only reachable when len(flat) == 1
+            (success, why) = results[0]  # only reachable when len(flat) == 1
+            name, _value = flat[0]
+            return ("pass" if success else "fail"), f"{name}: {why}", raw
 
-        detail = "; ".join(
-            f"{name}: {why}" for (name, _value), (_ok, why) in zip(flat, results, strict=True)
-        )
-        reason = (
-            f"across_matches={self.across_matches}: {detail}" if self.across_matches else detail
-        )
+        violations = [
+            f"{name}: {why}"
+            for i, ((name, _value), (_ok, why)) in enumerate(zip(flat, results, strict=True))
+            if i in violating
+        ]
+        raw["violations"] = violations
+        reason = _summarize_reason(len(flat), self.across_matches, violations)
         return ("pass" if success else "fail"), reason, raw
 
     def _apply_check(self, value: Any) -> tuple[bool, str]:

@@ -957,6 +957,99 @@ def test_across_matches_none_element_wise_suffix_empty_filter_terminated_path_pa
     assert result.success is True
 
 
+# -- selector-mode reason summarization ----------------------------------
+
+
+def test_small_violation_set_enumerates_every_violator() -> None:
+    # Regression: T-029, entry no-broad-binding-for-sa. A small violation set
+    # must still name every violator; only a large one gets capped.
+    payload = _items(
+        _deployment("web", ready=2),
+        _deployment("api", ready=0),
+        _deployment("worker", ready=0),
+    )
+    with patch(_GET, return_value=payload):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="tier=app",
+            across_matches="every",
+        ).verify(0.0)
+    assert result.success is False
+    assert "api" in result.reason
+    assert "worker" in result.reason
+    assert "more" not in result.reason
+
+
+def test_large_violation_set_is_capped_with_an_accurate_remainder_count() -> None:
+    # Eight violators is well over the enumeration cap; the reason must stay
+    # short (a selector-mode failure enumerating every violating object used
+    # to run to ~4,000 characters) while still saying how many there were.
+    deployments = [_deployment(f"app-{i}", ready=0) for i in range(8)]
+    payload = _items(*deployments)
+    with patch(_GET, return_value=payload):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="tier=app",
+            across_matches="every",
+        ).verify(0.0)
+    assert result.success is False
+    assert "8 violate" in result.reason
+    assert "and 3 more" in result.reason
+    assert len(result.reason) < 700
+    assert result.raw is not None
+    assert len(result.raw["violations"]) == 8
+
+
+def test_capped_reason_still_carries_the_full_detail_on_raw() -> None:
+    deployments = [_deployment(f"app-{i}", ready=0) for i in range(8)]
+    payload = _items(*deployments)
+    with patch(_GET, return_value=payload):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="tier=app",
+            across_matches="every",
+        ).verify(0.0)
+    assert result.raw is not None
+    assert all(f"app-{i}" in "".join(result.raw["violations"]) for i in range(8))
+
+
+def test_element_wise_violation_set_is_also_capped() -> None:
+    # Same cap applies to the wildcard/element-wise reduction path (e.g. a
+    # ClusterRoleBinding-per-subject sweep), not just the flat value-wise one.
+    deployment = _security_context_deployment(*([False] * 8))
+    with patch(_GET, return_value=deployment):
+        result = _verifier(
+            op="eq",
+            value=True,
+            path=_SECURITY_CONTEXT_PATH,
+            resource_name="web",
+            across_matches="none",
+        ).verify(0.0)
+    assert result.success is True
+    assert "none violate" in result.reason
+
+
+def test_element_wise_violation_set_over_the_cap_is_capped() -> None:
+    deployment = _security_context_deployment(*([True] * 8))
+    with patch(_GET, return_value=deployment):
+        result = _verifier(
+            op="eq",
+            value=True,
+            path=_SECURITY_CONTEXT_PATH,
+            resource_name="web",
+            across_matches="none",
+        ).verify(0.0)
+    assert result.success is False
+    assert "8 violate" in result.reason
+    assert "and 3 more" in result.reason
+
+
 # -- jsonpath filters ---------------------------------------------------
 
 
