@@ -341,6 +341,53 @@ def test_zero_matches_fails_a_scalar_op() -> None:
     assert "no deployment matched" in result.reason
 
 
+# -- absence-satisfies semantics for negative ops (op ne only) ----------
+
+
+def _configmap(name: str = "checkout-config", ns: str = "shop") -> dict[str, Any]:
+    return {"kind": "ConfigMap", "metadata": {"name": name, "namespace": ns}}
+
+
+def test_ne_on_an_absent_path_passes() -> None:
+    # Regression: run_20260804_030923_967784, entry config-source-mutable.
+    # A ConfigMap without an `immutable` field IS mutable: `path: immutable,
+    # op: ne, value: 'true'` must be satisfied by the field's absence, not
+    # error/fail. Absent is not equal to "true".
+    with patch(_GET, return_value=_configmap()):
+        result = _verifier(
+            kind="configmap",
+            op="ne",
+            value="true",
+            path="immutable",
+            resource_name="checkout-config",
+        ).verify(0.0)
+    assert result.success is True
+    assert result.status == "pass"
+
+
+def test_eq_on_an_absent_path_still_fails_closed() -> None:
+    # Scoped deliberately: only negative ops (ne) gain absence-satisfies
+    # semantics. A positive op like eq must keep failing closed on an
+    # unobservable predicate.
+    with patch(_GET, return_value=_configmap()):
+        result = _verifier(
+            kind="configmap",
+            op="eq",
+            value="true",
+            path="immutable",
+            resource_name="checkout-config",
+        ).verify(0.0)
+    assert result.success is False
+
+
+def test_gte_on_an_absent_path_without_across_matches_still_fails_closed() -> None:
+    with patch(_GET, return_value=_deployment()):
+        result = _verifier(
+            op="gte", value=1, path="status.noSuchField", resource_name="web"
+        ).verify(0.0)
+    assert result.success is False
+
+
 def test_absent_passes_on_zero_matches() -> None:
     with patch(_GET, return_value=_items()):
         result = _verifier(op="absent", selector="app=web", namespace="default").verify(0.0)

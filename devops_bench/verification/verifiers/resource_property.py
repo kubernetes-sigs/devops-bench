@@ -31,6 +31,12 @@ version string like an image tag is not a quantity: ``"1.20" == "1.2"`` must
 stay false even though ``1.20 == 1.2`` as floats. Ordering ops (``gt`` /
 ``gte`` / ``lt`` / ``lte``) always coerce, since they are meaningless for
 anything but numbers.
+
+An unresolved ``path`` fails closed for every op except ``ne``: absence is
+not equal to anything, so ``ne`` alone is satisfied by a field that is not
+there at all (e.g. a ConfigMap without an ``immutable`` field is mutable).
+Every positive op (``eq``, ``gte``, ``exists``, ``contains``, ...) still
+treats an unresolved path as an unobservable predicate, not a satisfied one.
 """
 
 from __future__ import annotations
@@ -479,6 +485,17 @@ class ResourcePropertyVerifier(BaseVerifier):
             )
 
         if not flat:
+            if self.op == "ne":
+                # An absent field is not equal to anything: `ne` is a
+                # negative op, so absence trivially satisfies it (unlike a
+                # positive op such as `eq`, which stays fail-closed below).
+                # e.g. a ConfigMap without `immutable` IS mutable.
+                return (
+                    "pass",
+                    f"path {self.path!r} did not resolve in any of {len(objects)} matched "
+                    "object(s), satisfying op 'ne' (absent is not equal to the expected value)",
+                    raw,
+                )
             if self.across_matches == "none":
                 return (
                     "pass",
