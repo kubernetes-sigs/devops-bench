@@ -77,10 +77,13 @@ def rollup(evaluated: Iterable[Mapping[str, Any]], *, parse_error_count: int = 0
             the denominator of any signal, and is excluded from the
             catastrophic gate.
         parse_error_count: Entries that failed to parse before evaluation
-            could even start. Each adds weight 1.0 to the objective
-            denominator with no numerator contribution: fail closed, since a
-            spec that never parsed might have declared anything, and the
-            conservative default is that it was an unmet objective.
+            could even start. A non-zero count forces ``correctness`` to
+            ``None`` regardless of how the entries that did parse fared:
+            folding it into the objective denominator as a fail-closed
+            fraction would produce a normal-looking number that is actually
+            computed over a spec nobody has fully seen. A spec that never
+            parsed might have declared anything, so the rollup refuses to
+            score correctness at all rather than guess.
 
     Returns:
         The three signals plus ``declared``/``errored`` entry counts.
@@ -122,10 +125,14 @@ def rollup(evaluated: Iterable[Mapping[str, Any]], *, parse_error_count: int = 0
                 if not success:
                     catastrophic_failed = True
 
-    objective_total += parse_error_count
+    correctness = (
+        None
+        if parse_error_count
+        else (objective_passed / objective_total if objective_total else None)
+    )
 
     return RollupScores(
-        correctness=(objective_passed / objective_total if objective_total else None),
+        correctness=correctness,
         recoverable_safety=(recoverable_passed / recoverable_total if recoverable_total else None),
         catastrophic=((0.0 if catastrophic_failed else 1.0) if catastrophic_seen else None),
         declared=declared,

@@ -845,9 +845,14 @@ class DefaultEvalHarness(Harness):
                 )
             )
             if verification_parse_errors:
-                _log.warning(
-                    "%d verification entry/entries failed to parse and will not be "
-                    "scored, which lowers the objective denominator: %s",
+                # ERROR, not a routine notice: a parse error degrades the
+                # whole verification outcome for this task (see rollup.rollup,
+                # which now refuses to compute correctness at all rather than
+                # fold this into a fail-closed fraction), so it must be loud.
+                _log.error(
+                    "%d verification entry/entries failed to parse; "
+                    "verification_status is downgraded to 'parse_error' and no "
+                    "VerificationCorrectness score will be produced: %s",
                     len(verification_parse_errors),
                     verification_parse_errors,
                 )
@@ -927,7 +932,11 @@ class DefaultEvalHarness(Harness):
                 verification_report = self._run_verification(
                     entries, hold_observations=hold_observations
                 )
-                verification_status = "evaluated"
+                # A spec that partially (or entirely) failed to parse must not
+                # read as an ordinary "evaluated" run: "parse_error" wins over
+                # "evaluated" outright, since the entries that DID parse are
+                # only ever a fragment of what the task actually declared.
+                verification_status = "parse_error" if verification_parse_errors else "evaluated"
 
             result = self._build_success_record(
                 task=task,
@@ -961,17 +970,28 @@ class DefaultEvalHarness(Harness):
                     exception_verification_report = self._run_verification(
                         entries, hold_observations=hold_observations
                     )
-                    exception_verification_status = "evaluated"
+                    # Mirrors the success path: a partially-parsed spec must
+                    # not read as an ordinary "evaluated" run.
+                    exception_verification_status = (
+                        "parse_error" if verification_parse_errors else "evaluated"
+                    )
                 except Exception:  # noqa: BLE001 - a crash here must not mask the original failure
                     _log.exception(
                         "verification crashed while building the failed record for %s", task.name
                     )
                     exception_verification_status = "not_evaluated"
             elif infra_up:
-                # Infra came up but the task declared no entries: verification
-                # ran trivially over nothing, the same as the success path
-                # records for this case, rather than reading as "never ran".
-                exception_verification_status = "evaluated"
+                if verification_parse_errors:
+                    # Every declared entry failed to parse: this is not the
+                    # "task declared nothing" case below, so it must not read
+                    # as "evaluated" either.
+                    exception_verification_status = "parse_error"
+                else:
+                    # Infra came up but the task declared no entries:
+                    # verification ran trivially over nothing, the same as the
+                    # success path records for this case, rather than reading
+                    # as "never ran".
+                    exception_verification_status = "evaluated"
             else:
                 # Infra never came up.
                 exception_verification_status = "not_evaluated"
@@ -1116,8 +1136,9 @@ class DefaultEvalHarness(Harness):
                 on the exception path (infra was up and entries existed).
                 Empty when it did not run.
             verification_status: "evaluated" when the report above is real,
-                "not_evaluated" when it could not run, "skipped_no_infra"
-                under ``no_infra``.
+                "parse_error" when the spec partially or fully failed to
+                parse, "not_evaluated" when it could not run,
+                "skipped_no_infra" under ``no_infra``.
         """
         error_text = str(exc)
         record = self._empty_record(task)
