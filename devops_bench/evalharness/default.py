@@ -633,6 +633,7 @@ class DefaultEvalHarness(Harness):
             The detailed per-task result dicts, scored in place, in the
             ``results.json`` schema.
         """
+        self._sweep_stray_sandbox_containers()
         run_dir = self.reporter.new_run_dir()
         detailed_results: list[dict[str, Any]] = [self._run_one(task, run_dir) for task in tasks]
 
@@ -661,6 +662,26 @@ class DefaultEvalHarness(Harness):
         except Exception:  # noqa: BLE001 - rows/manifest are derived, never load-bearing
             _log.exception("failed to write rows.json/manifest.json for %s", run_dir)
         return detailed_results
+
+    def _sweep_stray_sandbox_containers(self) -> None:
+        """Reap any sandboxed agent container left running from a prior run.
+
+        Best-effort and a no-op unless ``BENCH_AGENT_SANDBOX`` is set: a
+        container the harness starts is normally cleaned up by
+        ``sandbox.container_guard`` around its own run, but a harness process
+        killed outright (Ctrl-C, OOM, a host reboot) never gets the chance to
+        run that guard's ``finally``. Sweeping once here, before this batch's
+        own containers exist, catches exactly that leak without risking a
+        live container from the run in progress.
+        """
+        from devops_bench.agents import sandbox
+
+        if not sandbox.sandbox_enabled():
+            return
+        try:
+            sandbox.sweep_stray_containers()
+        except Exception:  # noqa: BLE001 - a sweep failure must not block the run
+            _log.exception("stray sandbox container sweep failed; continuing")
 
     def _write_run_artifacts(self, run_dir: Path, detailed_results: list[dict[str, Any]]) -> None:
         """Flatten ``detailed_results`` into ``rows.json`` + ``manifest.json``.

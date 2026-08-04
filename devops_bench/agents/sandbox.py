@@ -38,16 +38,26 @@ must not be seeded into the cluster in the first place; see the factory's
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 from devops_bench.core import get_logger
 from devops_bench.core.subprocess import run
 
-__all__ = ["sandbox_enabled", "build_agent_kubeconfig", "wrap_argv"]
+__all__ = [
+    "sandbox_enabled",
+    "build_agent_kubeconfig",
+    "wrap_argv",
+    "container_name_for_workspace",
+    "kill_container",
+    "container_guard",
+    "sweep_stray_containers",
+]
 
 _log = get_logger("agents.sandbox")
 
@@ -57,6 +67,15 @@ _log = get_logger("agents.sandbox")
 AGENT_SA_NAME = os.environ.get("BENCH_AGENT_SA", "bench-agent")
 AGENT_SA_NAMESPACE = os.environ.get("BENCH_AGENT_SA_NAMESPACE", "bench-system")
 TOKEN_DURATION = os.environ.get("BENCH_AGENT_TOKEN_DURATION", "2h")
+
+# Every sandboxed container this harness starts carries this name prefix,
+# followed by its run workspace's own directory name (see
+# ``container_name_for_workspace``). The prefix is what lets
+# ``sweep_stray_containers`` find and reap containers this harness itself
+# created, and only those: a name match is the entire authorization to kill
+# something, so it must never be able to match a container this harness did
+# not start.
+_CONTAINER_NAME_PREFIX = "devops-bench-agent-"
 
 
 def sandbox_enabled() -> bool:
@@ -157,7 +176,11 @@ def build_agent_kubeconfig(cluster_name: str, dest_dir: Path) -> Path | None:
             check=False,
         ).stdout
         if not token:
-            _log.error("ServiceAccount %s/%s exists but token minting failed", AGENT_SA_NAMESPACE, AGENT_SA_NAME)
+            _log.error(
+                "ServiceAccount %s/%s exists but token minting failed",
+                AGENT_SA_NAMESPACE,
+                AGENT_SA_NAME,
+            )
             return None
         user_block = f"user: {{token: {token.strip()}}}"
         _log.info(
@@ -170,13 +193,27 @@ def build_agent_kubeconfig(cluster_name: str, dest_dir: Path) -> Path | None:
         # cluster-admin on kind, so the container boundary is doing all the work
         # and the RBAC boundary is doing none.
         cert = run(
-            ["kubectl", "config", "view", "--raw", "--minify", "-o",
-             "jsonpath={.users[0].user.client-certificate-data}"],
+            [
+                "kubectl",
+                "config",
+                "view",
+                "--raw",
+                "--minify",
+                "-o",
+                "jsonpath={.users[0].user.client-certificate-data}",
+            ],
             check=False,
         ).stdout
         key = run(
-            ["kubectl", "config", "view", "--raw", "--minify", "-o",
-             "jsonpath={.users[0].user.client-key-data}"],
+            [
+                "kubectl",
+                "config",
+                "view",
+                "--raw",
+                "--minify",
+                "-o",
+                "jsonpath={.users[0].user.client-key-data}",
+            ],
             check=False,
         ).stdout
         if not (cert and key):
@@ -210,6 +247,7 @@ def wrap_argv(
     kubeconfig: Path,
     image: str | None = None,
     extra_env: dict[str, str] | None = None,
+    container_name: str | None = None,
 ) -> list[str]:
     """Wrap an agent command line in ``docker run``.
 
@@ -225,6 +263,13 @@ def wrap_argv(
     * Application Default Credentials are not mounted. Model access should use a
       credential scoped to model access; ADC is the operator's whole cloud identity
       and is a larger grant than the filesystem access this wrapper removes.
+
+    Args:
+        container_name: When given, passed as ``--name``, giving the running
+            container a deterministic identity a caller can reap by name (see
+            :func:`container_guard` / :func:`sweep_stray_containers`) even
+            after the local ``docker run`` client process is gone. Normally
+            :func:`container_name_for_workspace` derived from ``workspace``.
     """
     image = image or os.environ.get("BENCH_AGENT_IMAGE", "")
     if not image:
@@ -239,22 +284,103 @@ def wrap_argv(
     for key, value in (extra_env or {}).items():
         env_flags += ["-e", f"{key}={value}"]
 
+    name_flags = ["--name", container_name] if container_name else []
+
     return [
         # No -i. Keeping stdin open gives the agent an open, non-TTY stdin to block
         # on, and a headless `-p <prompt>` run never reads it. Combined with
         # stdin=DEVNULL in core.subprocess this closes the channel at both ends.
-        "docker", "run", "--rm",
-        "--network", "kind",
-        "--user", f"{os.getuid()}:{os.getgid()}",
-        "-v", f"{workspace}:/workspace",
-        "-v", f"{kubeconfig}:/kubeconfig:ro",
-        "-e", "KUBECONFIG=/kubeconfig",
-        "-e", "HOME=/workspace",
-        "-w", "/workspace",
+        "docker",
+        "run",
+        "--rm",
+        *name_flags,
+        "--network",
+        "kind",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-v",
+        f"{workspace}:/workspace",
+        "-v",
+        f"{kubeconfig}:/kubeconfig:ro",
+        "-e",
+        "KUBECONFIG=/kubeconfig",
+        "-e",
+        "HOME=/workspace",
+        "-w",
+        "/workspace",
         *env_flags,
         image,
         *argv,
     ]
+
+
+def container_name_for_workspace(workspace: Path) -> str:
+    """Deterministic ``docker run --name`` for one run's sandboxed agent.
+
+    Ties the container 1:1 to the run's own workspace directory name (already
+    unique per run: it comes from ``mint_dir(...)`` / ``TemporaryDirectory``),
+    so a reaper can find and kill a stray container purely from its name,
+    without threading a separate run id through the agent harness.
+    """
+    return f"{_CONTAINER_NAME_PREFIX}{workspace.name}"
+
+
+def kill_container(name: str) -> None:
+    """Best-effort ``docker kill`` by name. Never raises.
+
+    ``--rm`` only removes a container once *the container's own process*
+    exits; a ``docker run`` client killed out from under it (which is exactly
+    what happens when ``core.subprocess.run`` hits its timeout and SIGKILLs
+    the local wrapper process) leaves the container itself running in the
+    daemon, unaffected, silently burning whatever quota the agent inside it
+    is still spending. This is what actually stops it, independent of what
+    happened to the local ``docker run`` process. A container that is already
+    gone (the common case, when the agent exited cleanly and ``--rm`` already
+    reaped it) fails harmlessly.
+    """
+    result = run(["docker", "kill", name], check=False)
+    if result.returncode == 0:
+        _log.info("reaped sandbox container %s", name)
+
+
+@contextlib.contextmanager
+def container_guard(name: str) -> Iterator[None]:
+    """Guarantee :func:`kill_container` runs on every exit path.
+
+    Wrap the ``docker run`` invocation in this so a normal return, an
+    exception, and a timeout (which ``core.subprocess.run`` turns into a
+    ``SubprocessError``) all still reap the container by name. ``--rm``
+    already handles the graceful-exit case on its own; this closes every
+    other one.
+    """
+    try:
+        yield
+    finally:
+        kill_container(name)
+
+
+def sweep_stray_containers() -> None:
+    """Best-effort reap of containers this harness left running from a prior run.
+
+    Intended to run once at harness start (before any run's own container
+    exists) so a container orphaned by a prior crash or a killed harness
+    process gets cleaned up before it burns any more quota. Matches
+    exclusively on :data:`_CONTAINER_NAME_PREFIX`, this harness's own naming
+    convention, so it can never reap a container it did not itself create.
+    """
+    listed = run(
+        ["docker", "ps", "-q", "--filter", f"name=^{_CONTAINER_NAME_PREFIX}"],
+        check=False,
+    )
+    if listed.returncode != 0:
+        return
+    stray_ids = [line.strip() for line in (listed.stdout or "").splitlines() if line.strip()]
+    for container_id in stray_ids:
+        result = run(["docker", "kill", container_id], check=False)
+        if result.returncode == 0:
+            _log.warning(
+                "reaped stray sandbox container %s left running from a prior run", container_id
+            )
 
 
 def make_workspace() -> Path:

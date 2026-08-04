@@ -33,6 +33,7 @@ mechanisms, written into the per-run working directory before invocation:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -253,6 +254,7 @@ class GeminiCliAgent(AgentHarness):
             # by value as explicit -e flags rather than as inherited process env.
             run_argv = argv
             sandboxed = False
+            container_name: str | None = None
             if sandbox.sandbox_enabled():
                 cluster = sandbox.current_cluster_name()
                 kubeconfig = sandbox.build_agent_kubeconfig(cluster, workdir) if cluster else None
@@ -263,31 +265,46 @@ class GeminiCliAgent(AgentHarness):
                         "BENCH_AGENT_SANDBOX is set but no sandbox kubeconfig could be "
                         "built; refusing to fall back to an unsandboxed run"
                     )
+                container_name = sandbox.container_name_for_workspace(workdir)
                 run_argv = sandbox.wrap_argv(
-                    argv, workspace=workdir, kubeconfig=kubeconfig, extra_env=env_overlay
+                    argv,
+                    workspace=workdir,
+                    kubeconfig=kubeconfig,
+                    extra_env=env_overlay,
+                    container_name=container_name,
                 )
                 sandboxed = True
 
             completed: CompletedProcess | None = None
             timeout_exc: SubprocessError | None = None
-            try:
-                completed = run(
-                    run_argv,
-                    extra_env=None if sandboxed else env_overlay,
-                    cwd=workdir,
-                    check=False,
-                    timeout=self.config.timeout_sec,
-                )
-            except SubprocessError as exc:
-                # check=False means this can only be a timeout. The stream-json
-                # events already flushed to stdout before the process was
-                # killed still describe real tool calls the agent made: fall
-                # through to recover them below instead of discarding the
-                # captured output and returning an empty trajectory.
-                timeout_exc = exc
-            except OSError as exc:
-                # Missing / non-executable binary; core.subprocess.run does not wrap.
-                return AgentResult.errored(f"gemini binary unavailable: {exc}")
+            # container_guard reaps the sandbox container by name on every exit
+            # from this block, normal or not: `--rm` alone only cleans up when
+            # the container's own process exits, not when the timeout below
+            # kills the local `docker run` client out from under it.
+            guard = (
+                sandbox.container_guard(container_name)
+                if container_name is not None
+                else contextlib.nullcontext()
+            )
+            with guard:
+                try:
+                    completed = run(
+                        run_argv,
+                        extra_env=None if sandboxed else env_overlay,
+                        cwd=workdir,
+                        check=False,
+                        timeout=self.config.timeout_sec,
+                    )
+                except SubprocessError as exc:
+                    # check=False means this can only be a timeout. The stream-json
+                    # events already flushed to stdout before the process was
+                    # killed still describe real tool calls the agent made: fall
+                    # through to recover them below instead of discarding the
+                    # captured output and returning an empty trajectory.
+                    timeout_exc = exc
+                except OSError as exc:
+                    # Missing / non-executable binary; core.subprocess.run does not wrap.
+                    return AgentResult.errored(f"gemini binary unavailable: {exc}")
 
         stdout = (timeout_exc.stdout if timeout_exc is not None else completed.stdout) or ""
         output, trajectory, tokens, parse_errors = parse_stream_json(stdout)

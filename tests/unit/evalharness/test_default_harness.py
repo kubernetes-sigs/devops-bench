@@ -891,3 +891,58 @@ def test_score_excludes_agent_error_and_timeout_records_from_scoring(
     assert len(scored_batches) == 1
     assert {r["name"] for r in scored_batches[0]} == {"ok"}
     by_name = {r["name"]: r for r in records}
+    assert by_name["ok"]["scores"] == {"probe": {"score": 1.0}}
+    assert by_name["crashed"]["scores"] == {}
+    assert by_name["timed-out"]["scores"] == {}
+    assert by_name["infra-died"]["scores"] == {}
+
+
+# --- sandbox container reaping at harness start ---
+
+
+def test_sweep_stray_sandbox_containers_noop_when_sandbox_disabled(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``BENCH_AGENT_SANDBOX`` means no docker calls at all."""
+    from devops_bench.agents import sandbox
+
+    monkeypatch.delenv("BENCH_AGENT_SANDBOX", raising=False)
+    calls: list[None] = []
+    monkeypatch.setattr(sandbox, "sweep_stray_containers", lambda: calls.append(None))
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness._sweep_stray_sandbox_containers()  # noqa: SLF001
+
+    assert calls == []
+
+
+def test_sweep_stray_sandbox_containers_sweeps_when_sandbox_enabled(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from devops_bench.agents import sandbox
+
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX", "docker")
+    calls: list[None] = []
+    monkeypatch.setattr(sandbox, "sweep_stray_containers", lambda: calls.append(None))
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness._sweep_stray_sandbox_containers()  # noqa: SLF001
+
+    assert calls == [None]
+
+
+def test_sweep_stray_sandbox_containers_survives_a_sweep_failure(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep failure (e.g. docker unreachable) must never block the run."""
+    from devops_bench.agents import sandbox
+
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX", "docker")
+
+    def _boom() -> None:
+        raise RuntimeError("docker daemon unreachable")
+
+    monkeypatch.setattr(sandbox, "sweep_stray_containers", _boom)
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness._sweep_stray_sandbox_containers()  # noqa: SLF001 - must not raise
