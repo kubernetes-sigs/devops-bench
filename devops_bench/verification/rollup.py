@@ -96,6 +96,7 @@ def rollup(evaluated: Iterable[Mapping[str, Any]], *, parse_error_count: int = 0
     catastrophic_failed = False
     declared = 0
     errored = 0
+    objective_errored = False
 
     for item in evaluated:
         declared += 1
@@ -104,6 +105,14 @@ def rollup(evaluated: Iterable[Mapping[str, Any]], *, parse_error_count: int = 0
             status = "pass" if item.get("success") else "fail"
         if status == "error":
             errored += 1
+            if item.get("role") == "objective":
+                # A single unevaluated objective already puts the rest of the
+                # count on shaky ground: an errored entry never says "pass"
+                # or "fail", so scoring the objectives that did evaluate as
+                # if they were the whole picture would quietly inflate
+                # correctness (see the parse-error convention above, which
+                # this mirrors). Withhold the signal instead of guessing.
+                objective_errored = True
             continue
 
         weight = float(item.get("weight", 1.0))
@@ -127,7 +136,7 @@ def rollup(evaluated: Iterable[Mapping[str, Any]], *, parse_error_count: int = 0
 
     correctness = (
         None
-        if parse_error_count
+        if parse_error_count or objective_errored
         else (objective_passed / objective_total if objective_total else None)
     )
 

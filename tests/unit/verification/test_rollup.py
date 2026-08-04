@@ -138,14 +138,53 @@ def test_truthy_non_bool_success_is_coerced() -> None:
     assert scores.correctness == 1.0
 
 
-def test_errored_objective_is_excluded_from_numerator_and_denominator() -> None:
+def test_any_errored_objective_withholds_correctness_even_with_other_objectives_evaluated() -> None:
+    # A partly-errored spec must not inflate correctness by silently scoring
+    # only the objectives that did evaluate: that produces a normal-looking
+    # number computed over a set the task author never intended to be
+    # partial. Withhold the signal instead, same as an all-errored class.
     scores = rollup(
         [
             _item("objective", True, weight=1.0),
             _item("objective", False, weight=5.0, status="error"),
         ]
     )
+    assert scores.correctness is None
+
+
+def test_errored_objective_is_still_excluded_from_the_errored_count_denominator_math() -> None:
+    # The errored entry itself contributes to neither the numerator nor the
+    # denominator were correctness to be computed at all; it just never gets
+    # the chance, since a single errored objective already withholds the
+    # whole signal (see the test above).
+    scores = rollup(
+        [
+            _item("objective", True, weight=1.0),
+            _item("objective", False, weight=5.0, status="error"),
+        ]
+    )
+    assert scores.declared == 2
+    assert scores.errored == 1
+
+
+def test_all_pass_objectives_still_score_normally_without_an_error() -> None:
+    scores = rollup(
+        [
+            _item("objective", True, weight=1.0),
+            _item("objective", True, weight=1.0),
+        ]
+    )
     assert scores.correctness == 1.0
+
+
+def test_fail_plus_pass_objectives_still_score_normally_without_an_error() -> None:
+    scores = rollup(
+        [
+            _item("objective", True, weight=1.0),
+            _item("objective", False, weight=1.0),
+        ]
+    )
+    assert scores.correctness == 0.5
 
 
 def test_all_errored_class_yields_none() -> None:
