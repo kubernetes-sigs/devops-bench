@@ -172,6 +172,18 @@ def test_legacy_mapping_without_status_key_still_rolls_up() -> None:
     assert scores.errored == 0
 
 
-def test_parse_error_count_adds_weight_to_the_objective_denominator() -> None:
+def test_parse_error_count_forces_correctness_to_none_instead_of_a_partial_score() -> None:
+    # A spec that partially failed to parse must not roll up into a
+    # normal-looking correctness number: 2 of 3 declared objectives never
+    # even parsed, so the 1/3 a naive fail-closed denominator would produce
+    # is indistinguishable from a real score. Refuse the rollup entirely.
     scores = rollup([_item("objective", True, weight=1.0)], parse_error_count=2)
-    assert scores.correctness == 1 / 3
+    assert scores.correctness is None
+
+
+def test_parse_error_count_forces_correctness_to_none_even_when_every_parsed_entry_passes() -> None:
+    scores = rollup(
+        [_item("objective", True, weight=1.0), _item("objective", True, weight=1.0)],
+        parse_error_count=1,
+    )
+    assert scores.correctness is None
