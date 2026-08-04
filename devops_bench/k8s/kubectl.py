@@ -28,6 +28,7 @@ from devops_bench.core.subprocess import CompletedProcess, _build_env, run
 
 __all__ = [
     "apply",
+    "can_i",
     "get_resource",
     "port_forward",
     "rollout_status",
@@ -191,6 +192,58 @@ def get_resource(
     ]
     completed = _run_kubectl(argv, kubeconfig, timeout=timeout, context=context)
     return json.loads(completed.stdout)
+
+
+def can_i(
+    verb: str,
+    resource: str,
+    *,
+    subject: str,
+    name: str | None = None,
+    namespace: str | None = None,
+    kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
+    timeout: float | None = None,
+) -> CompletedProcess:
+    """Run ``kubectl auth can-i`` and return the completed process uninterpreted.
+
+    ``kubectl auth can-i`` exits 0 with stdout ``"yes"`` when the check is
+    allowed and exits 1 with stdout ``"no"`` when it is denied -- neither is a
+    command failure, so this call passes ``check=False`` and leaves
+    interpreting the exit code and stdout to the caller. A real failure (a bad
+    flag, an unreachable API server) still shows up here as stdout other than
+    ``"yes"``/``"no"``, which is how the caller tells it apart from a denied
+    check.
+
+    Args:
+        verb: Verb to check, e.g. ``"get"``, ``"update"``.
+        resource: Resource type to check, e.g. ``"deployments"``.
+        subject: Full ``--as`` value, e.g. ``"system:serviceaccount:ns:name"``.
+        name: Optional specific resource name, appended as ``"<resource>/<name>"``.
+        namespace: Optional namespace (``-n``).
+        kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to.
+        timeout: Optional seconds before the subprocess is killed.
+
+    Returns:
+        The completed process, exit code and stdout uninterpreted.
+
+    Raises:
+        SubprocessError: If the command times out (never on a non-zero exit,
+            since a denied check exits 1 by design).
+    """
+    resource_arg = f"{resource}/{name}" if name else resource
+    argv = [
+        "kubectl",
+        "auth",
+        "can-i",
+        verb,
+        resource_arg,
+        *_namespace_args(namespace),
+        "--as",
+        subject,
+    ]
+    return _run_kubectl(argv, kubeconfig, context=context, timeout=timeout, check=False)
 
 
 def apply(

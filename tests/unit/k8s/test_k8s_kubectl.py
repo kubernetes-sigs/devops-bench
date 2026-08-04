@@ -147,6 +147,50 @@ def test_apply_builds_argv(mocker: MockerFixture) -> None:
     assert argv == ["kubectl", "apply", "-f", "/manifests/app.yaml", "-n", "staging"]
 
 
+def test_can_i_builds_argv_and_never_checks(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run", return_value=_completed("no", returncode=1)
+    )
+
+    kubectl.can_i(
+        "delete",
+        "deployments",
+        subject="system:serviceaccount:apps:deployer",
+        namespace="apps",
+    )
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "auth",
+        "can-i",
+        "delete",
+        "deployments",
+        "-n",
+        "apps",
+        "--as",
+        "system:serviceaccount:apps:deployer",
+    ]
+    # A denied check exits 1 by design, not a command failure -- can_i must
+    # never raise on that, so it always calls run with check=False.
+    assert mock_run.call_args.kwargs["check"] is False
+
+
+def test_can_i_appends_resource_name(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed("yes"))
+
+    kubectl.can_i(
+        "get",
+        "secrets",
+        subject="system:serviceaccount:warehouse:inventory-sync",
+        name="inventory-sync-creds",
+        namespace="warehouse",
+    )
+
+    argv = mock_run.call_args.args[0]
+    assert "secrets/inventory-sync-creds" in argv
+
+
 def test_rollout_status_with_timeout(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
 
