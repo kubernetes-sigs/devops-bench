@@ -417,11 +417,22 @@ class ResourcePropertyVerifier(BaseVerifier):
                 return "fail", f"{len(objects)} matching {self.kind} found: {names}", raw
             return "pass", f"no matching {self.kind}", raw
 
-        # Fail closed above the flattening. This is what keeps "zero objects
-        # existed" distinct from "objects existed but the path matched
-        # nothing": the former can never be observed, the latter is a real
-        # answer.
+        # Fail closed above the flattening for `every` (and the plain
+        # exactly-one-match case): "zero objects existed" is an unobservable
+        # predicate there, not a satisfied one, so it stays a fail. `none` is
+        # the exception: it asserts that no matched object violates `op`, and
+        # an empty match set vacuously satisfies that (e.g. a selector for a
+        # job backlog that has been fully drained). This can only fire in
+        # selector mode: a name-mode fetch either raises (not found, caught
+        # above as `status="error"`) or returns exactly one object, so it
+        # never reaches this branch with an empty `objects`.
         if not objects:
+            if self.across_matches == "none":
+                return (
+                    "pass",
+                    f"no {self.kind} matched the selector; nothing violates",
+                    raw,
+                )
             return "fail", f"no {self.kind} matched", raw
 
         if self.op == "exists" and self.path is None:
