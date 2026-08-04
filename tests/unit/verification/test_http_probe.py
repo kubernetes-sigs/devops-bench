@@ -141,3 +141,33 @@ def test_probe_assert_mode_is_single_shot(mocker: MockerFixture) -> None:
     result = v.verify(0.0)
     assert result.success is False
     assert run_pod.call_count == 1
+
+
+def test_probe_host_header_added_when_set(mocker: MockerFixture) -> None:
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    v = HttpProbeVerifier.model_validate(
+        {"type": "http_probe", "url": "http://1.2.3.4", "host": "app.example.com"}
+    )
+    result = v.verify(0)
+    assert result.success is True
+    curl_cmd = run_pod.call_args.args[2]
+    assert "-H" in curl_cmd
+    assert curl_cmd[curl_cmd.index("-H") + 1] == "Host: app.example.com"
+    assert curl_cmd[-1] == "http://1.2.3.4"
+
+
+def test_probe_no_host_header_when_unset(mocker: MockerFixture) -> None:
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0)
+    assert result.success is True
+    curl_cmd = run_pod.call_args.args[2]
+    assert "-H" not in curl_cmd
+    assert curl_cmd == [
+        "curl",
+        "-s",
+        "-w",
+        r"\n%{http_code}",
+        "--max-time=10",
+        "http://svc",
+    ]

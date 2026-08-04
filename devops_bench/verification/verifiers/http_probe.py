@@ -61,6 +61,10 @@ class HttpProbeVerifier(BaseVerifier):
         namespace: Namespace the ephemeral pod runs in; active context when None.
         probe_timeout: Seconds the curl command may run. The ``kubectl run``
             call is bounded by this value plus :data:`_KUBECTL_OVERHEAD_SEC`.
+        host: Optional ``Host`` header value. Set this to probe a host-routed
+            ingress path: ``url`` targets the edge/controller address while
+            this header selects the virtual host. ``None`` (default) omits
+            the header and preserves plain URL-based routing.
     """
 
     type: Literal["http_probe"] = "http_probe"
@@ -69,6 +73,7 @@ class HttpProbeVerifier(BaseVerifier):
     expect_body_matches: str | None = None
     namespace: str | None = None
     probe_timeout: int = 10
+    host: str | None = None
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         """Probe the URL, retrying until it responds as expected or time runs out.
@@ -107,8 +112,10 @@ class HttpProbeVerifier(BaseVerifier):
             "-w",
             r"\n%{http_code}",
             f"--max-time={self.probe_timeout}",
-            self.url,
         ]
+        if self.host is not None:
+            curl_cmd += ["-H", f"Host: {self.host}"]
+        curl_cmd.append(self.url)
         # Bounded by probe_timeout plus overhead rather than single_call_timeout:
         # a converge-mode retry needs a bound tight to this one attempt so the
         # next attempt fires promptly, not single_call_timeout's near-zero floor
