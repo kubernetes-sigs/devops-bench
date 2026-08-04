@@ -50,7 +50,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 )
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.model_providers import resolve_provider
-from devops_bench.core.subprocess import run
+from devops_bench.core.subprocess import CompletedProcess, run
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from devops_bench.agents.capabilities import McpBinding
@@ -255,9 +255,7 @@ class GeminiCliAgent(AgentHarness):
             sandboxed = False
             if sandbox.sandbox_enabled():
                 cluster = sandbox.current_cluster_name()
-                kubeconfig = (
-                    sandbox.build_agent_kubeconfig(cluster, workdir) if cluster else None
-                )
+                kubeconfig = sandbox.build_agent_kubeconfig(cluster, workdir) if cluster else None
                 if kubeconfig is None:
                     # Refuse rather than silently running unsandboxed on the host: a
                     # containment control that quietly degrades is worse than none.
@@ -270,6 +268,8 @@ class GeminiCliAgent(AgentHarness):
                 )
                 sandboxed = True
 
+            completed: CompletedProcess | None = None
+            timeout_exc: SubprocessError | None = None
             try:
                 completed = run(
                     run_argv,
@@ -279,21 +279,31 @@ class GeminiCliAgent(AgentHarness):
                     timeout=self.config.timeout_sec,
                 )
             except SubprocessError as exc:
-                return AgentResult.errored(f"gemini subprocess error: {exc}")
+                # check=False means this can only be a timeout. The stream-json
+                # events already flushed to stdout before the process was
+                # killed still describe real tool calls the agent made: fall
+                # through to recover them below instead of discarding the
+                # captured output and returning an empty trajectory.
+                timeout_exc = exc
             except OSError as exc:
                 # Missing / non-executable binary; core.subprocess.run does not wrap.
                 return AgentResult.errored(f"gemini binary unavailable: {exc}")
 
-        output, trajectory, tokens, parse_errors = parse_stream_json(completed.stdout or "")
+        stdout = (timeout_exc.stdout if timeout_exc is not None else completed.stdout) or ""
+        output, trajectory, tokens, parse_errors = parse_stream_json(stdout)
         errors: list[str] = list(parse_errors)
-        if completed.returncode != 0:
+        metadata: dict = {"trajectory_captured": bool(trajectory)}
+        if timeout_exc is not None:
+            metadata["timed_out"] = True
+            errors.append(f"gemini subprocess error: {timeout_exc}")
+            if not output:
+                output = f"Error: gemini subprocess error: {timeout_exc}"
+        elif completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
             errors.append(f"gemini exited {completed.returncode}: {stderr or '<no stderr>'}")
+            metadata["returncode"] = completed.returncode
             if not output:
                 output = f"Error: gemini exited {completed.returncode}"
-        metadata: dict = {}
-        if completed.returncode != 0:
-            metadata["returncode"] = completed.returncode
         return AgentResult(
             output=output,
             trajectory=trajectory,

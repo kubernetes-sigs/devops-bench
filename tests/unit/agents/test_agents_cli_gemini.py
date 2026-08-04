@@ -234,6 +234,45 @@ def test_execute_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.has_errors()
     assert "subprocess error" in result.errors[0]
     assert result.trajectory == []
+    assert result.metadata.get("timed_out") is True
+    assert result.metadata.get("trajectory_captured") is False
+
+
+def test_execute_timeout_recovers_partial_trajectory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timeout must not discard the stream-json events flushed before the
+    kill: whatever partial stdout the subprocess captured is still parsed
+    into the canonical trajectory rather than dropped on the floor."""
+    partial_stream = _stream(
+        {"type": "init", "session_id": "abc-123", "model": "gemini-2.5-pro"},
+        {
+            "type": "tool_use",
+            "id": "call-1",
+            "name": "mcp_gke_list_clusters",
+            "input": {"project": "p1"},
+        },
+        {
+            "type": "tool_result",
+            "tool_use_id": "call-1",
+            "content": "cluster-a, cluster-b",
+        },
+    )
+
+    def fake_run(argv, **kwargs):
+        raise SubprocessError(argv, returncode=-1, stdout=partial_stream, stderr="")
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=600.0)).run("p")
+    assert result.has_errors()
+    assert result.metadata.get("timed_out") is True
+    assert result.metadata.get("trajectory_captured") is True
+    assert result.trajectory == [
+        {
+            "name": "mcp_gke_list_clusters",
+            "args": {"project": "p1"},
+            "result": "cluster-a, cluster-b",
+            "status": "completed",
+        },
+    ]
 
 
 def test_execute_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
