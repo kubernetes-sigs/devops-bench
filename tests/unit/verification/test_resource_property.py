@@ -423,6 +423,80 @@ def test_plural_match_across_objects_without_across_matches_is_an_explicit_error
     assert "web" in result.reason and "api" in result.reason
 
 
+def _fake_get_resource_by_name(objects: dict[str, dict[str, Any]]) -> Any:
+    """Stand in for ``kubectl get <kind> <name>``: a ``name`` arg fetches the
+    one matching object; without it, every object in the namespace comes back
+    as a list. Mirrors what real ``get_resource`` does, unlike a fixed
+    ``return_value`` mock, which is what let a name-scoped check silently
+    evaluate against every object in the namespace go unnoticed.
+    """
+
+    def _get(
+        kind: str,
+        name: str | None = None,
+        *,
+        selector: str | None = None,
+        namespace: str | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        if name:
+            return objects[name]
+        return _items(*objects.values())
+
+    return _get
+
+
+def test_name_scoped_check_resolves_only_the_named_object() -> None:
+    """Regression: run_20260804_021227_387823, entry ``pod-ready@ingest.wl``.
+
+    A ``resource_property`` check carrying ``name`` (not ``resource_name``)
+    against a namespace with several same-kind objects must evaluate the
+    named object alone. It used to fetch the whole namespace instead, since
+    ``name`` lands on ``BaseVerifier.name`` (a result label) rather than
+    ``resource_name``, and the check failed with an across_matches refusal
+    even though the named object's own value satisfied the check.
+    """
+    objects = {
+        "aggregator": _deployment("aggregator", ready=2),
+        "ingest": _deployment("ingest", ready=3),
+        "transform": _deployment("transform", ready=2),
+    }
+    with patch(_GET, side_effect=_fake_get_resource_by_name(objects)):
+        result = _verifier(
+            name="ingest",
+            namespace="analytics",
+            path="status.readyReplicas",
+            op="eq",
+            value=3,
+        ).verify(0.0)
+    assert result.success is True
+    assert result.status == "pass"
+    assert "across_matches" not in result.reason
+
+
+def test_name_scoped_check_fails_on_the_named_object_alone() -> None:
+    """Same shape as above, wrong value: must fail with a single-object
+    reason naming ``ingest``'s own value, never the across_matches refusal
+    that resolving against the whole namespace would produce.
+    """
+    objects = {
+        "aggregator": _deployment("aggregator", ready=2),
+        "ingest": _deployment("ingest", ready=3),
+        "transform": _deployment("transform", ready=2),
+    }
+    with patch(_GET, side_effect=_fake_get_resource_by_name(objects)):
+        result = _verifier(
+            name="ingest",
+            namespace="analytics",
+            path="status.readyReplicas",
+            op="eq",
+            value=2,
+        ).verify(0.0)
+    assert result.success is False
+    assert result.status == "fail"
+    assert "across_matches" not in result.reason
+
+
 def test_plural_match_within_one_object_without_across_matches_is_an_explicit_error() -> None:
     with patch(_GET, return_value=_multi_container_deployment()):
         result = _verifier(

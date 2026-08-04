@@ -296,7 +296,11 @@ class ResourcePropertyVerifier(BaseVerifier):
 
     The field is ``resource_name`` rather than ``name`` because ``BaseVerifier``
     already uses ``name`` for the check's own label, which is what lands on
-    :attr:`VerificationResult.name`.
+    :attr:`VerificationResult.name`. In practice, most task specs write the
+    object's own name as ``name`` (it reads the same way as ``kind`` and
+    ``namespace``) rather than ``resource_name``, which used to be silently
+    absorbed as a result label and left the fetch unscoped: see
+    :meth:`_target_name`.
 
     When ``path`` ends in a wildcard-like segment (``[*]``, a slice, or a
     filter ``[?(...)]``) and ``across_matches`` is set, quantification is over
@@ -362,6 +366,23 @@ class ResourcePropertyVerifier(BaseVerifier):
                 raise ValueError(msg) from exc
         return self
 
+    @property
+    def _target_name(self) -> str | None:
+        """The object name to fetch by: ``resource_name``, else ``name``.
+
+        ``resource_name`` always wins when set explicitly. Otherwise, ``name``
+        is used as the object name, unless ``selector`` is set, in which case
+        ``name`` stays a pure result label and the selector alone scopes the
+        fetch (unchanged from before). This is what makes a check written as
+        ``{kind: deployment, name: ingest}`` fetch just ``ingest`` instead of
+        listing every deployment in the namespace.
+        """
+        if self.resource_name is not None:
+            return self.resource_name
+        if self.selector is not None:
+            return None
+        return self.name
+
     def verify(self, timeout_sec: float) -> VerificationResult:
         """Poll the property until it holds or the budget runs out."""
         return self._poll_to_result(lambda: self._check(timeout_sec), timeout_sec)
@@ -371,7 +392,7 @@ class ResourcePropertyVerifier(BaseVerifier):
         try:
             payload = get_resource(
                 self.kind,
-                self.resource_name,
+                self._target_name,
                 selector=self.selector,
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
