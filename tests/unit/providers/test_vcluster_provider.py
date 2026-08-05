@@ -194,7 +194,7 @@ def test_vcluster_ensure_cluster_credentials_rewrite_127_0_0_1(
 
 
 def test_vcluster_ensure_cluster_credentials_missing_outputs_raises() -> None:
-    with pytest.raises(ConfigError, match="missing 'kubeconfig'"):
+    with pytest.raises(ConfigError, match="must be a non-empty string"):
         VClusterProvider().ensure_cluster_credentials("c", "local", {}, outputs=None)
 
 
@@ -320,3 +320,37 @@ def test_vcluster_cleanup_skips_pv_when_cluster_name_empty(
     )
     VClusterProvider().cleanup(info, variables={})
     mock_run.assert_not_called()
+
+
+def test_is_safe_scratch_path_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. ~/.kube/config is never safe
+    default_kube = Path("~/.kube/config").expanduser().resolve()
+    assert not VClusterProvider._is_safe_scratch_path(default_kube)
+
+    # 2. Project working directory is never safe
+    assert not VClusterProvider._is_safe_scratch_path(Path.cwd())
+
+    # 3. Directories are never safe
+    assert not VClusterProvider._is_safe_scratch_path(tmp_path)
+
+    # 4. Standard temp dir file is safe
+    temp_file = Path(tempfile.gettempdir()) / "vcluster-test-file.yaml"
+    assert VClusterProvider._is_safe_scratch_path(temp_file)
+
+    # 5. BENCH_RUN_STATE_ROOT child is safe
+    state_root = tmp_path / "runs"
+    state_root.mkdir()
+    monkeypatch.setenv("BENCH_RUN_STATE_ROOT", str(state_root))
+    state_file = state_root / "run-1" / "kubeconfig"
+    assert VClusterProvider._is_safe_scratch_path(state_file)
+
+    # 6. TF_DATA_DIR parent sibling is safe
+    tf_data_dir = tmp_path / "run-2" / "tf-data"
+    tf_data_dir.mkdir(parents=True)
+    monkeypatch.setenv("TF_DATA_DIR", str(tf_data_dir))
+    tf_state_file = tmp_path / "run-2" / "terraform.tfstate"
+    assert VClusterProvider._is_safe_scratch_path(tf_state_file)
+
+    # 7. Unrelated external file is not safe
+    custom_ext_file = tmp_path / "custom" / "my_config.yaml"
+    assert not VClusterProvider._is_safe_scratch_path(custom_ext_file)

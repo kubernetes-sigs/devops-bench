@@ -160,6 +160,23 @@ def test_down(mocker, monkeypatch, tf_deployer, provider):
     assert cleanup_vars == tf_deployer.variables
 
 
+def test_down_missing_tf_dir_skips_destroy_but_runs_cleanup(
+    mocker, monkeypatch, tf_deployer, provider
+):
+    monkeypatch.delenv("TF_DATA_DIR", raising=False)
+    mock_run = mocker.patch("devops_bench.deployers.tofu.run")
+    tf_deployer.work_dir = "/nonexistent/path/for/test"
+
+    tf_deployer.down()
+
+    mock_run.assert_not_called()
+    assert provider.account_calls == 0
+    assert len(provider.cleanup_calls) == 1
+    cleanup_info, cleanup_vars = provider.cleanup_calls[0]
+    assert cleanup_info.name == "test-cluster"
+    assert cleanup_vars == tf_deployer.variables
+
+
 def test_up_isolates_state_beside_tf_data_dir(mocker, monkeypatch, tmp_path, tf_deployer):
     monkeypatch.setenv("TF_DATA_DIR", str(tmp_path / "tf-data"))
     mock_run = mocker.patch("devops_bench.deployers.tofu.run")

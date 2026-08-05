@@ -237,28 +237,12 @@ class TFDeployer(Deployer):
         run(cmd, cwd=self.work_dir, capture=False)
 
     def down(self) -> None:
-        tf_path = Path(self.work_dir)
-        if not tf_path.exists():
-            _log.warning(
-                "TF directory %s (stack: %s) not found. Skipping teardown.",
-                self.work_dir,
-                self.tf_dir,
-            )
-            return
+        """Tear down the OpenTofu stack and run provider cleanup.
 
-        self.provider.ensure_account_credentials()
-        run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
-
-        cmd = [
-            "tofu",
-            "destroy",
-            "-auto-approve",
-            "-input=false",
-            *self._state_flags(),
-            *self._var_flags(),
-        ]
-        run(cmd, cwd=self.work_dir, capture=False)
-
+        Invokes ``tofu destroy`` to release provisioned infrastructure, and
+        guarantees execution of ``provider.cleanup()`` via a ``finally`` block to
+        clean up temporary scratch files and provider-specific resources.
+        """
         cluster_info = self._cluster_info
         if cluster_info is None:
             cluster_info = ClusterInfo.from_dict(
@@ -269,7 +253,31 @@ class TFDeployer(Deployer):
                     "kubeconfig_path": self.variables.get("kubeconfig_path"),
                 }
             )
-        self.provider.cleanup(cluster_info, variables=self.variables)
+
+        try:
+            tf_path = Path(self.work_dir)
+            if not tf_path.exists():
+                _log.warning(
+                    "TF directory %s (stack: %s) not found. Skipping teardown.",
+                    self.work_dir,
+                    self.tf_dir,
+                )
+                return
+
+            self.provider.ensure_account_credentials()
+            run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
+
+            cmd = [
+                "tofu",
+                "destroy",
+                "-auto-approve",
+                "-input=false",
+                *self._state_flags(),
+                *self._var_flags(),
+            ]
+            run(cmd, cwd=self.work_dir, capture=False)
+        finally:
+            self.provider.cleanup(cluster_info, variables=self.variables)
 
     def get_cluster_info(self) -> ClusterInfo:
         """Read cluster details from the stack outputs.

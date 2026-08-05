@@ -40,15 +40,23 @@ __all__ = ["VClusterProvider"]
 
 _log = get_logger("providers.vcluster")
 
-_LOCAL_CONTEXT_PREFIXES = (
-    "kind-",
+_EXACT_LOCAL_CONTEXTS = {
     "minikube",
     "docker-desktop",
     "colima",
-    "k3d-",
     "rancher-desktop",
     "localhost",
     "local",
+}
+
+_LOCAL_CONTEXT_PREFIXES = (
+    "kind-",
+    "k3d-",
+    "minikube-",
+    "docker-desktop-",
+    "colima-",
+    "rancher-desktop-",
+    "local-",
 )
 
 
@@ -63,27 +71,39 @@ def _is_local_server_url(server: str) -> bool:
         return False
     if not hostname:
         return False
-    if hostname in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+    if hostname == "localhost":
         return True
     try:
         ip = ipaddress.ip_address(hostname)
-        if isinstance(ip, ipaddress.IPv4Address):
-            private_blocks = (
-                ipaddress.ip_network("10.0.0.0/8"),
-                ipaddress.ip_network("172.16.0.0/12"),
-                ipaddress.ip_network("192.168.0.0/16"),
-            )
-            return any(ip in block for block in private_blocks)
+        return ip.is_private or ip.is_loopback
     except ValueError:
         pass
     return False
+
+
+def _is_explicit_public_ip(server: str) -> bool:
+    """Check whether a Kubernetes server URL hostname is an explicit public IP address."""
+    if not server:
+        return False
+    try:
+        split_res = urlsplit(server)
+        hostname = split_res.hostname
+    except Exception:
+        return False
+    if not hostname:
+        return False
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return not (ip.is_private or ip.is_loopback)
+    except ValueError:
+        return False
 
 
 def _get_current_context(kubeconfig_path: str) -> str:
     """Read the active current-context from a kubeconfig file."""
     path_obj = Path(kubeconfig_path).expanduser().resolve()
     if not path_obj.exists():
-        raise ConfigError(f"No active current-context found in kubeconfig {kubeconfig_path}")
+        raise ConfigError(f"Kubeconfig file not found at {kubeconfig_path}")
     yaml = YAML(typ="safe")
     try:
         with open(path_obj, encoding="utf-8") as f:
@@ -100,41 +120,38 @@ def _get_current_context(kubeconfig_path: str) -> str:
 
 
 def _is_allowlisted_context(context_name: str, kubeconfig_path: str) -> bool:
-    """Check whether a kubecontext is local according to the allowlist rules."""
-    if any(context_name.startswith(p) for p in _LOCAL_CONTEXT_PREFIXES):
-        return True
-
+    """Check whether a kubecontext is local according to IP inspection and allowlist rules."""
     path_obj = Path(kubeconfig_path).expanduser().resolve()
-    if not path_obj.exists():
-        return False
-    yaml = YAML(typ="safe")
-    try:
-        with open(path_obj, encoding="utf-8") as f:
-            config = yaml.load(f) or {}
-    except Exception:
-        return False
+    if path_obj.exists():
+        yaml = YAML(typ="safe")
+        try:
+            with open(path_obj, encoding="utf-8") as f:
+                config = yaml.load(f) or {}
+            if isinstance(config, dict):
+                cluster_name = None
+                for ctx in config.get("contexts", []):
+                    if isinstance(ctx, dict) and ctx.get("name") == context_name:
+                        context_data = ctx.get("context", {})
+                        if isinstance(context_data, dict):
+                            cluster_name = context_data.get("cluster")
+                        break
 
-    if not isinstance(config, dict):
-        return False
+                if cluster_name:
+                    for item in config.get("clusters", []):
+                        if isinstance(item, dict) and item.get("name") == cluster_name:
+                            cluster_data = item.get("cluster", {})
+                            if isinstance(cluster_data, dict):
+                                server = str(cluster_data.get("server", ""))
+                                if _is_local_server_url(server):
+                                    return True
+                                if _is_explicit_public_ip(server):
+                                    return False
+        except Exception:
+            pass
 
-    cluster_name = None
-    for ctx in config.get("contexts", []):
-        if isinstance(ctx, dict) and ctx.get("name") == context_name:
-            context_data = ctx.get("context", {})
-            if isinstance(context_data, dict):
-                cluster_name = context_data.get("cluster")
-            break
-
-    if not cluster_name:
-        return False
-
-    for item in config.get("clusters", []):
-        if isinstance(item, dict) and item.get("name") == cluster_name:
-            cluster_data = item.get("cluster", {})
-            if isinstance(cluster_data, dict):
-                server = cluster_data.get("server", "")
-                return _is_local_server_url(str(server))
-    return False
+    return context_name in _EXACT_LOCAL_CONTEXTS or any(
+        context_name.startswith(p) for p in _LOCAL_CONTEXT_PREFIXES
+    )
 
 
 @PROVIDERS.register("vcluster")
@@ -166,11 +183,13 @@ class VClusterProvider(Provider):
         Raises:
             ConfigError: If ``kubeconfig`` output is missing or target path is invalid.
         """
-        if not outputs or "kubeconfig" not in outputs or not outputs["kubeconfig"]:
+        kubeconfig_val = outputs.get("kubeconfig") if outputs else None
+        if not isinstance(kubeconfig_val, str) or not kubeconfig_val.strip():
             raise ConfigError(
-                "OpenTofu outputs missing 'kubeconfig' required for VClusterProvider."
+                "OpenTofu output 'kubeconfig' must be a non-empty string, got "
+                f"{type(kubeconfig_val).__name__}."
             )
-        kubeconfig_yaml = str(outputs["kubeconfig"])
+        kubeconfig_yaml = kubeconfig_val
 
         target_path = variables.get("kubeconfig_path")
         if not target_path:
@@ -238,27 +257,18 @@ class VClusterProvider(Provider):
             return False
 
         default_kubeconfig = Path("~/.kube/config").expanduser().resolve()
-        if resolved == default_kubeconfig:
+        if resolved == default_kubeconfig or resolved == Path.cwd().resolve() or resolved.is_dir():
             return False
 
-        if resolved.is_dir():
-            return False
+        tmp_dir = Path(tempfile.gettempdir()).resolve()
+        bench_root = get_env("BENCH_RUN_STATE_ROOT")
+        tf_data = get_env("TF_DATA_DIR")
 
-        if resolved.parent == Path(tempfile.gettempdir()).resolve():
-            return True
-
-        if (Path(tempfile.gettempdir()) / "devops-bench-runs").resolve() in resolved.parents:
-            return True
-
-        if (
-            get_env("BENCH_RUN_STATE_ROOT")
-            and Path(get_env("BENCH_RUN_STATE_ROOT")).resolve() in resolved.parents
-        ):
-            return True
-
-        return bool(
-            get_env("TF_DATA_DIR")
-            and Path(get_env("TF_DATA_DIR")).resolve().parent == resolved.parent
+        return (
+            resolved.parent == tmp_dir
+            or (tmp_dir / "devops-bench-runs") in resolved.parents
+            or (bool(bench_root) and Path(bench_root).resolve() in resolved.parents)
+            or (bool(tf_data) and Path(tf_data).resolve().parent == resolved.parent)
         )
 
     def cleanup(
