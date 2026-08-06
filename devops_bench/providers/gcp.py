@@ -111,8 +111,10 @@ class GcpProvider(Provider):
         self,
         cluster_info: ClusterInfo,
         variables: dict[str, Any] | None = None,
+        success: bool = True,
     ) -> None:
         """No-op: GKE cluster cleanup is handled by stack teardown."""
+        del success
 
     def resolve_variables(
         self, ctx: ResolveContext, custom_variables: dict[str, Any]

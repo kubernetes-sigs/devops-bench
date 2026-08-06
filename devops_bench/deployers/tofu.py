@@ -254,6 +254,7 @@ class TFDeployer(Deployer):
                 }
             )
 
+        destroy_success = False
         try:
             tf_path = Path(self.work_dir)
             if not tf_path.exists():
@@ -276,8 +277,9 @@ class TFDeployer(Deployer):
                 *self._var_flags(),
             ]
             run(cmd, cwd=self.work_dir, capture=False)
+            destroy_success = True
         finally:
-            self.provider.cleanup(cluster_info, variables=self.variables)
+            self.provider.cleanup(cluster_info, variables=self.variables, success=destroy_success)
 
     def get_cluster_info(self) -> ClusterInfo:
         """Read cluster details from the stack outputs.

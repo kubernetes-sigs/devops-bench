@@ -245,9 +245,12 @@ def test_vcluster_cleanup_deletes_orphaned_pvs(mocker: MockerFixture, tmp_path: 
 
 def test_vcluster_cleanup_deletes_scratch_kubeconfig(
     mocker: MockerFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mocker.patch("devops_bench.providers.vcluster.run")
-    scratch_file = Path(tempfile.gettempdir()) / "test-vcluster-clean-vc-config.yaml"
+    monkeypatch.setenv("BENCH_RUN_STATE_ROOT", str(tmp_path))
+    scratch_file = tmp_path / "vcluster-clean-vc-config.yaml"
     scratch_file.write_text("test-kubeconfig", encoding="utf-8")
 
     info = ClusterInfo(
@@ -344,12 +347,12 @@ def test_is_safe_scratch_path_branches(tmp_path: Path, monkeypatch: pytest.Monke
     state_file = state_root / "run-1" / "kubeconfig"
     assert VClusterProvider._is_safe_scratch_path(state_file)
 
-    # 6. TF_DATA_DIR parent sibling is safe
+    # 6. TF_DATA_DIR parent sibling is safe if matching safe naming prefix
     tf_data_dir = tmp_path / "run-2" / "tf-data"
     tf_data_dir.mkdir(parents=True)
     monkeypatch.setenv("TF_DATA_DIR", str(tf_data_dir))
-    tf_state_file = tmp_path / "run-2" / "terraform.tfstate"
-    assert VClusterProvider._is_safe_scratch_path(tf_state_file)
+    scratch_file = tmp_path / "run-2" / "vcluster-config.yaml"
+    assert VClusterProvider._is_safe_scratch_path(scratch_file)
 
     # 7. Unrelated external file is not safe
     custom_ext_file = tmp_path / "custom" / "my_config.yaml"

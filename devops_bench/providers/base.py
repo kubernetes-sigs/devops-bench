@@ -107,11 +107,13 @@ class Provider(ABC):
         self,
         cluster_info: ClusterInfo,
         variables: dict[str, Any] | None = None,
+        success: bool = True,
     ) -> None:
         """Perform provider-specific cleanup after cluster teardown.
 
         Args:
             cluster_info: The cluster info of the cluster that was destroyed.
             variables: Optional OpenTofu input variables used during provisioning.
+            success: Whether the stack destroy completed successfully.
         """
-        del cluster_info, variables
+        del cluster_info, variables, success
