@@ -109,9 +109,7 @@ def _get_current_context(kubeconfig_path: str) -> str:
         with open(path_obj, encoding="utf-8") as f:
             config = yaml.load(f) or {}
     except Exception as exc:
-        raise ConfigError(
-            f"No active current-context found in kubeconfig {kubeconfig_path}: {exc}"
-        ) from exc
+        raise ConfigError(f"Failed to read kubeconfig {kubeconfig_path}: {exc}") from exc
 
     current = config.get("current-context") if isinstance(config, dict) else None
     if not current:
@@ -142,12 +140,9 @@ def _is_allowlisted_context(context_name: str, kubeconfig_path: str) -> bool:
                             cluster_data = item.get("cluster", {})
                             if isinstance(cluster_data, dict):
                                 server = str(cluster_data.get("server", ""))
-                                if _is_local_server_url(server):
-                                    return True
-                                if _is_explicit_public_ip(server):
-                                    return False
-        except Exception:
-            pass
+                                return _is_local_server_url(server)
+        except Exception as exc:
+            _log.debug("Failed to classify kubecontext %s: %s", context_name, exc)
 
     return context_name in _EXACT_LOCAL_CONTEXTS or any(
         context_name.startswith(p) for p in _LOCAL_CONTEXT_PREFIXES
@@ -211,7 +206,7 @@ class VClusterProvider(Provider):
             )
 
         node_port = variables.get("node_port")
-        if location == "local" and node_port is not None:
+        if node_port is not None:
             try:
                 yaml = YAML()
                 config = yaml.load(kubeconfig_yaml)
@@ -268,19 +263,25 @@ class VClusterProvider(Provider):
             resolved.parent == tmp_dir
             or (tmp_dir / "devops-bench-runs") in resolved.parents
             or (bool(bench_root) and Path(bench_root).resolve() in resolved.parents)
-            or (bool(tf_data) and Path(tf_data).resolve().parent == resolved.parent)
+            or (
+                bool(tf_data)
+                and Path(tf_data).resolve().parent in resolved.parents
+                and resolved.name.startswith(("vcluster-", "kubeconfig"))
+            )
         )
 
     def cleanup(
         self,
         cluster_info: ClusterInfo,
         variables: dict[str, Any] | None = None,
+        success: bool = True,
     ) -> None:
         """Clean up orphaned PVs in the host cluster and remove temporary kubeconfig.
 
         Args:
             cluster_info: The cluster info of the cluster that was destroyed.
             variables: Optional OpenTofu input variables used during provisioning.
+            success: Whether the stack destroy completed successfully.
         """
         vars_dict = variables or {}
         host_kubeconfig = vars_dict.get("host_kubeconfig_path") or os.environ.get(
@@ -294,7 +295,9 @@ class VClusterProvider(Provider):
             except ConfigError:
                 host_context = None
 
-        if not cluster_info.name or not cluster_info.name.strip():
+        if not success:
+            _log.info("Skipping VCluster PV deletion: destroy command failed.")
+        elif not cluster_info.name or not cluster_info.name.strip():
             _log.warning("Skipping VCluster PV cleanup: cluster_info.name is empty.")
         else:
             label_selector = (

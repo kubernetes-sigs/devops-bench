@@ -28,6 +28,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pytest_mock import MockerFixture
 
 from devops_bench.core import ClusterInfo, ConfigError
 from devops_bench.deployers.tofu import _TF_ROOT, TFDeployer
@@ -41,7 +42,7 @@ class StubProvider(Provider):
         self.account_calls = 0
         self.cluster_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.output_calls: list[dict[str, Any] | None] = []
-        self.cleanup_calls: list[tuple[ClusterInfo, dict[str, Any] | None]] = []
+        self.cleanup_calls: list[tuple[ClusterInfo, dict[str, Any] | None, bool]] = []
 
     def ensure_account_credentials(self) -> None:
         self.account_calls += 1
@@ -63,8 +64,9 @@ class StubProvider(Provider):
         self,
         cluster_info: ClusterInfo,
         variables: dict[str, Any] | None = None,
+        success: bool = True,
     ) -> None:
-        self.cleanup_calls.append((cluster_info, variables))
+        self.cleanup_calls.append((cluster_info, variables, success))
 
     def resolve_variables(
         self, ctx: ResolveContext, custom_variables: dict[str, Any]
@@ -153,16 +155,20 @@ def test_down(mocker, monkeypatch, tf_deployer, provider):
     ]
 
     assert len(provider.cleanup_calls) == 1
-    cleanup_info, cleanup_vars = provider.cleanup_calls[0]
+    cleanup_info, cleanup_vars, success = provider.cleanup_calls[0]
     assert cleanup_info.name == "test-cluster"
     assert cleanup_info.location == "us-central1-a"
     assert cleanup_info.project == "test-project"
     assert cleanup_vars == tf_deployer.variables
+    assert success is True
 
 
 def test_down_missing_tf_dir_skips_destroy_but_runs_cleanup(
-    mocker, monkeypatch, tf_deployer, provider
-):
+    mocker: MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tf_deployer: TFDeployer,
+    provider: StubProvider,
+) -> None:
     monkeypatch.delenv("TF_DATA_DIR", raising=False)
     mock_run = mocker.patch("devops_bench.deployers.tofu.run")
     tf_deployer.work_dir = "/nonexistent/path/for/test"
@@ -172,9 +178,10 @@ def test_down_missing_tf_dir_skips_destroy_but_runs_cleanup(
     mock_run.assert_not_called()
     assert provider.account_calls == 0
     assert len(provider.cleanup_calls) == 1
-    cleanup_info, cleanup_vars = provider.cleanup_calls[0]
+    cleanup_info, cleanup_vars, success = provider.cleanup_calls[0]
     assert cleanup_info.name == "test-cluster"
     assert cleanup_vars == tf_deployer.variables
+    assert success is False
 
 
 def test_up_isolates_state_beside_tf_data_dir(mocker, monkeypatch, tmp_path, tf_deployer):
