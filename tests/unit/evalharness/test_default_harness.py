@@ -437,8 +437,66 @@ def test_run_one_warns_when_a_verification_entry_fails_to_parse(
         assert record["status"] == "success"
         assert any("failed to parse" in message for message in caplog.messages)
         assert "bad-entry" in caplog.text
+        # Loud, not a routine notice: a parse error degrades the whole
+        # verification outcome, so it must log at ERROR, not WARNING.
+        parse_records = [r for r in caplog.records if "failed to parse" in r.message]
+        assert parse_records and all(r.levelno == logging.ERROR for r in parse_records)
     finally:
         AGENTS._items.pop("fake-workspace-writer-parse-warn", None)  # noqa: SLF001
+
+
+def test_run_one_marks_verification_status_parse_error_when_a_spec_entry_fails_to_parse(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """A parse error must not read as a normal "evaluated" verification run.
+
+    Regression: run_20260804_030923_967784, task "Config drift: the evidence
+    lies". Three of four verification entries failed to parse, yet the
+    record still carried ``verification_status: "evaluated"`` and
+    ``status: "success"``, indistinguishable from a clean run. The status
+    must flip to a distinct value whenever the spec did not fully parse.
+    """
+    AGENTS.register("fake-workspace-writer-parse-error-status")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-workspace-writer-parse-error-status",
+        )
+        task = Task.from_dict(
+            {
+                "task_id": "t",
+                "name": "demo",
+                "prompt": "p",
+                "infrastructure": {"deployer": "noop"},
+                "verification_spec": [
+                    {
+                        "name": "web-ready",
+                        "role": "objective",
+                        "check": {"type": "pod_healthy", "selector": "app=web"},
+                    },
+                    {
+                        "name": "bad-entry",
+                        "role": "objective",
+                        "check": {"type": "no-such-type"},
+                    },
+                ],
+            }
+        )
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+        ok = VerificationResult(success=True, elapsed_time=0.0, reason="fine")
+
+        with patch(
+            "devops_bench.evalharness.default.VerifierAgent.run_entry", return_value=ok
+        ):
+            record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert record["verification_status"] == "parse_error"
+        assert len(record["verification_parse_errors"]) == 1
+    finally:
+        AGENTS._items.pop("fake-workspace-writer-parse-error-status", None)  # noqa: SLF001
 
 
 def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
@@ -462,7 +520,7 @@ def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
     # exception path.
     monkeypatch.setattr(harness, "execute_agent", _boom)
     canned_report = [{"name": "web-ready", "success": True, "status": "pass"}]
-    monkeypatch.setattr(harness, "_run_verification", lambda entries: canned_report)
+    monkeypatch.setattr(harness, "_run_verification", lambda entries, **kwargs: canned_report)
     task = Task.from_dict(
         {
             "task_id": "t",
@@ -484,6 +542,45 @@ def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
     assert record["status"] == "failed"
     assert record["verification_report"] == canned_report
     assert record["verification_status"] == "evaluated"
+
+
+def test_run_one_reports_parse_error_on_the_exception_path_when_every_entry_failed_to_parse(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every entry failing to parse must not read the same as "nothing declared".
+
+    Mirrors ``test_run_one_reports_evaluated_on_the_exception_path_with_no_entries_declared``,
+    but here the task DID declare entries; all of them just failed to parse.
+    ``entries`` ends up empty either way, so the exception path must not
+    collapse the two cases into the same "evaluated" status.
+    """
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    def _boom(prompt: str, ctx: Any) -> Any:
+        raise RuntimeError("agent crashed")
+
+    monkeypatch.setattr(harness, "execute_agent", _boom)
+    task = Task.from_dict(
+        {
+            "task_id": "t",
+            "name": "demo",
+            "prompt": "p",
+            "infrastructure": {"deployer": "noop"},
+            "verification_spec": [
+                {
+                    "name": "bad-entry",
+                    "role": "objective",
+                    "check": {"type": "no-such-type"},
+                }
+            ],
+        }
+    )
+
+    record = harness._run_one(task, tmp_path)  # noqa: SLF001
+
+    assert record["status"] == "failed"
+    assert record["verification_report"] == []
+    assert record["verification_status"] == "parse_error"
 
 
 def test_run_one_reports_evaluated_on_the_exception_path_with_no_entries_declared(

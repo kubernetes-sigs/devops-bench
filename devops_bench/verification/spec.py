@@ -300,6 +300,28 @@ class VerificationEntry(BaseModel):
     An entry pairs a check subtree with the scoring vocabulary: what the check
     is for (``role``), how badly it matters when it fails (``severity``), how
     much it counts (``weight``), and how it is evaluated (``mode``).
+
+    Attributes:
+        name: Unique label for this entry within its task.
+        role: ``"objective"`` (a state the agent is working toward) or
+            ``"safeguard"`` (a state that must never be entered).
+        severity: Required for safeguards; unset for objectives.
+        mode: How the check is evaluated. ``"converge"`` polls toward success
+            until a deadline. ``"assert"`` evaluates once, after the agent's
+            turn ends. ``"hold"`` requires the condition to hold continuously
+            from seed through the end of the agent's turn: it is sampled on a
+            background thread while the agent runs (see
+            ``devops_bench.evalharness.safeguard_monitor``), not evaluated
+            fresh in the post-run verification pass. Sampling cannot see a
+            violation shorter than the poll interval between two samples;
+            this is a fidelity limit, not a guarantee of continuous
+            observation. Left unset, the mode is derived from ``role``.
+        weight: How much this entry counts toward its role's score.
+        check: The parsed check subtree.
+        hold_poll_interval_sec: Seconds between samples for a ``hold`` entry.
+            Ignored for every other mode. ``None`` defers to the monitor's
+            module-level default (``BENCH_HOLD_INTERVAL_SEC``, see
+            ``devops_bench.evalharness.safeguard_monitor``).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -310,6 +332,7 @@ class VerificationEntry(BaseModel):
     mode: Literal["converge", "assert", "hold"] | None = None
     weight: float = Field(default=1.0, gt=0)
     check: Any
+    hold_poll_interval_sec: float | None = Field(default=None, gt=0)
 
     @field_validator("check", mode="before")
     @classmethod
@@ -322,13 +345,11 @@ class VerificationEntry(BaseModel):
 
     @model_validator(mode="after")
     def _check_role_and_mode(self) -> VerificationEntry:
-        """Enforce the role/severity pairing and reject the unbuilt mode."""
+        """Enforce the role/severity pairing."""
         if self.role == "safeguard" and self.severity is None:
             raise ValueError("severity is required when role is 'safeguard'")
         if self.role == "objective" and self.severity is not None:
             raise ValueError("severity is not allowed when role is 'objective'")
-        if self.mode == "hold":
-            raise ValueError("mode 'hold' is not yet supported; use 'converge' or 'assert'")
         return self
 
     @property
@@ -338,7 +359,9 @@ class VerificationEntry(BaseModel):
         Objectives converge because they describe a state the agent is working
         toward. Safeguards assert because they describe a state that must never
         have been entered, and polling one would just wait for a violation to
-        heal.
+        heal. A safeguard can opt into ``hold`` explicitly to require the
+        condition to have held continuously through the agent's turn instead
+        of only at the moment verification runs after the agent finishes.
         """
         if self.mode is not None:
             return self.mode

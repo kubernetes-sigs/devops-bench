@@ -1,0 +1,253 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Background sampling for ``mode: hold`` safeguards, concurrent with the agent's turn.
+
+``mode: hold`` means a safeguard must hold continuously from seed through the
+end of the agent's turn. Verification that only runs AFTER the agent exits
+(the ``assert`` mode's single evaluation) cannot see a violation the agent
+commits and then undoes before the run ends. That is the motivating failure
+this module closes: an agent that scales a deployment down and back up
+between two ``kubectl`` calls has its violation read as healthy if the only
+observation happens once, at the end, after the replica count has already
+recovered.
+
+:class:`SafeguardMonitor` is modeled on
+:class:`~devops_bench.evalharness.scenario.ScenarioManager`: it runs on a
+daemon thread started before the agent's turn and drained after it, writes
+into a lock-guarded observation table, and never lets an internal failure
+propagate out to the run.
+
+FIDELITY LIMIT. This is sampling, not a watch: a violation that starts and
+ends entirely between two samples is never observed. The poll interval is the
+tunable that trades that blind spot against load on the API server /
+``kubectl`` subprocess overhead; it is not, and must not be sold as, a
+continuous guarantee. A ``kubectl get --watch`` (or native Kubernetes watch
+API) based implementation would close the gap by observing every change
+event rather than sampling at fixed points in time, but that is a different
+and larger piece of work and is not built here.
+"""
+
+from __future__ import annotations
+
+import copy
+import os
+import threading
+import time
+from dataclasses import dataclass
+
+from devops_bench.core import get_logger
+from devops_bench.verification import VerificationEntry, VerifierAgent
+
+__all__ = ["HOLD_POLL_INTERVAL_SEC", "HoldObservation", "SafeguardMonitor"]
+
+_log = get_logger("evalharness.safeguard_monitor")
+
+# Default seconds between samples for a hold entry that does not set its own
+# ``hold_poll_interval_sec``. Overridable via BENCH_HOLD_INTERVAL_SEC, mirroring
+# the BENCH_VERIFY_TIMEOUT_SEC / BENCH_VERIFY_TOTAL_BUDGET_SEC precedent in
+# devops_bench.evalharness.scenario.
+HOLD_POLL_INTERVAL_SEC = float(os.environ.get("BENCH_HOLD_INTERVAL_SEC", "5.0"))
+
+# Upper bound on how long the monitor's own scheduling loop sleeps between
+# checking which entries are due for a sample. Bounds how long stop() can
+# take to be noticed: the loop wakes at least this often even when every
+# entry's next sample is further away, so a stop() call is never blocked
+# behind a long per-entry interval.
+_SCHEDULER_TICK_SEC = 1.0
+
+# Default bound for stop()'s join. A single sample's kubectl call can run up
+# to the leaf verifiers' own I/O floor (30s, see
+# devops_bench.verification.base.single_call_timeout) before returning, so the
+# join budget is set comfortably above that rather than at the poll interval.
+_DEFAULT_JOIN_TIMEOUT_SEC = 40.0
+
+
+@dataclass
+class HoldObservation:
+    """What the monitor observed for one hold entry.
+
+    Attributes:
+        violated: True once any sample was observed to fail. Once set, stays
+            set: a later sample recovering does not clear it, since a hold
+            safeguard is about continuous compliance, not the value at the
+            end.
+        first_violation_reason: The failing sample's ``reason``, captured the
+            first time ``violated`` is set. ``None`` until then.
+        first_violation_at_sec: Seconds after the monitor started that the
+            first violation was observed, via ``time.monotonic()``. ``None``
+            until a violation is observed.
+        sample_count: Total number of samples taken (pass, fail, or error).
+        error_count: Of ``sample_count``, how many could not be evaluated
+            (the check itself failed to run, as distinct from running and
+            observing the condition false). Never counted as a violation.
+    """
+
+    violated: bool = False
+    first_violation_reason: str | None = None
+    first_violation_at_sec: float | None = None
+    sample_count: int = 0
+    error_count: int = 0
+
+
+class SafeguardMonitor:
+    """Sample hold-mode safeguards on a daemon thread while the agent runs.
+
+    Constructed with the subset of a task's :class:`VerificationEntry` objects
+    whose ``resolved_mode == "hold"``, already pinned to the run's cluster
+    (see ``_pin_verification_targets`` in ``devops_bench.evalharness.default``).
+    :meth:`start` spawns the sampling thread; :meth:`stop` signals it to exit
+    and joins with a bounded timeout; :meth:`get_observations` returns a
+    locked snapshot, safe to call before or after :meth:`stop`.
+
+    Each entry is sampled independently on its own interval (its own
+    ``hold_poll_interval_sec``, or :data:`HOLD_POLL_INTERVAL_SEC` when unset),
+    all from a single scheduling thread rather than one thread per entry.
+
+    Args:
+        entries: The task's hold-mode entries. An empty list is accepted;
+            :meth:`start` is then a no-op and every method behaves as if no
+            monitoring ever happened.
+    """
+
+    def __init__(self, entries: list[VerificationEntry]) -> None:
+        self._entries: list[VerificationEntry] = list(entries)
+        self._agent = VerifierAgent()
+        self._observations: dict[str, HoldObservation] = {
+            entry.name: HoldObservation() for entry in self._entries
+        }
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._start_time: float | None = None
+
+    def start(self) -> None:
+        """Start the background sampling thread.
+
+        A no-op when there are no hold entries to watch, so callers do not
+        need to special-case an empty list.
+        """
+        if not self._entries:
+            return
+        self._start_time = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="safeguard-monitor")
+        self._thread.start()
+
+    def stop(self, join_timeout_sec: float = _DEFAULT_JOIN_TIMEOUT_SEC) -> None:
+        """Signal the sampling thread to exit and join it with a bounded timeout.
+
+        Safe to call more than once, and safe to call even when :meth:`start`
+        was never called (or was a no-op). Never raises, so it can run from a
+        ``finally`` block during task teardown.
+
+        Args:
+            join_timeout_sec: Maximum seconds to wait for the thread to exit.
+                A join that times out is logged, not raised; the thread is a
+                daemon, so it cannot leak the process.
+        """
+        self._stop_event.set()
+        if self._thread is None:
+            return
+        self._thread.join(timeout=join_timeout_sec)
+        if self._thread.is_alive():
+            _log.warning(
+                "safeguard monitor thread still alive after %ss join budget; "
+                "abandoning it (it is a daemon thread and cannot leak the process)",
+                join_timeout_sec,
+            )
+
+    def get_observations(self) -> dict[str, HoldObservation]:
+        """Return a locked snapshot of every entry's observation so far.
+
+        Safe to call while the thread is still running, or after :meth:`stop`.
+
+        Returns:
+            A name-keyed copy of the current observations; mutating the
+            returned dict or its values does not affect the monitor's own
+            state.
+        """
+        with self._lock:
+            return {name: copy.copy(obs) for name, obs in self._observations.items()}
+
+    def _run(self) -> None:
+        """Scheduling loop: sample every entry that is due, then sleep to the next one.
+
+        Any exception escaping a single entry's sample is caught inside
+        :meth:`_sample_one`; this loop additionally wraps the whole pass so a
+        bug in the scheduling logic itself (not just in one entry's sample)
+        cannot kill the thread either. A monitor bug must never take down the
+        task run.
+        """
+        next_due: dict[str, float] = dict.fromkeys((e.name for e in self._entries), 0.0)
+        while not self._stop_event.is_set():
+            try:
+                now = time.monotonic()
+                soonest = None
+                for entry in self._entries:
+                    if now >= next_due[entry.name]:
+                        self._sample_one(entry)
+                        interval = self._interval_for(entry)
+                        next_due[entry.name] = time.monotonic() + interval
+                    due_at = next_due[entry.name]
+                    if soonest is None or due_at < soonest:
+                        soonest = due_at
+                sleep_for = _SCHEDULER_TICK_SEC
+                if soonest is not None:
+                    sleep_for = min(sleep_for, max(0.0, soonest - time.monotonic()))
+                self._stop_event.wait(sleep_for)
+            except Exception:  # noqa: BLE001 - a monitor bug must not kill the run
+                _log.exception("safeguard monitor scheduling loop hit an unexpected error")
+                self._stop_event.wait(_SCHEDULER_TICK_SEC)
+
+    @staticmethod
+    def _interval_for(entry: VerificationEntry) -> float:
+        """Resolve one entry's poll interval: its own, else the module default."""
+        if entry.hold_poll_interval_sec is not None:
+            return entry.hold_poll_interval_sec
+        return HOLD_POLL_INTERVAL_SEC
+
+    def _sample_one(self, entry: VerificationEntry) -> None:
+        """Evaluate one entry once and fold the outcome into its observation.
+
+        A check that ERRORS (the check could not run: a transient kubectl
+        failure, an API server blip, a timeout) is recorded separately from a
+        check that ran and reported failure. Only the latter is a violation.
+        Getting this backwards would turn a flaky cluster into a failed
+        safeguard, which is worse than the bug this monitor exists to fix.
+
+        Any exception raised while evaluating (a bug in a leaf verifier, an
+        unexpected error in the runner) is caught here and folded in as an
+        error sample, not a violation, and never propagates.
+        """
+        elapsed = time.monotonic() - self._start_time if self._start_time is not None else 0.0
+        try:
+            result = self._agent.run_entry(entry, timeout_sec=0.0)
+        except Exception as exc:  # noqa: BLE001 - see docstring: never propagate
+            _log.warning("safeguard monitor: sampling %r raised: %s", entry.name, exc)
+            with self._lock:
+                obs = self._observations[entry.name]
+                obs.sample_count += 1
+                obs.error_count += 1
+            return
+
+        with self._lock:
+            obs = self._observations[entry.name]
+            obs.sample_count += 1
+            if result.status == "error":
+                obs.error_count += 1
+                return
+            if not result.success and not obs.violated:
+                obs.violated = True
+                obs.first_violation_reason = result.reason
+                obs.first_violation_at_sec = elapsed
