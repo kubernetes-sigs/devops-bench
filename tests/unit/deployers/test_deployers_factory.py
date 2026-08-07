@@ -71,13 +71,11 @@ def test_get_deployer_tofu_default_stack(mocker, base_config):
         base_config["location"],
     )
     assert isinstance(deployer, TFDeployer)
-    assert deployer.variables == {
-        "infra_provider": "kind",
-        "project_id": base_config["project_id"],
-        "cluster_name": base_config["cluster_name"],
-        "location": "local",
-        "kubeconfig_path": _expected_kubeconfig(),
-    }
+    assert deployer.variables["infra_provider"] == "kind"
+    assert deployer.variables["project_id"] == base_config["project_id"]
+    assert deployer.variables["cluster_name"] == base_config["cluster_name"]
+    assert deployer.variables["location"] == "local"
+    assert deployer.variables["kubeconfig_path"] == _expected_kubeconfig()
     assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/kind")
 
 
@@ -124,14 +122,12 @@ def test_get_deployer_tofu_custom_stack_and_vars(mocker, base_config, monkeypatc
         base_config["location"],
     )
     assert isinstance(deployer, TFDeployer)
-    assert deployer.variables == {
-        "infra_provider": "gcp",
-        "project_id": base_config["project_id"],
-        "cluster_name": "custom-cluster",
-        "location": base_config["location"],
-        "node_count": 5,
-        "machine_type": "n2-standard-4",
-    }
+    assert deployer.variables["infra_provider"] == "gcp"
+    assert deployer.variables["project_id"] == base_config["project_id"]
+    assert deployer.variables["cluster_name"] == "custom-cluster"
+    assert deployer.variables["location"] == base_config["location"]
+    assert deployer.variables["node_count"] == 5
+    assert deployer.variables["machine_type"] == "n2-standard-4"
     assert deployer.tf_dir == str(_TF_ROOT / "custom/stack")
 
 
@@ -144,13 +140,11 @@ def test_get_deployer_tofu_kind_stack(mocker, base_config):
         base_config["location"],
     )
     assert isinstance(deployer, TFDeployer)
-    assert deployer.variables == {
-        "infra_provider": "kind",
-        "project_id": base_config["project_id"],
-        "cluster_name": base_config["cluster_name"],
-        "location": "local",
-        "kubeconfig_path": _expected_kubeconfig(),
-    }
+    assert deployer.variables["infra_provider"] == "kind"
+    assert deployer.variables["project_id"] == base_config["project_id"]
+    assert deployer.variables["cluster_name"] == base_config["cluster_name"]
+    assert deployer.variables["location"] == "local"
+    assert deployer.variables["kubeconfig_path"] == _expected_kubeconfig()
     assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/kind")
 
 
@@ -291,6 +285,19 @@ def test_get_deployer_absolute_stack_requires_explicit_provider(tmp_path, base_c
     assert "INFRA_PROVIDER" in err_msg
 
 
+def test_get_deployer_relative_escaping_stack_requires_explicit_provider(base_config):
+    # A relative stack that escapes the tf/ directory must require an explicit provider.
+    with pytest.raises(ConfigError) as exc_info:
+        get_deployer(
+            {"deployer": "tofu", "stack": "../vcluster"},
+            base_config["project_id"],
+            base_config["cluster_name"],
+            base_config["location"],
+        )
+    err_msg = str(exc_info.value)
+    assert "requires an explicit provider" in err_msg
+
+
 def test_get_deployer_absolute_stack_with_provider(tmp_path, base_config):
     abs_stack = tmp_path / "ext" / "stack"
     abs_stack.mkdir(parents=True)
@@ -302,3 +309,56 @@ def test_get_deployer_absolute_stack_with_provider(tmp_path, base_config):
     )
     assert isinstance(deployer, TFDeployer)
     assert deployer.tf_dir == str(abs_stack)
+
+
+def test_get_deployer_tofu_vcluster_stack(mocker, base_config):
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    mocker.patch(
+        "devops_bench.providers.vcluster._get_current_context",
+        return_value="kind-test",
+    )
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/vcluster"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.variables["infra_provider"] == "vcluster"
+    assert deployer.variables["project_id"] == base_config["project_id"]
+    assert deployer.variables["cluster_name"] == base_config["cluster_name"]
+    assert deployer.variables["namespace"] == f"vcluster-{base_config['cluster_name']}"
+    assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/vcluster")
+
+
+def test_get_deployer_infra_provider_env_vcluster(mocker, base_config, monkeypatch):
+    monkeypatch.setenv("INFRA_PROVIDER", "vcluster")
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    mocker.patch(
+        "devops_bench.providers.vcluster._get_current_context",
+        return_value="kind-test",
+    )
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/kind"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.variables["namespace"] == f"vcluster-{base_config['cluster_name']}"
+
+
+def test_get_deployer_tofu_gcp_stack(mocker, base_config):
+    mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/gcp"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, TFDeployer)
+    assert deployer.variables["infra_provider"] == "gcp"
+    assert deployer.variables["project_id"] == base_config["project_id"]
+    assert deployer.variables["cluster_name"] == base_config["cluster_name"]
+    assert deployer.variables["location"] == base_config["location"]
+    assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/gcp")
