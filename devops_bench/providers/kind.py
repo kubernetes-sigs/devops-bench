@@ -47,7 +47,10 @@ class KindProvider(Provider):
 
         Returns:
             The cluster's :class:`~devops_bench.core.ClusterInfo`; ``project``
-            falls back to ``local-kind`` when none is set.
+            falls back to ``local-kind`` when none is set. ``context`` is the
+            standard ``kind-<cluster_name>`` KinD writes into the kubeconfig,
+            matching what ``devops_bench.agents.sandbox`` already assumes when
+            it strips the ``kind-`` prefix.
         """
         project = variables.get("project_id") or _LOCAL_PROJECT
         return ClusterInfo.from_dict(
@@ -56,6 +59,7 @@ class KindProvider(Provider):
                 "location": location,
                 "project": project,
                 "kubeconfig_path": variables.get("kubeconfig_path"),
+                "context": f"kind-{cluster_name}",
             }
         )
 
