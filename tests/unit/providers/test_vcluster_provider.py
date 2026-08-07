@@ -311,6 +311,39 @@ def test_vcluster_ensure_cluster_credentials_refuses_symlink_path(
         )
 
 
+def test_vcluster_ensure_cluster_credentials_refuses_symlink_atomic(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    fake_resolved = tmp_path / "resolved_path.yaml"
+    target = tmp_path / "secret.yaml"
+    target.write_text("secrets", encoding="utf-8")
+    fake_resolved.symlink_to(target)
+
+    # Mock is_symlink to return False to simulate TOCTOU race (bypassing early checks)
+    mocker.patch("pathlib.Path.is_symlink", return_value=False)
+
+    # Mock Path.resolve to return fake_resolved for our target path to simulate post-resolution swap
+    original_resolve = Path.resolve
+
+    def side_effect(self, *args, **kwargs):
+        if "input_path.yaml" in self.name or "resolved_path.yaml" in self.name:
+            return fake_resolved
+        return original_resolve(self, *args, **kwargs)
+
+    mocker.patch.object(Path, "resolve", side_effect)
+
+    with pytest.raises(
+        ConfigError, match="Refusing to write kubeconfig to symlink or invalid path"
+    ):
+        VClusterProvider().ensure_cluster_credentials(
+            "c",
+            "local",
+            {"kubeconfig_path": str(tmp_path / "input_path.yaml")},
+            outputs={"kubeconfig": "foo"},
+        )
+
+
 def test_vcluster_cleanup_skips_pv_when_cluster_name_empty(
     mocker: MockerFixture,
 ) -> None:
@@ -319,7 +352,7 @@ def test_vcluster_cleanup_skips_pv_when_cluster_name_empty(
         name="",
         location="local",
         project="local-vcluster",
-        kubeconfig_path=None,
+        kubeconfig_path="",
     )
     VClusterProvider().cleanup(info, variables={})
     mock_run.assert_not_called()
