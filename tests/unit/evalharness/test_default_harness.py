@@ -789,3 +789,160 @@ def test_success_and_failed_records_have_identical_top_level_keys(isolated_env: 
     )
     failed = harness._build_failed_record(task, RuntimeError("boom"))  # noqa: SLF001
     assert set(success.keys()) == set(failed.keys()) == _RESULTS_JSON_REQUIRED_KEYS
+
+
+# --- degraded agent-process outcome (a crashed/timed-out agent is not "success") ---
+
+
+def test_success_record_status_is_agent_timeout_when_metadata_flags_timeout(
+    isolated_env: None,
+) -> None:
+    """A CLI agent that recovered a partial trajectory after a timeout still
+    reports a distinct ``agent_timeout`` status, never ``success``."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    agent_res = AgentResult(
+        output="Error: gemini subprocess error: timed out",
+        trajectory=[
+            ToolCall(name="kubectl_top", args={}, result="ok", status="completed").to_dict()
+        ],
+        errors=["gemini subprocess error: command failed with exit code -1"],
+        metadata={"timed_out": True, "trajectory_captured": True},
+    )
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="p",
+        expected_output="e",
+        agent_res=agent_res,
+        chaos_report={},
+        perf_report={},
+    )
+    assert record["status"] == "agent_timeout"
+    assert record["validated"] is False
+    # The recovered trajectory is still on the record for forensics.
+    assert record["trajectory"] != []
+
+
+def test_success_record_status_is_agent_error_for_a_non_timeout_agent_failure(
+    isolated_env: None,
+) -> None:
+    """A non-zero agent exit (or any other ``AgentResult.errored()`` path,
+    e.g. a missing binary or an SDK fault) reads as ``agent_error``, not
+    ``success`` and not ``agent_timeout``."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    agent_res = AgentResult(
+        output="Error: gemini exited 2",
+        trajectory=[],
+        errors=["gemini exited 2: boom"],
+        metadata={"returncode": 2, "trajectory_captured": False},
+    )
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="p",
+        expected_output="e",
+        agent_res=agent_res,
+        chaos_report={},
+        perf_report={},
+    )
+    assert record["status"] == "agent_error"
+    assert record["validated"] is False
+
+
+def test_success_record_status_stays_success_with_no_agent_errors(isolated_env: None) -> None:
+    """Sanity: an agent result with no errors is unaffected by the new statuses."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+    )
+    assert record["status"] == "success"
+
+
+def test_score_excludes_agent_error_and_timeout_records_from_scoring(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded record (``agent_error`` / ``agent_timeout``) never reaches
+    the metrics pipeline, mirroring how a ``"failed"`` record already skips
+    scoring: no ``scores`` means no misleading composite OutcomeScore for a
+    run whose agent process never completed."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c", judge_model=object())
+    scored_batches: list[list[dict[str, Any]]] = []
+
+    def fake_evaluate_metrics_batch(results, judge_model, *, use_mcp=None):
+        scored_batches.append(list(results))
+        for r in results:
+            r["scores"] = {"probe": {"score": 1.0}}
+
+    import devops_bench.metrics as metrics_mod
+
+    monkeypatch.setattr(metrics_mod, "evaluate_metrics_batch", fake_evaluate_metrics_batch)
+
+    records: list[dict[str, Any]] = [
+        {"status": "success", "name": "ok", "scores": {}},
+        {"status": "agent_error", "name": "crashed", "scores": {}},
+        {"status": "agent_timeout", "name": "timed-out", "scores": {}},
+        {"status": "failed", "name": "infra-died", "scores": {}},
+    ]
+    harness._score(records)  # noqa: SLF001
+
+    assert len(scored_batches) == 1
+    assert {r["name"] for r in scored_batches[0]} == {"ok"}
+    by_name = {r["name"]: r for r in records}
+    assert by_name["ok"]["scores"] == {"probe": {"score": 1.0}}
+    assert by_name["crashed"]["scores"] == {}
+    assert by_name["timed-out"]["scores"] == {}
+    assert by_name["infra-died"]["scores"] == {}
+
+
+# --- sandbox container reaping at harness start ---
+
+
+def test_sweep_stray_sandbox_containers_noop_when_sandbox_disabled(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No ``BENCH_AGENT_SANDBOX`` means no docker calls at all."""
+    from devops_bench.agents import sandbox
+
+    monkeypatch.delenv("BENCH_AGENT_SANDBOX", raising=False)
+    calls: list[None] = []
+    monkeypatch.setattr(sandbox, "sweep_stray_containers", lambda: calls.append(None))
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness._sweep_stray_sandbox_containers()  # noqa: SLF001
+
+    assert calls == []
+
+
+def test_sweep_stray_sandbox_containers_sweeps_when_sandbox_enabled(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from devops_bench.agents import sandbox
+
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX", "docker")
+    calls: list[None] = []
+    monkeypatch.setattr(sandbox, "sweep_stray_containers", lambda: calls.append(None))
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness._sweep_stray_sandbox_containers()  # noqa: SLF001
+
+    assert calls == [None]
+
+
+def test_sweep_stray_sandbox_containers_survives_a_sweep_failure(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep failure (e.g. docker unreachable) must never block the run."""
+    from devops_bench.agents import sandbox
+
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX", "docker")
+
+    def _boom() -> None:
+        raise RuntimeError("docker daemon unreachable")
+
+    monkeypatch.setattr(sandbox, "sweep_stray_containers", _boom)
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness._sweep_stray_sandbox_containers()  # noqa: SLF001 - must not raise

@@ -234,6 +234,45 @@ def test_execute_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.has_errors()
     assert "subprocess error" in result.errors[0]
     assert result.trajectory == []
+    assert result.metadata.get("timed_out") is True
+    assert result.metadata.get("trajectory_captured") is False
+
+
+def test_execute_timeout_recovers_partial_trajectory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timeout must not discard the stream-json events flushed before the
+    kill: whatever partial stdout the subprocess captured is still parsed
+    into the canonical trajectory rather than dropped on the floor."""
+    partial_stream = _stream(
+        {"type": "init", "session_id": "abc-123", "model": "gemini-2.5-pro"},
+        {
+            "type": "tool_use",
+            "id": "call-1",
+            "name": "mcp_gke_list_clusters",
+            "input": {"project": "p1"},
+        },
+        {
+            "type": "tool_result",
+            "tool_use_id": "call-1",
+            "content": "cluster-a, cluster-b",
+        },
+    )
+
+    def fake_run(argv, **kwargs):
+        raise SubprocessError(argv, returncode=-1, stdout=partial_stream, stderr="")
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=600.0)).run("p")
+    assert result.has_errors()
+    assert result.metadata.get("timed_out") is True
+    assert result.metadata.get("trajectory_captured") is True
+    assert result.trajectory == [
+        {
+            "name": "mcp_gke_list_clusters",
+            "args": {"project": "p1"},
+            "result": "cluster-a, cluster-b",
+            "status": "completed",
+        },
+    ]
 
 
 def test_execute_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -711,3 +750,101 @@ def test_execute_uses_distinct_cwd_per_run(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(cwds) == 3
     assert all(c is not None for c in cwds)
     assert len(set(cwds)) == 3, f"cwds must be unique per run, got {cwds}"
+
+
+# ---------------------------------------------------------------------------
+# Sandbox container reaping: BENCH_AGENT_SANDBOX=docker must never orphan a
+# container, whether the run completes, times out, or crashes.
+# ---------------------------------------------------------------------------
+
+
+def _enable_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for a working kind cluster so ``_execute`` reaches the docker
+    invocation without shelling out to a real ``kubectl``."""
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX", "docker")
+    monkeypatch.setenv("BENCH_AGENT_IMAGE", "agent-image")
+    monkeypatch.setattr(gemini_mod.sandbox, "current_cluster_name", lambda: "kind")
+    monkeypatch.setattr(
+        gemini_mod.sandbox,
+        "build_agent_kubeconfig",
+        lambda cluster, dest_dir: dest_dir / "kubeconfig",
+    )
+
+
+def test_execute_sandboxed_run_names_the_container_from_its_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_sandbox(monkeypatch)
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["cwd"] = kwargs.get("cwd")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+
+    workdir_name = os.path.basename(captured["cwd"])
+    assert "--name" in captured["argv"]
+    assert (
+        captured["argv"][captured["argv"].index("--name") + 1]
+        == f"devops-bench-agent-{workdir_name}"
+    )
+
+
+def test_execute_sandboxed_run_reaps_container_on_normal_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_sandbox(monkeypatch)
+    killed: list[str] = []
+    monkeypatch.setattr(gemini_mod.sandbox, "kill_container", killed.append)
+
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+
+    assert len(killed) == 1
+    assert killed[0].startswith("devops-bench-agent-")
+
+
+def test_execute_sandboxed_run_reaps_container_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout SIGKILLs the local ``docker run`` client but never touches
+    the daemon; the container must still be reaped by name."""
+    _enable_sandbox(monkeypatch)
+    killed: list[str] = []
+    monkeypatch.setattr(gemini_mod.sandbox, "kill_container", killed.append)
+
+    def fake_run(argv, **kwargs):
+        raise SubprocessError(argv, returncode=-1, stdout="", stderr="")
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+
+    assert result.metadata.get("timed_out") is True
+    assert len(killed) == 1
+    assert killed[0].startswith("devops-bench-agent-")
+
+
+def test_execute_sandboxed_run_reaps_container_when_binary_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected exception (here: ``run`` itself raising ``OSError``)
+    inside the guarded block must still reap the container."""
+    _enable_sandbox(monkeypatch)
+    killed: list[str] = []
+    monkeypatch.setattr(gemini_mod.sandbox, "kill_container", killed.append)
+
+    def fake_run(argv, **kwargs):
+        raise OSError("docker not found")
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+
+    assert result.has_errors()
+    assert len(killed) == 1
+    assert killed[0].startswith("devops-bench-agent-")
