@@ -30,19 +30,22 @@ __all__ = ["get_deployer"]
 _DEFAULT_LOCATION = "us-central1-a"
 _DEFAULT_STACK = "prebuilt/kind"
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_TF_ROOT = _REPO_ROOT / "tf"
+
 
 def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
     """Determine the provider name for a tofu stack.
 
     Precedence: ``INFRA_PROVIDER`` env → explicit ``provider`` config key →
-    directory name deduction from an in-repo stack name (``gcp``, ``kind``, or
-    ``vcluster``). The env var wins so a task can pin a default ``provider`` in
-    its config while runs stay overridable from the environment (matching
+    directory name deduction from a supported in-repository stack name. The env
+    var wins so a task can pin a default ``provider`` in its config while runs
+    stay overridable from the environment (matching
     ``TARGET_DEPLOYMENT_NAME`` / ``NAMESPACE``). Deduction is only applied to
-    in-repo (relative) stacks named ``gcp``, ``kind``, or ``vcluster``; an
-    out-of-repo (absolute or ``~``) stack, or any in-repo stack not named
-    one of those, must name its provider explicitly — no cloud is assumed by
-    default, so a new provider never silently inherits another's defaults.
+    in-repo (relative) stacks matching a supported provider name; an
+    out-of-repo (absolute or ``~``) stack, or any in-repo stack not matching a
+    supported provider, must name its provider explicitly — no defaults are
+    assumed, so a new provider never silently inherits another's configuration.
 
     Args:
         infra_config: Task infrastructure config.
@@ -59,11 +62,14 @@ def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
     if explicit:
         return explicit
     stack_path = Path(stack).expanduser()
-    if not stack_path.is_absolute() and stack_path.name in ("kind", "vcluster", "gcp"):
-        return stack_path.name
+    if not stack_path.is_absolute():
+        resolved = (_TF_ROOT / stack_path).resolve()
+        is_in_repo = _TF_ROOT.resolve() in resolved.parents or resolved == _TF_ROOT.resolve()
+        if is_in_repo and resolved.name in PROVIDERS:
+            return resolved.name
     raise ConfigError(
         f"stack {stack!r} requires an explicit provider; set 'provider' in task "
-        "config or the INFRA_PROVIDER env var (e.g. 'gcp', 'kind', or 'vcluster')"
+        "config or the INFRA_PROVIDER env var to a supported provider"
     )
 
 
@@ -75,9 +81,9 @@ def get_deployer(
 ) -> Deployer:
     """Instantiate the deployer selected by task config and environment.
 
-    OpenTofu (``tofu``) is the sole provisioning engine; the provider (``gcp``,
-    ``kind``, or ``vcluster``) only supplies credentials and stack variable
-    defaults. Two layers can skip provisioning, with the env layer winning:
+    OpenTofu (``tofu``) is the sole provisioning engine; the selected provider
+    only supplies credentials and stack variable defaults. Two layers can skip
+    provisioning, with the env layer winning:
 
     * ``deployer: noop`` (config) *declares* a task that needs no infrastructure.
     * ``BENCH_NO_INFRA=true`` (env) *overrides* any config to skip infra for a
