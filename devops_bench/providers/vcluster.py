@@ -225,13 +225,17 @@ class VClusterProvider(Provider):
                 _log.warning("Failed to rewrite 127.0.0.1 server URL in kubeconfig: %s", exc)
 
         resolved_target.parent.mkdir(parents=True, exist_ok=True)
-        if raw_target.is_symlink() or resolved_target.is_symlink():
-            raise ConfigError(f"Refusing to write kubeconfig to symlink: {target_path}")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        fd = os.open(resolved_target, flags, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        try:
+            fd = os.open(resolved_target, flags, 0o600)
+            os.fchmod(fd, 0o600)
+        except OSError as exc:
+            raise ConfigError(
+                f"Refusing to write kubeconfig to symlink or invalid path: {target_path} ({exc})"
+            ) from exc
+
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(kubeconfig_yaml)
-        resolved_target.chmod(0o600)
         _log.info("Wrote virtual cluster kubeconfig to %s (mode 0600)", resolved_target)
 
         return ClusterInfo.from_dict(
