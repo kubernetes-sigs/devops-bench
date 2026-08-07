@@ -341,6 +341,53 @@ def test_zero_matches_fails_a_scalar_op() -> None:
     assert "no deployment matched" in result.reason
 
 
+# -- absence-satisfies semantics for negative ops (op ne only) ----------
+
+
+def _configmap(name: str = "checkout-config", ns: str = "shop") -> dict[str, Any]:
+    return {"kind": "ConfigMap", "metadata": {"name": name, "namespace": ns}}
+
+
+def test_ne_on_an_absent_path_passes() -> None:
+    # Regression: run_20260804_030923_967784, entry config-source-mutable.
+    # A ConfigMap without an `immutable` field IS mutable: `path: immutable,
+    # op: ne, value: 'true'` must be satisfied by the field's absence, not
+    # error/fail. Absent is not equal to "true".
+    with patch(_GET, return_value=_configmap()):
+        result = _verifier(
+            kind="configmap",
+            op="ne",
+            value="true",
+            path="immutable",
+            resource_name="checkout-config",
+        ).verify(0.0)
+    assert result.success is True
+    assert result.status == "pass"
+
+
+def test_eq_on_an_absent_path_still_fails_closed() -> None:
+    # Scoped deliberately: only negative ops (ne) gain absence-satisfies
+    # semantics. A positive op like eq must keep failing closed on an
+    # unobservable predicate.
+    with patch(_GET, return_value=_configmap()):
+        result = _verifier(
+            kind="configmap",
+            op="eq",
+            value="true",
+            path="immutable",
+            resource_name="checkout-config",
+        ).verify(0.0)
+    assert result.success is False
+
+
+def test_gte_on_an_absent_path_without_across_matches_still_fails_closed() -> None:
+    with patch(_GET, return_value=_deployment()):
+        result = _verifier(
+            op="gte", value=1, path="status.noSuchField", resource_name="web"
+        ).verify(0.0)
+    assert result.success is False
+
+
 def test_absent_passes_on_zero_matches() -> None:
     with patch(_GET, return_value=_items()):
         result = _verifier(op="absent", selector="app=web", namespace="default").verify(0.0)
@@ -423,6 +470,80 @@ def test_plural_match_across_objects_without_across_matches_is_an_explicit_error
     assert "web" in result.reason and "api" in result.reason
 
 
+def _fake_get_resource_by_name(objects: dict[str, dict[str, Any]]) -> Any:
+    """Stand in for ``kubectl get <kind> <name>``: a ``name`` arg fetches the
+    one matching object; without it, every object in the namespace comes back
+    as a list. Mirrors what real ``get_resource`` does, unlike a fixed
+    ``return_value`` mock, which is what let a name-scoped check silently
+    evaluate against every object in the namespace go unnoticed.
+    """
+
+    def _get(
+        kind: str,
+        name: str | None = None,
+        *,
+        selector: str | None = None,
+        namespace: str | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        if name:
+            return objects[name]
+        return _items(*objects.values())
+
+    return _get
+
+
+def test_name_scoped_check_resolves_only_the_named_object() -> None:
+    """Regression: run_20260804_021227_387823, entry ``pod-ready@ingest.wl``.
+
+    A ``resource_property`` check carrying ``name`` (not ``resource_name``)
+    against a namespace with several same-kind objects must evaluate the
+    named object alone. It used to fetch the whole namespace instead, since
+    ``name`` lands on ``BaseVerifier.name`` (a result label) rather than
+    ``resource_name``, and the check failed with an across_matches refusal
+    even though the named object's own value satisfied the check.
+    """
+    objects = {
+        "aggregator": _deployment("aggregator", ready=2),
+        "ingest": _deployment("ingest", ready=3),
+        "transform": _deployment("transform", ready=2),
+    }
+    with patch(_GET, side_effect=_fake_get_resource_by_name(objects)):
+        result = _verifier(
+            name="ingest",
+            namespace="analytics",
+            path="status.readyReplicas",
+            op="eq",
+            value=3,
+        ).verify(0.0)
+    assert result.success is True
+    assert result.status == "pass"
+    assert "across_matches" not in result.reason
+
+
+def test_name_scoped_check_fails_on_the_named_object_alone() -> None:
+    """Same shape as above, wrong value: must fail with a single-object
+    reason naming ``ingest``'s own value, never the across_matches refusal
+    that resolving against the whole namespace would produce.
+    """
+    objects = {
+        "aggregator": _deployment("aggregator", ready=2),
+        "ingest": _deployment("ingest", ready=3),
+        "transform": _deployment("transform", ready=2),
+    }
+    with patch(_GET, side_effect=_fake_get_resource_by_name(objects)):
+        result = _verifier(
+            name="ingest",
+            namespace="analytics",
+            path="status.readyReplicas",
+            op="eq",
+            value=2,
+        ).verify(0.0)
+    assert result.success is False
+    assert result.status == "fail"
+    assert "across_matches" not in result.reason
+
+
 def test_plural_match_within_one_object_without_across_matches_is_an_explicit_error() -> None:
     with patch(_GET, return_value=_multi_container_deployment()):
         result = _verifier(
@@ -443,21 +564,37 @@ def test_a_single_flat_match_evaluates_normally_without_across_matches() -> None
     assert result.success is True
 
 
-@pytest.mark.parametrize("across_matches", ["every", "none"])
-def test_zero_matched_objects_fails_closed_for_every_across_matches(across_matches: str) -> None:
-    # The zero-object guard runs before flattening, so both reductions fail
-    # closed on zero matches rather than deferring to their own vacuous-match
-    # semantics (e.g. "every" of an empty set).
+def test_zero_matched_objects_fails_closed_for_every_across_matches() -> None:
+    # The zero-object guard runs before flattening, so "every" still fails
+    # closed on zero matches rather than deferring to its own vacuous-match
+    # semantics ("every" of an empty set).
     with patch(_GET, return_value=_items()):
         result = _verifier(
             op="gte",
             value=1,
             path="status.readyReplicas",
             selector="app=web",
-            across_matches=across_matches,
+            across_matches="every",
         ).verify(0.0)
     assert result.success is False
     assert result.reason == "no deployment matched"
+
+
+def test_zero_matched_objects_vacuously_passes_none_across_matches() -> None:
+    # Regression: T-031, entry no-active-jobs@recon.cj. Zero objects matching
+    # the selector is exactly the success state for `across_matches: none`
+    # ("no object violates op") -- an emptied-out backlog satisfies it, it
+    # does not fail it.
+    with patch(_GET, return_value=_items()):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="app=web",
+            across_matches="none",
+        ).verify(0.0)
+    assert result.success is True
+    assert "nothing violates" in result.reason
 
 
 def test_path_resolves_to_nothing_across_matches_none_passes() -> None:
@@ -818,6 +955,99 @@ def test_across_matches_none_element_wise_suffix_empty_filter_terminated_path_pa
             across_matches="none",
         ).verify(0.0)
     assert result.success is True
+
+
+# -- selector-mode reason summarization ----------------------------------
+
+
+def test_small_violation_set_enumerates_every_violator() -> None:
+    # Regression: T-029, entry no-broad-binding-for-sa. A small violation set
+    # must still name every violator; only a large one gets capped.
+    payload = _items(
+        _deployment("web", ready=2),
+        _deployment("api", ready=0),
+        _deployment("worker", ready=0),
+    )
+    with patch(_GET, return_value=payload):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="tier=app",
+            across_matches="every",
+        ).verify(0.0)
+    assert result.success is False
+    assert "api" in result.reason
+    assert "worker" in result.reason
+    assert "more" not in result.reason
+
+
+def test_large_violation_set_is_capped_with_an_accurate_remainder_count() -> None:
+    # Eight violators is well over the enumeration cap; the reason must stay
+    # short (a selector-mode failure enumerating every violating object used
+    # to run to ~4,000 characters) while still saying how many there were.
+    deployments = [_deployment(f"app-{i}", ready=0) for i in range(8)]
+    payload = _items(*deployments)
+    with patch(_GET, return_value=payload):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="tier=app",
+            across_matches="every",
+        ).verify(0.0)
+    assert result.success is False
+    assert "8 violate" in result.reason
+    assert "and 3 more" in result.reason
+    assert len(result.reason) < 700
+    assert result.raw is not None
+    assert len(result.raw["violations"]) == 8
+
+
+def test_capped_reason_still_carries_the_full_detail_on_raw() -> None:
+    deployments = [_deployment(f"app-{i}", ready=0) for i in range(8)]
+    payload = _items(*deployments)
+    with patch(_GET, return_value=payload):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="tier=app",
+            across_matches="every",
+        ).verify(0.0)
+    assert result.raw is not None
+    assert all(f"app-{i}" in "".join(result.raw["violations"]) for i in range(8))
+
+
+def test_element_wise_violation_set_is_also_capped() -> None:
+    # Same cap applies to the wildcard/element-wise reduction path (e.g. a
+    # ClusterRoleBinding-per-subject sweep), not just the flat value-wise one.
+    deployment = _security_context_deployment(*([False] * 8))
+    with patch(_GET, return_value=deployment):
+        result = _verifier(
+            op="eq",
+            value=True,
+            path=_SECURITY_CONTEXT_PATH,
+            resource_name="web",
+            across_matches="none",
+        ).verify(0.0)
+    assert result.success is True
+    assert "none violate" in result.reason
+
+
+def test_element_wise_violation_set_over_the_cap_is_capped() -> None:
+    deployment = _security_context_deployment(*([True] * 8))
+    with patch(_GET, return_value=deployment):
+        result = _verifier(
+            op="eq",
+            value=True,
+            path=_SECURITY_CONTEXT_PATH,
+            resource_name="web",
+            across_matches="none",
+        ).verify(0.0)
+    assert result.success is False
+    assert "8 violate" in result.reason
+    assert "and 3 more" in result.reason
 
 
 # -- jsonpath filters ---------------------------------------------------
