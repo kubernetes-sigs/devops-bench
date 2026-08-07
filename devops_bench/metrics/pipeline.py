@@ -152,12 +152,37 @@ def _finalize_outcome_score(scores: dict[str, Any]) -> None:
     recoverable sources emit a raw pass fraction; the ``[0.1, 1.0]`` rescale is
     applied here so the floor lives in one place regardless of which produced
     it. Records with no correctness signal at all (e.g. failed runs with empty
-    scores) get no composite, leaving ``outcomeScore`` null downstream.
+    scores) get no composite, leaving ``outcomeScore`` null downstream. A
+    record where deterministic verification was declared but every entry
+    errored also gets no composite, for the same reason: see the coverage
+    check below.
 
     Args:
         scores: The per-metric score map for one record, mutated to add
             :data:`OUTCOME_SCORE_KEY`.
     """
+    # ``VerificationCoverage`` is emitted unconditionally whenever the task
+    # declared deterministic verification (see ``VerificationMetric.applies``),
+    # even when every entry errored and ``VerificationCorrectness`` therefore
+    # never gets emitted. Its presence without a correctness score means
+    # verification was attempted and produced nothing, not that nothing was
+    # declared. An errored check is an unmeasured objective, not a satisfied
+    # one: falling through to the judged keys in that case would let a judge's
+    # reading of prose stand in for a deterministic check that failed to run,
+    # making a totally broken verification pass indistinguishable from a clean
+    # sweep. So this case is withheld rather than routed through the fallback
+    # chain below, which exists only for tasks that declared no deterministic
+    # verification at all.
+    if score_keys.VERIFICATION_COVERAGE_KEY in scores and (
+        _score_value(scores.get(score_keys.VERIFICATION_CORRECTNESS_KEY)) is None
+    ):
+        _log.warning(
+            "Withholding composite outcome score: deterministic verification "
+            "was declared but produced no correctness signal (see "
+            "VerificationCoverage)."
+        )
+        return
+
     correctness = _first_score(scores, _CORRECTNESS_KEYS)
     if correctness is None:
         return

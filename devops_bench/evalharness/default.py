@@ -57,6 +57,7 @@ from devops_bench.evalharness.scenario import (
 from devops_bench.tasks import Task
 from devops_bench.verification import (
     MIN_LEAF_BUDGET_SECONDS,
+    BaseVerifier,
     VerificationEntry,
     VerifierAgent,
     parse_entries,
@@ -121,6 +122,60 @@ def _ensure_builtin_agents_registered() -> None:
             # raise a clear ``NotRegisteredError`` later if the user selects
             # an agent whose module did not load.
             _log.debug("optional agent module %s not importable: %s", module, exc)
+
+
+def _pin_verifier_leaves(node: Any, kubeconfig: str | None, context: str | None) -> None:
+    """Set ``kubeconfig``/``context`` on every leaf verifier under ``node``, recursively.
+
+    A leaf (``BaseVerifier``) is pinned directly. A compound node (sequence,
+    parallel, any, none) has no cluster identity of its own, so this recurses
+    into its ``checks`` instead of touching it.
+
+    Args:
+        node: A parsed verification spec node: a leaf verifier or a compound
+            node exposing ``checks``.
+        kubeconfig: Resolved kubeconfig path, or None to leave the verifier's
+            existing (usually unset) value alone.
+        context: Resolved kubeconfig context, or None to leave the verifier's
+            existing value alone.
+    """
+    if isinstance(node, BaseVerifier):
+        if kubeconfig is not None:
+            node.kubeconfig = kubeconfig
+        if context is not None:
+            node.context = context
+        return
+    for child in getattr(node, "checks", []):
+        _pin_verifier_leaves(child, kubeconfig, context)
+
+
+def _pin_verification_targets(
+    entries: list[VerificationEntry], kubeconfig: str | None, context: str | None
+) -> None:
+    """Pin every entry's verifier leaves to the run's own cluster.
+
+    Verifiers otherwise carry no cluster identity and fall through to
+    whatever the host's ambient kubeconfig current-context happens to be,
+    which is not necessarily the cluster this run just provisioned and the
+    agent just acted on. Called once, right after the entries are parsed, so
+    both the background chaos scenario's checks and the post-run
+    verification pass (which share these same entry objects) are pinned.
+
+    Args:
+        entries: The task's parsed verification entries, mutated in place.
+        kubeconfig: Resolved kubeconfig path for the run's cluster.
+        context: Resolved kubeconfig context for the run's cluster, or None
+            when it could not be resolved (verification then runs unpinned
+            against whatever context is ambient).
+    """
+    if context is None:
+        _log.warning(
+            "no kubeconfig context resolved for this run's cluster; verification "
+            "will run unpinned and may target the wrong cluster if the ambient "
+            "kubeconfig's current-context does not point at it"
+        )
+    for entry in entries:
+        _pin_verifier_leaves(entry.check, kubeconfig, context)
 
 
 class DefaultEvalHarness(Harness):
@@ -767,6 +822,15 @@ class DefaultEvalHarness(Harness):
                     len(verification_parse_errors),
                     verification_parse_errors,
                 )
+            # Pin every verifier leaf to this run's own cluster before anything
+            # evaluates a check, so a stray ambient current-context (or none
+            # selected at all) cannot make verification silently read a
+            # different cluster than the one the agent just acted on. This
+            # deliberately keeps the operator's admin credential
+            # (``cluster_info.kubeconfig_path`` / ``.context``) rather than the
+            # agent's own scoped ``/workspace/kubeconfig``: verification must be
+            # able to observe state the agent could not itself have written.
+            _pin_verification_targets(entries, cluster_info.kubeconfig_path, cluster_info.context)
             verification_mapping = {entry.name: entry for entry in entries}
 
             # Hand the background scenario its own context with an isolated

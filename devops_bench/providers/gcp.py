@@ -50,7 +50,9 @@ class GcpProvider(Provider):
             variables: OpenTofu input variables the cluster was provisioned with.
 
         Returns:
-            The cluster's :class:`~devops_bench.core.ClusterInfo`.
+            The cluster's :class:`~devops_bench.core.ClusterInfo`, carrying
+            the ``gke_<project>_<location>_<cluster>`` context ``gcloud``
+            wrote into the kubeconfig.
 
         Raises:
             ConfigError: If no project is resolvable from ``variables`` or the
@@ -99,7 +101,12 @@ class GcpProvider(Provider):
             )
 
         return ClusterInfo.from_dict(
-            {"name": cluster_name, "location": location, "project": project}
+            {
+                "name": cluster_name,
+                "location": location,
+                "project": project,
+                "context": context_name,
+            }
         )
 
     def resolve_variables(

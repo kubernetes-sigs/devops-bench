@@ -19,9 +19,15 @@ from devops_bench.verification.verifiers.resource_property import (
     ResourcePropertyVerifier,
 )
 from devops_bench.verification.verifiers.scaling_complete import ScalingCompleteVerifier
+from devops_bench.verification.verifiers.subject_access_review import (
+    SubjectAccessReviewSweepVerifier,
+    SubjectAccessReviewVerifier,
+)
 
 __all__ = [
     "PodHealthyVerifier",
     "ResourcePropertyVerifier",
     "ScalingCompleteVerifier",
+    "SubjectAccessReviewSweepVerifier",
+    "SubjectAccessReviewVerifier",
 ]

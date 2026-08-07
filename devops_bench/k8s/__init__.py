@@ -17,6 +17,7 @@
 from devops_bench.k8s.conditions import poll_until
 from devops_bench.k8s.kubectl import (
     apply,
+    can_i,
     get_resource,
     port_forward,
     rollout_status,
@@ -25,6 +26,7 @@ from devops_bench.k8s.kubectl import (
 
 __all__ = [
     "apply",
+    "can_i",
     "get_resource",
     "poll_until",
     "port_forward",
