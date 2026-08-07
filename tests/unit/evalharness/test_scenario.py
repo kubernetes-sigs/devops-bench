@@ -34,7 +34,11 @@ from devops_bench.chaos import ChaosResult, ChaosSpec
 from devops_bench.chaos.faults.generate_load import GenerateLoadFault
 from devops_bench.chaos.triggers.time_delay import TimeTrigger
 from devops_bench.core.context import RunContext
-from devops_bench.evalharness.scenario import ScenarioManager, pick_free_port
+from devops_bench.evalharness.scenario import (
+    VERIFICATION_TIMEOUT_SEC,
+    ScenarioManager,
+    pick_free_port,
+)
 from devops_bench.verification import VerificationResult, VerifierAgent
 from devops_bench.verification.base import VERIFIERS, BaseVerifier
 from devops_bench.verification.spec import parse_entries
@@ -242,7 +246,9 @@ def test_scenario_resolves_verify_against_mapping() -> None:
     # ``check`` node) flowed straight to the VerifierAgent: the lookup is O(1),
     # never imports verification on the chaos side, and the entry's resolved
     # mode (converge vs assert) governs the check.
-    mock_run_entry.assert_called_once_with(verification_entry, timeout_sec=120)
+    mock_run_entry.assert_called_once_with(
+        verification_entry, timeout_sec=VERIFICATION_TIMEOUT_SEC
+    )
 
     chaos_report, perf_report = manager.get_reports()
     assert chaos_report["verification"]["success"] is True
