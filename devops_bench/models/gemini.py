@@ -29,9 +29,11 @@ from devops_bench.models.base import MODELS, LLMClient
 try:
     from google import genai
     from google.genai import types
+    import google.auth as google_auth
 except ImportError:  # pragma: no cover - exercised only without the SDK
     genai = None
     types = None
+    google_auth = None
 
 __all__ = ["GeminiClientAdapter", "filter_schema_for_gemini"]
 
@@ -71,6 +73,24 @@ def _backoff_delay(attempt: int) -> float:
     """Full-jitter exponential backoff delay for ``attempt`` (0-based)."""
     ceiling = min(_MAX_DELAY_SEC, _BASE_DELAY_SEC * (2**attempt))
     return random.uniform(0.0, ceiling)
+
+
+def _vertex_client(*, project_id: str | None, location: str) -> Any:
+    """Build a Vertex-mode ``genai.Client`` authenticated with ADC, explicitly.
+
+    google-genai's Vertex mode silently prefers API-key/express auth over
+    Application Default Credentials whenever ``GOOGLE_API_KEY`` (or
+    ``GEMINI_API_KEY``) is present in the environment. Those are exactly the
+    variables exported for the sandboxed coding agent this client judges, so
+    without this, the judge's own Vertex calls would authenticate as the
+    agent rather than as the judge. Resolving ADC explicitly and handing the
+    credentials to the client closes that path: the client is never given a
+    chance to fall back to an env API key it was never told to look for.
+    """
+    credentials, _ = google_auth.default()
+    return genai.Client(
+        vertexai=True, project=project_id, location=location, credentials=credentials
+    )
 
 
 _SUPPORTED_SCHEMA_FIELDS = frozenset(
@@ -229,17 +249,21 @@ class GeminiClientAdapter(LLMClient):
 
         project_id = get_env("GCP_PROJECT_ID")
         location = get_env("GCP_VERTEX_LOCATION", "global")
+        # This is the judge's own explicit key input, not an ambient env var:
+        # judge auth must not depend on whatever the agent's own environment
+        # happens to carry (see _vertex_client for the Vertex-mode case where
+        # the SDK itself would otherwise reach for one).
         api_key = get_env("AGENT_API_KEY")
 
         # ``backend == "vertex"`` (the ``google-vertex`` provider) forces Vertex
         # AI regardless of an API key, so the provider — not key presence —
         # decides the backend. Otherwise infer as before.
         if backend == "vertex":
-            self.client = genai.Client(vertexai=True, project=project_id, location=location)
+            self.client = _vertex_client(project_id=project_id, location=location)
         elif api_key:
             self.client = genai.Client(api_key=api_key)
         elif project_id:
-            self.client = genai.Client(vertexai=True, project=project_id, location=location)
+            self.client = _vertex_client(project_id=project_id, location=location)
         else:
             self.client = genai.Client()
 
