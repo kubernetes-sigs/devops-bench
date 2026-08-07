@@ -28,6 +28,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pytest_mock import MockerFixture
 
 from devops_bench.core import ClusterInfo, ConfigError
 from devops_bench.deployers.tofu import _TF_ROOT, TFDeployer
@@ -40,17 +41,32 @@ class StubProvider(Provider):
     def __init__(self) -> None:
         self.account_calls = 0
         self.cluster_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.output_calls: list[dict[str, Any] | None] = []
+        self.cleanup_calls: list[tuple[ClusterInfo, dict[str, Any] | None, bool]] = []
 
     def ensure_account_credentials(self) -> None:
         self.account_calls += 1
 
     def ensure_cluster_credentials(
-        self, cluster_name: str, location: str, variables: dict[str, Any]
+        self,
+        cluster_name: str,
+        location: str,
+        variables: dict[str, Any],
+        outputs: dict[str, Any] | None = None,
     ) -> ClusterInfo:
         self.cluster_calls.append((cluster_name, location, variables))
+        self.output_calls.append(outputs)
         return ClusterInfo.from_dict(
             {"name": cluster_name, "location": location, "project": variables.get("project_id")}
         )
+
+    def cleanup(
+        self,
+        cluster_info: ClusterInfo,
+        variables: dict[str, Any] | None = None,
+        success: bool = True,
+    ) -> None:
+        self.cleanup_calls.append((cluster_info, variables, success))
 
     def resolve_variables(
         self, ctx: ResolveContext, custom_variables: dict[str, Any]
@@ -138,6 +154,35 @@ def test_down(mocker, monkeypatch, tf_deployer, provider):
         "node_count=3",
     ]
 
+    assert len(provider.cleanup_calls) == 1
+    cleanup_info, cleanup_vars, success = provider.cleanup_calls[0]
+    assert cleanup_info.name == "test-cluster"
+    assert cleanup_info.location == "us-central1-a"
+    assert cleanup_info.project == "test-project"
+    assert cleanup_vars == tf_deployer.variables
+    assert success is True
+
+
+def test_down_missing_tf_dir_skips_destroy_but_runs_cleanup(
+    mocker: MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tf_deployer: TFDeployer,
+    provider: StubProvider,
+) -> None:
+    monkeypatch.delenv("TF_DATA_DIR", raising=False)
+    mock_run = mocker.patch("devops_bench.deployers.tofu.run")
+    tf_deployer.work_dir = "/nonexistent/path/for/test"
+
+    tf_deployer.down()
+
+    mock_run.assert_not_called()
+    assert provider.account_calls == 0
+    assert len(provider.cleanup_calls) == 1
+    cleanup_info, cleanup_vars, success = provider.cleanup_calls[0]
+    assert cleanup_info.name == "test-cluster"
+    assert cleanup_vars == tf_deployer.variables
+    assert success is False
+
 
 def test_up_isolates_state_beside_tf_data_dir(mocker, monkeypatch, tmp_path, tf_deployer):
     monkeypatch.setenv("TF_DATA_DIR", str(tmp_path / "tf-data"))
@@ -193,6 +238,9 @@ def test_get_cluster_info_parses_and_delegates(mocker, monkeypatch, tf_deployer,
 
     # Parsed outputs are handed to the provider, which builds the ClusterInfo.
     assert provider.cluster_calls == [("test-cluster", "us-central1-a", tf_deployer.variables)]
+    assert provider.output_calls == [
+        {"cluster_name": "test-cluster", "cluster_location": "us-central1-a"}
+    ]
     assert info.name == "test-cluster"
     assert info.location == "us-central1-a"
     assert info.project == "test-project"
@@ -226,6 +274,15 @@ def test_get_cluster_info_bad_json_raises(mocker, tf_deployer):
     mocker.patch("devops_bench.deployers.tofu.run", side_effect=[MagicMock(), proc])
 
     with pytest.raises(ConfigError, match="tofu output"):
+        tf_deployer.get_cluster_info()
+
+
+def test_get_cluster_info_non_dict_json_raises(mocker, tf_deployer):
+    proc = MagicMock()
+    proc.stdout = '["not-a-dict"]'
+    mocker.patch("devops_bench.deployers.tofu.run", side_effect=[MagicMock(), proc])
+
+    with pytest.raises(ConfigError, match="Expected dict from 'tofu output -json'"):
         tf_deployer.get_cluster_info()
 
 

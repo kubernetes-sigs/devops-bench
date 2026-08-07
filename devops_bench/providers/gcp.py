@@ -40,7 +40,11 @@ class GcpProvider(Provider):
         _log.debug("GCP provider: assuming ambient application-default credentials")
 
     def ensure_cluster_credentials(
-        self, cluster_name: str, location: str, variables: dict[str, Any]
+        self,
+        cluster_name: str,
+        location: str,
+        variables: dict[str, Any],
+        outputs: dict[str, Any] | None = None,
     ) -> ClusterInfo:
         """Configure ``kubectl`` for a GKE cluster via ``gcloud``.
 
@@ -48,6 +52,7 @@ class GcpProvider(Provider):
             cluster_name: Cluster name from the stack outputs.
             location: Cloud region or zone from the stack outputs.
             variables: OpenTofu input variables the cluster was provisioned with.
+            outputs: Optional OpenTofu output values from provisioning.
 
         Returns:
             The cluster's :class:`~devops_bench.core.ClusterInfo`.
@@ -101,6 +106,15 @@ class GcpProvider(Provider):
         return ClusterInfo.from_dict(
             {"name": cluster_name, "location": location, "project": project}
         )
+
+    def cleanup(
+        self,
+        cluster_info: ClusterInfo,
+        variables: dict[str, Any] | None = None,
+        success: bool = True,
+    ) -> None:
+        """No-op: GKE cluster cleanup is handled by stack teardown."""
+        del success
 
     def resolve_variables(
         self, ctx: ResolveContext, custom_variables: dict[str, Any]

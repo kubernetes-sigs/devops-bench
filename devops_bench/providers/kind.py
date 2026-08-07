@@ -36,7 +36,11 @@ class KindProvider(Provider):
         """No-op: local clusters require no cloud identity."""
 
     def ensure_cluster_credentials(
-        self, cluster_name: str, location: str, variables: dict[str, Any]
+        self,
+        cluster_name: str,
+        location: str,
+        variables: dict[str, Any],
+        outputs: dict[str, Any] | None = None,
     ) -> ClusterInfo:
         """Describe a local cluster; its kubeconfig is already on disk.
 
@@ -44,6 +48,7 @@ class KindProvider(Provider):
             cluster_name: Cluster name from the stack outputs.
             location: Location from the stack outputs (typically ``"local"``).
             variables: OpenTofu input variables the cluster was provisioned with.
+            outputs: Optional OpenTofu output values from provisioning.
 
         Returns:
             The cluster's :class:`~devops_bench.core.ClusterInfo`; ``project``
@@ -58,6 +63,15 @@ class KindProvider(Provider):
                 "kubeconfig_path": variables.get("kubeconfig_path"),
             }
         )
+
+    def cleanup(
+        self,
+        cluster_info: ClusterInfo,
+        variables: dict[str, Any] | None = None,
+        success: bool = True,
+    ) -> None:
+        """No-op: local KinD cluster cleanup is handled by stack teardown."""
+        del success
 
     def resolve_variables(
         self, ctx: ResolveContext, custom_variables: dict[str, Any]

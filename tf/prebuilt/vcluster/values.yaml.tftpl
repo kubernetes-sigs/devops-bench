@@ -1,0 +1,81 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+controlPlane:
+  service:
+    enabled: false
+  statefulSet:
+    enableServiceLinks: false
+    persistence:
+      volumeClaim:
+        enabled: false
+  proxy:
+    extraSANs:
+      - localhost
+      - 127.0.0.1
+      - kubernetes.default.svc
+      - ${replace(endpoint, "/:[0-9]+$/", "")}
+  advanced:
+    serviceAccount:
+      enabled: true
+
+exportKubeConfig:
+  server: "https://${endpoint}"
+
+policies:
+  resourceQuota:
+    enabled: true
+    quota:
+      limits.cpu: "6"
+      limits.memory: "24Gi"
+      requests.cpu: "6"
+      requests.memory: "24Gi"
+
+rbac:
+  role:
+    enabled: true
+  clusterRole:
+    enabled: true
+    extraRules:
+      - apiGroups: [""]
+        resources: ["nodes", "persistentvolumes"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["storage.k8s.io"]
+        resources: ["storageclasses"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["networking.k8s.io"]
+        resources: ["servicecidrs"]
+        verbs: ["get", "list", "watch"]
+
+sync:
+  toHost:
+    persistentVolumes:
+      enabled: true
+    persistentVolumeClaims:
+      enabled: true
+  fromHost:
+    storageClasses:
+      enabled: true
+    nodes:
+      enabled: true
+      selector:
+        all: true
+
+serviceCIDR: "34.118.224.0/20"
+
+experimental:
+  syncSettings:
+    syncLabels:
+      - devops-bench/run-scoped
+      - devops-bench/cluster-name
