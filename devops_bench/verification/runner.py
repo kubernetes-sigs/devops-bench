@@ -78,18 +78,13 @@ _SINGLE_SHOT_WAIT_CEILING_SEC = 120.0
 # path and the single-shot wait-ceiling path in :meth:`VerifierAgent._run_parallel`.
 _PARALLEL_INCOMPLETE_REASON = "evaluation did not complete before the deadline"
 
-# Converge-mode children are handed a deadline this much earlier than the
-# parent's own wait, so the parent outlives its children instead of racing
-# them for the same instant. Without this margin, a child that genuinely
-# converges right at the deadline is frequently not yet in ``done`` when the
-# parent's ``futures_wait`` returns, and its real observed result is
-# discarded in favor of the generic incomplete-evaluation placeholder.
-_CHILD_DEADLINE_MARGIN_SEC = 0.25
-
 # After the parent's initial wait, converge-mode children still pending are
-# given one short additional pass to land, so a result that completes in the
-# margin gap is used instead of the placeholder. Kept brief since it is a
-# straggler catch, not a second budget.
+# given one short additional pass to land, so a child that finishes just
+# after the parent's ``futures_wait`` returns is still picked up instead of
+# falling back to the placeholder. This is a straggler catch for the
+# collection race at the deadline instant, not a second polling budget: the
+# child is handed the parent's own deadline and keeps polling right up to
+# it, same as any other node.
 _STRAGGLER_GRACE_SEC = 0.5
 
 
@@ -521,20 +516,22 @@ class VerifierAgent:
         clamped to whichever of the ceiling and the remaining deadline is
         smaller.
 
-        Under converge, children are also submitted against a deadline
-        slightly earlier than the parent's own wait (see
-        :data:`_CHILD_DEADLINE_MARGIN_SEC`) and, if any are still pending
-        once the parent's wait returns, given one short additional grace
-        pass (see :data:`_STRAGGLER_GRACE_SEC`) before falling back to the
-        placeholder. Both exist for the same reason: a child converging
-        right at the shared deadline otherwise races the parent for the same
-        instant, and its real observed result is lost to the generic
-        incomplete-evaluation placeholder more often than not. ``single_shot``
-        keeps racing the same ceiling-bound instant on purpose: the ceiling
-        is already the hard backstop against a hung safeguard leaf stalling
-        the run, and stretching it with a grace period would blur that bound
-        for the sake of a mode where a late "error" verdict is already the
-        correct, safe answer.
+        Under converge, children are submitted against the same shared
+        ``deadline`` the parent itself waits on, so a child keeps polling
+        right up to it instead of losing part of its budget to an earlier
+        cutoff. If any are still pending once the parent's wait returns,
+        one short additional grace pass (see :data:`_STRAGGLER_GRACE_SEC`)
+        is given before falling back to the placeholder: a child converging
+        right at the shared deadline can still race the parent for the same
+        instant and not yet be in ``done`` when the parent's ``futures_wait``
+        returns, even though it already has a real observed result. The
+        grace pass exists to collect that result, not to extend how long a
+        child gets to converge. ``single_shot`` keeps racing the same
+        ceiling-bound instant on purpose: the ceiling is already the hard
+        backstop against a hung safeguard leaf stalling the run, and
+        stretching it with a grace period would blur that bound for the sake
+        of a mode where a late "error" verdict is already the correct, safe
+        answer.
         """
         start = time.monotonic()
         results: list[VerificationResult] = [
@@ -547,18 +544,8 @@ class VerifierAgent:
         # ``verify(remaining)`` call, so they cannot linger long.
         ex = ThreadPoolExecutor(max_workers=workers)
         try:
-            remaining = deadline - time.monotonic()
-            # Only shrink the child's deadline when there is enough budget that
-            # doing so still clears _MIN_LEAF_BUDGET_SECONDS by a real margin;
-            # a child's own floor check runs later still (thread-pool dispatch
-            # takes a little time), so landing the child deadline exactly at
-            # the floor would make that check flaky rather than reliable.
-            if single_shot or remaining <= _MIN_LEAF_BUDGET_SECONDS + _CHILD_DEADLINE_MARGIN_SEC:
-                child_deadline = deadline
-            else:
-                child_deadline = deadline - _CHILD_DEADLINE_MARGIN_SEC
             futs = {
-                ex.submit(self._run, child, child_deadline, single_shot=single_shot): i
+                ex.submit(self._run, child, deadline, single_shot=single_shot): i
                 for i, child in enumerate(node.checks)
             }
             if single_shot:

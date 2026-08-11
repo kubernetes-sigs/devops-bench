@@ -48,6 +48,12 @@ class _FakeLeaf(BaseVerifier):
             a check that could not be evaluated.
         boom: When true, :meth:`verify` raises instead of returning a result.
         sleep_for: Seconds to block inside :meth:`verify` before returning.
+        converge_after: When set, models a resource that only converges once
+            it has been polled for this many seconds. Succeeds only if the
+            ``timeout_sec`` it is actually handed is at least this long
+            (sleeping for it before returning success); otherwise it sleeps
+            out its shorter budget and reports a fail, as an unconverged
+            resource would. Takes precedence over ``succeed``/``sleep_for``.
         tag: Label folded into the result ``reason`` for assertions.
     """
 
@@ -56,12 +62,28 @@ class _FakeLeaf(BaseVerifier):
     status: Literal["pass", "fail", "error"] | None = None
     boom: bool = False
     sleep_for: float = 0.0
+    converge_after: float | None = None
     tag: str = ""
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         """Return (or raise) a canned result, echoing the budget it was given."""
         if self.boom:
             raise RuntimeError(f"boom:{self.tag}")
+        if self.converge_after is not None:
+            if timeout_sec >= self.converge_after:
+                time.sleep(self.converge_after)
+                success = True
+            else:
+                time.sleep(timeout_sec)
+                success = False
+            return VerificationResult(
+                success=success,
+                status=None,
+                elapsed_time=0.0,
+                reason=f"leaf:{self.tag}",
+                name=self.name,
+                raw={"timeout_sec": timeout_sec},
+            )
         if self.sleep_for:
             time.sleep(self.sleep_for)
         return VerificationResult(
@@ -347,8 +369,7 @@ def test_parallel_converge_hung_child_alongside_an_observed_fail_stays_fail(
     # The deadline must clear _MIN_LEAF_BUDGET_SECONDS by a real margin so both
     # leaves' verify() calls are actually invoked (and the hung one outlasts
     # the wait) rather than being short-circuited by the per-leaf min-budget
-    # guard before they ever run; 1.5s leaves ~0.25s of that margin after the
-    # child-deadline clamp, same as the neighboring converge tests.
+    # guard before they ever run.
     spec = {
         "type": "parallel",
         "checks": [
@@ -431,6 +452,36 @@ def test_parallel_converge_close_race_uses_straggler_grace_pass(
     assert res.children[0].status == "fail"
     assert res.children[0].reason == "leaf:closerace"
     assert res.children[0].raw is not None
+
+
+def test_parallel_converge_child_polls_through_the_full_parent_deadline(
+    agent: VerifierAgent,
+) -> None:
+    """A converge child is not cut short by a deadline earlier than the parent's.
+
+    The child here only converges (succeeds) once it has actually been
+    polled for 1.4s. The parent's own deadline is 1.5s away, so the child
+    has enough real budget to converge, and must be handed all of it: if it
+    were instead started against a deadline shortened by any real margin
+    (as the pre-fix code did), it would run out of budget at ~1.25s, sleep
+    out that shorter window, and report an unconverged fail before ever
+    reaching its actual convergence point. That failure would then not be
+    rescued by the straggler grace pass, since the grace pass only waits
+    longer for an in-flight future to finish; it cannot hand the child back
+    time it was never given to converge in the first place.
+    """
+    spec = {
+        "type": "parallel",
+        "checks": [_leaf(converge_after=1.4, tag="lateconverge")],
+    }
+
+    res = agent.wait_for_condition(spec, timeout_sec=1.5)
+
+    assert res.status == "pass"
+    assert res.children[0].status == "pass"
+    assert res.children[0].reason == "leaf:lateconverge"
+    assert res.children[0].raw is not None
+    assert res.children[0].raw["timeout_sec"] >= 1.4
 
 
 def test_parallel_converge_still_hung_after_grace_yields_placeholder(
