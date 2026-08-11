@@ -58,14 +58,14 @@ def _validate_root(root: Path) -> Path:
         raise ValueError(f"scratch root must be an absolute path, got {root!r}")
     resolved = root.resolve()
     home = Path.home().resolve()
+    if resolved == home:
+        raise ValueError(f"scratch root must not resolve to the home directory, got {root!r}")
     depth = len(resolved.parts) - 1
     if depth < 2:
         raise ValueError(
             f"scratch root must resolve at least two levels below the filesystem root, "
             f"got {root!r} (resolved: {resolved})"
         )
-    if resolved == home:
-        raise ValueError(f"scratch root must not resolve to the home directory, got {root!r}")
     return resolved
 
 
