@@ -300,6 +300,18 @@ def test_hold_verdict_every_sample_errored_is_error() -> None:
     assert "could never be evaluated" in reason
 
 
+def test_hold_verdict_a_single_sample_that_errored_is_still_an_error() -> None:
+    """A window with exactly one sample, and that sample errored, is caught by the
+    all-errored rule (error_count == sample_count), not by the trailing-error rule."""
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=False, status="error", reason="boom"), 0.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is False
+    assert status == "error"
+    assert "could never be evaluated" in reason
+
+
 def test_hold_verdict_a_window_that_errors_then_recovers_and_ends_clean_is_a_pass() -> None:
     """Regression: an error absorbed mid-window must not sink an otherwise clean hold."""
     obs = HoldObservation()
@@ -312,19 +324,50 @@ def test_hold_verdict_a_window_that_errors_then_recovers_and_ends_clean_is_a_pas
     assert obs.error_count == 1
 
 
-def test_hold_verdict_a_window_ending_on_an_error_is_an_error_even_after_recovering_earlier() -> (
-    None
-):
+def test_hold_verdict_a_single_trailing_error_after_clean_samples_is_a_pass() -> None:
+    """A single errored sample at the end of the window is absorbed as noise.
+
+    Was previously an "error": one transient kubectl blip on the last poll
+    used to null the whole entry. Now the trailing-error rule only fires on
+    a sustained run of HOLD_TRAILING_ERROR_SAMPLES consecutive errors, so a
+    lone trailing error is treated the same as any other absorbed error.
+    """
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=True, reason="held"), 0.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="transient blip"), 1.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is True
+    assert status == "pass"
+    assert obs.error_count == 1
+
+
+def test_hold_verdict_a_window_ending_on_two_consecutive_errors_is_an_error() -> None:
     """Regression: a window that never recovers by its end must not read as a pass."""
     obs = HoldObservation()
     _fold_sample(obs, _result(success=True, reason="held"), 0.0)
-    _fold_sample(obs, _result(success=False, status="error", reason="never recovered"), 1.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="blip one"), 1.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="never recovered"), 2.0)
 
     success, status, reason = hold_verdict(obs)
     assert success is False
     assert status == "error"
     assert "never recovered" in reason
     assert obs.error_count < obs.sample_count  # not every sample errored
+
+
+def test_hold_verdict_a_mid_window_error_that_recovers_resets_the_trailing_run() -> None:
+    """A middle error followed by a clean sample resets the run, so a later single
+    trailing error still passes rather than accumulating across the recovery."""
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=False, status="error", reason="blip one"), 0.0)
+    _fold_sample(obs, _result(success=True, reason="held"), 1.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="blip two"), 2.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is True
+    assert status == "pass"
+    assert obs.error_count == 2
 
 
 def test_hold_verdict_a_violation_is_a_fail_regardless_of_later_recovery() -> None:

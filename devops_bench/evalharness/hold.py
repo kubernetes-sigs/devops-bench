@@ -84,6 +84,17 @@ _log = get_logger("evalharness.hold")
 # devops_bench.evalharness.scenario.
 HOLD_POLL_INTERVAL_SEC = float(os.environ.get("BENCH_HOLD_INTERVAL_SEC", "5.0"))
 
+# Consecutive errored samples required at the end of an observation window
+# before hold_verdict() reports "error" instead of "pass". One errored
+# sample at the end of a window is treated as observation noise: a single
+# transient kubectl blip is common, and the entry may well still have been
+# holding. A run of this many consecutive errors ending the window means
+# observation was actually lost and never regained, which is not a pass.
+# Set above 1 because a downstream objective reporting "error" nulls its
+# whole task's correctness (not just that entry's contribution), so a
+# single sample is too sensitive a trigger for that amplified cost.
+HOLD_TRAILING_ERROR_SAMPLES = 2
+
 # Upper bound on how long the monitor's own scheduling loop sleeps between
 # checking which entries are due for a sample. Bounds how long stop() can
 # take to be noticed: the loop wakes at least this often even when every
@@ -118,8 +129,15 @@ class HoldObservation:
             observing the condition false). Never counted as a violation.
         last_sample_status: The most recent sample's ``status`` (e.g.
             ``"pass"``, ``"fail"``, ``"error"``). ``None`` until a sample is
-            taken. Used by :func:`hold_verdict` to tell an error that
-            recovered before the window ended (noise) from one that never
+            taken. Kept for report/debug value; :func:`hold_verdict` keys off
+            ``trailing_error_count`` instead, since a single trailing error
+            is noise and only a sustained run at the end of the window means
+            the entry was never actually observed.
+        trailing_error_count: How many consecutive samples ending at the
+            most recent one have errored. Incremented on an errored sample,
+            reset to zero on any non-error sample. Used by
+            :func:`hold_verdict` to tell a single error that recovered
+            before the window ended (noise) from a sustained run that never
             cleared (the entry was never actually observed).
     """
 
@@ -129,6 +147,7 @@ class HoldObservation:
     sample_count: int = 0
     error_count: int = 0
     last_sample_status: str | None = None
+    trailing_error_count: int = 0
 
 
 def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: float) -> None:
@@ -150,7 +169,9 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
     obs.last_sample_status = result.status
     if result.status == "error":
         obs.error_count += 1
+        obs.trailing_error_count += 1
         return
+    obs.trailing_error_count = 0
     if not result.success and not obs.violated:
         obs.violated = True
         obs.first_violation_reason = result.reason
@@ -174,11 +195,14 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
        before the trailing-error case keeps a genuine violation from being
        masked by a single error sample at the end of the window. That is
        exactly the masking behavior hold mode exists to prevent.
-    4. The window ended on an error: an error that recovers within the
-       window is treated as observation noise (a transient kubectl blip),
-       but an error that never clears means the entry was never actually
-       observed at the point the window closed, and that is not a pass.
-    5. Otherwise, pass, noting any absorbed (recovered) errors.
+    4. The window ended on a sustained run of errors (at least
+       :data:`HOLD_TRAILING_ERROR_SAMPLES` consecutive): a single error that
+       recovers within the window is treated as observation noise (a
+       transient kubectl blip), but a run of errors that never clears means
+       the entry was never actually observed at the point the window
+       closed, and that is not a pass.
+    5. Otherwise, pass, noting any absorbed (recovered) errors, including a
+       single trailing error too short to trigger rule 4.
 
     Args:
         obs: The observation to score.
@@ -206,12 +230,13 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
             f"window: {obs.first_violation_reason}"
         )
         return False, "fail", reason
-    if obs.last_sample_status == "error":
+    if obs.trailing_error_count >= HOLD_TRAILING_ERROR_SAMPLES:
         return (
             False,
             "error",
-            "the observation window ended on an unevaluable sample (it never "
-            "recovered), so the entry was never actually observed",
+            f"the observation window ended on {obs.trailing_error_count} consecutive "
+            "unevaluable samples (it never recovered), so the entry was never "
+            "actually observed",
         )
     reason = f"held for {obs.sample_count} sample(s) across the observation window"
     if obs.error_count > 0:
@@ -352,6 +377,7 @@ class SafeguardMonitor:
                 obs.sample_count += 1
                 obs.error_count += 1
                 obs.last_sample_status = "error"
+                obs.trailing_error_count += 1
             return
 
         with self._lock:
@@ -416,6 +442,7 @@ def run_hold_window(
             obs.sample_count += 1
             obs.error_count += 1
             obs.last_sample_status = "error"
+            obs.trailing_error_count += 1
         else:
             _fold_sample(obs, result, elapsed)
 
