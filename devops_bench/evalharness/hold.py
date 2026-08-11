@@ -60,12 +60,13 @@ and larger piece of work and is not built here.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import threading
 import time
 from dataclasses import dataclass
 
-from devops_bench.core import get_logger
+from devops_bench.core import ConfigError, get_logger
 from devops_bench.verification import VerificationEntry, VerificationResult, VerifierAgent
 
 __all__ = [
@@ -78,11 +79,36 @@ __all__ = [
 
 _log = get_logger("evalharness.hold")
 
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Parse ``name`` from the environment as a finite float greater than zero.
+
+    Falls back to ``default`` when the variable is unset. Raises
+    :class:`ConfigError` with a message naming the variable and its offending
+    value when the variable is set but is not a finite positive number, so a
+    bad override fails clearly instead of raising a bare ``ValueError`` deep
+    inside module import or letting a zero/negative value make the scheduler
+    spin without sleeping.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"{name}={raw!r} is not a valid number; it must be a finite number greater than zero"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"{name}={raw!r} must be a finite number greater than zero")
+    return value
+
+
 # Default seconds between samples for a hold entry that does not set its own
 # ``hold_poll_interval_sec``. Overridable via BENCH_HOLD_INTERVAL_SEC, mirroring
 # the BENCH_VERIFY_TIMEOUT_SEC / BENCH_VERIFY_TOTAL_BUDGET_SEC precedent in
 # devops_bench.evalharness.scenario.
-HOLD_POLL_INTERVAL_SEC = float(os.environ.get("BENCH_HOLD_INTERVAL_SEC", "5.0"))
+HOLD_POLL_INTERVAL_SEC = _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
 
 # Consecutive errored samples required at the end of an observation window
 # before hold_verdict() reports "error" instead of "pass". One errored
