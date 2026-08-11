@@ -48,7 +48,7 @@ from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
 from devops_bench.evalharness.reporter import ResultReporter
-from devops_bench.evalharness.hold import HoldObservation, SafeguardMonitor
+from devops_bench.evalharness.hold import HoldObservation, SafeguardMonitor, hold_verdict
 from devops_bench.evalharness.scenario import (
     VERIFICATION_TIMEOUT_SEC,
     VERIFICATION_TOTAL_BUDGET_SEC,
@@ -551,20 +551,18 @@ class DefaultEvalHarness(Harness):
 
     @staticmethod
     def _hold_report_entry(entry: VerificationEntry, obs: HoldObservation | None) -> dict[str, Any]:
-        """Build one hold entry's report row from its monitor observation.
+        """Build one hold entry's report row from its driver's observation.
 
-        Passes only when the monitor took at least one sample and never saw a
-        violation. Zero samples (``obs`` is ``None`` or ``sample_count == 0``)
-        is recorded as an error, mirroring how a converge entry starved of
-        budget is recorded here: never observed, so it must not read as
-        having passed. A violation always fails, regardless of whether it was
-        still active at the last sample — a hold safeguard is about
-        continuous compliance, not the value at the end (which is exactly the
-        gap this mode exists to close).
+        The verdict itself (pass / fail / error, and why) is delegated to
+        :func:`~devops_bench.evalharness.hold.hold_verdict` so both hold
+        drivers (the live safeguard monitor and the post-run objective
+        window) are scored by exactly one rule. ``obs is None`` (the entry's
+        name was missing from ``hold_observations`` entirely) is treated the
+        same as a fresh, zero-sample observation.
 
         Args:
             entry: The hold-mode entry being reported.
-            obs: The monitor's observation for this entry, or ``None`` if the
+            obs: The driver's observation for this entry, or ``None`` if the
                 entry's name was missing from ``hold_observations`` entirely.
 
         Returns:
@@ -574,25 +572,7 @@ class DefaultEvalHarness(Harness):
             ``hold_first_violation_reason`` / ``hold_first_violation_at_sec``
             so the outcome is auditable from the report alone.
         """
-        if obs is None or obs.sample_count == 0:
-            success, status, reason = (
-                False,
-                "error",
-                "hold safeguard was never sampled by the monitor during the agent's "
-                "turn; a safeguard nobody watched must not read as one that held",
-            )
-        elif obs.violated:
-            success, status = False, "fail"
-            reason = (
-                f"hold violated {obs.first_violation_at_sec:.1f}s into the agent's "
-                f"turn: {obs.first_violation_reason}"
-            )
-        else:
-            success, status = True, "pass"
-            reason = (
-                f"held for {obs.sample_count} sample(s) across the agent's turn "
-                f"({obs.error_count} sample(s) could not be evaluated)"
-            )
+        success, status, reason = hold_verdict(obs if obs is not None else HoldObservation())
 
         return {
             "name": entry.name,

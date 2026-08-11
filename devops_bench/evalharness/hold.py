@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from devops_bench.core import get_logger
 from devops_bench.verification import VerificationEntry, VerificationResult, VerifierAgent
 
-__all__ = ["HOLD_POLL_INTERVAL_SEC", "HoldObservation", "SafeguardMonitor"]
+__all__ = ["HOLD_POLL_INTERVAL_SEC", "HoldObservation", "SafeguardMonitor", "hold_verdict"]
 
 _log = get_logger("evalharness.hold")
 
@@ -110,6 +110,11 @@ class HoldObservation:
         error_count: Of ``sample_count``, how many could not be evaluated
             (the check itself failed to run, as distinct from running and
             observing the condition false). Never counted as a violation.
+        last_sample_status: The most recent sample's ``status`` (e.g.
+            ``"pass"``, ``"fail"``, ``"error"``). ``None`` until a sample is
+            taken. Used by :func:`hold_verdict` to tell an error that
+            recovered before the window ended (noise) from one that never
+            cleared (the entry was never actually observed).
     """
 
     violated: bool = False
@@ -117,6 +122,7 @@ class HoldObservation:
     first_violation_at_sec: float | None = None
     sample_count: int = 0
     error_count: int = 0
+    last_sample_status: str | None = None
 
 
 def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: float) -> None:
@@ -135,6 +141,7 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
             taken, recorded on the first violation only.
     """
     obs.sample_count += 1
+    obs.last_sample_status = result.status
     if result.status == "error":
         obs.error_count += 1
         return
@@ -142,6 +149,62 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
         obs.violated = True
         obs.first_violation_reason = result.reason
         obs.first_violation_at_sec = elapsed_sec
+
+
+def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
+    """Compute the pass/fail/error verdict for one hold entry's observation.
+
+    Shared by every hold driver so the outcome rule is defined exactly once.
+    Checked in this order:
+
+    1. Zero samples: the entry was never observed at all.
+    2. Every sample errored: the check never once managed to run, so there
+       is nothing to score a pass or fail against.
+    3. The window ended on an error: an error that recovers within the
+       window is treated as observation noise (a transient kubectl blip),
+       but an error that never clears means the entry was never actually
+       observed at the point the window closed, and that is not a pass.
+    4. Violated: a hold that dipped at any point did not hold, regardless
+       of whether it later recovered.
+    5. Otherwise, pass, noting any absorbed (recovered) errors.
+
+    Args:
+        obs: The observation to score.
+
+    Returns:
+        A ``(success, status, reason)`` triple, matching the vocabulary of
+        :class:`~devops_bench.verification.base.VerificationResult`.
+    """
+    if obs.sample_count == 0:
+        return (
+            False,
+            "error",
+            "hold entry was never sampled during its observation window; a hold "
+            "nobody watched must not read as one that held",
+        )
+    if obs.error_count == obs.sample_count:
+        return (
+            False,
+            "error",
+            f"every sample ({obs.sample_count}) errored; the entry could never be evaluated",
+        )
+    if obs.last_sample_status == "error":
+        return (
+            False,
+            "error",
+            "the observation window ended on an unevaluable sample (it never "
+            "recovered), so the entry was never actually observed",
+        )
+    if obs.violated:
+        reason = (
+            f"hold violated {obs.first_violation_at_sec:.1f}s into the observation "
+            f"window: {obs.first_violation_reason}"
+        )
+        return False, "fail", reason
+    reason = f"held for {obs.sample_count} sample(s) across the observation window"
+    if obs.error_count > 0:
+        reason += f" ({obs.error_count} sample(s) could not be evaluated)"
+    return True, "pass", reason
 
 
 class SafeguardMonitor:
@@ -276,6 +339,7 @@ class SafeguardMonitor:
                 obs = self._observations[entry.name]
                 obs.sample_count += 1
                 obs.error_count += 1
+                obs.last_sample_status = "error"
             return
 
         with self._lock:
