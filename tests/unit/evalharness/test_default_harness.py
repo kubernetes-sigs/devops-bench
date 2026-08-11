@@ -487,9 +487,7 @@ def test_run_one_marks_verification_status_parse_error_when_a_spec_entry_fails_t
         run_dir.mkdir()
         ok = VerificationResult(success=True, elapsed_time=0.0, reason="fine")
 
-        with patch(
-            "devops_bench.evalharness.default.VerifierAgent.run_entry", return_value=ok
-        ):
+        with patch("devops_bench.evalharness.default.VerifierAgent.run_entry", return_value=ok):
             record = harness._run_one(task, run_dir)  # noqa: SLF001
 
         assert record["status"] == "success"
