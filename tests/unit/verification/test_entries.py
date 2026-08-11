@@ -61,27 +61,59 @@ def test_objective_with_severity_is_an_error() -> None:
 
 
 def test_mode_hold_parses() -> None:
-    entries, errors = parse_entries([_entry(mode="hold")])
+    entries, errors = parse_entries([_entry(mode="hold", hold_window_sec=30.0)])
     assert errors == []
     assert entries[0].resolved_mode == "hold"
 
 
 def test_hold_poll_interval_defaults_to_none() -> None:
-    entries, errors = parse_entries([_entry(mode="hold")])
+    entries, errors = parse_entries([_entry(mode="hold", hold_window_sec=30.0)])
     assert errors == []
     assert entries[0].hold_poll_interval_sec is None
 
 
 def test_hold_poll_interval_accepts_an_explicit_value() -> None:
-    entries, errors = parse_entries([_entry(mode="hold", hold_poll_interval_sec=2.5)])
+    entries, errors = parse_entries(
+        [_entry(mode="hold", hold_poll_interval_sec=2.5, hold_window_sec=30.0)]
+    )
     assert errors == []
     assert entries[0].hold_poll_interval_sec == 2.5
 
 
 def test_hold_poll_interval_must_be_positive() -> None:
-    entries, errors = parse_entries([_entry(mode="hold", hold_poll_interval_sec=0)])
+    entries, errors = parse_entries(
+        [_entry(mode="hold", hold_poll_interval_sec=0, hold_window_sec=30.0)]
+    )
     assert entries == []
     assert errors[0]["name"] == "e1"
+
+
+def test_objective_hold_without_window_is_an_error() -> None:
+    entries, errors = parse_entries([_entry(mode="hold")])
+    assert entries == []
+    assert "hold_window_sec is required" in errors[0]["reason"]
+
+
+def test_objective_hold_with_window_parses() -> None:
+    entries, errors = parse_entries([_entry(mode="hold", hold_window_sec=30.0)])
+    assert errors == []
+    assert entries[0].hold_window_sec == 30.0
+
+
+def test_safeguard_hold_with_window_is_an_error() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="safeguard", severity="catastrophic", mode="hold", hold_window_sec=30.0)]
+    )
+    assert entries == []
+    assert "hold_window_sec is not allowed" in errors[0]["reason"]
+
+
+def test_safeguard_hold_without_window_parses() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="safeguard", severity="catastrophic", mode="hold")]
+    )
+    assert errors == []
+    assert entries[0].hold_window_sec is None
 
 
 def test_duplicate_names_keep_the_first_and_report_the_second() -> None:
