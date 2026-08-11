@@ -339,6 +339,25 @@ def test_hold_verdict_a_violation_is_a_fail_regardless_of_later_recovery() -> No
     assert "3.5" in reason
 
 
+def test_hold_verdict_a_violation_followed_by_a_trailing_error_is_still_a_fail() -> None:
+    """Regression: a confirmed violation must not be masked by a trailing error sample.
+
+    A violation is a positive observation; losing observability afterward
+    does not un-observe it. Scoring nulls a task entirely on ``error`` but
+    scores ``fail`` as a fail, so violated must be checked before the
+    last-sample-error case or a genuine violation would drop out of scoring
+    instead of failing the task.
+    """
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=False, reason="replicas dropped to 2"), 3.5)
+    _fold_sample(obs, _result(success=False, status="error", reason="never recovered"), 4.5)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is False
+    assert status == "fail"
+    assert "replicas dropped to 2" in reason
+
+
 def test_hold_verdict_a_clean_pass_notes_absorbed_errors() -> None:
     obs = HoldObservation()
     _fold_sample(obs, _result(success=True, reason="held"), 0.0)
@@ -403,6 +422,21 @@ def test_run_hold_window_with_an_already_passed_deadline_takes_no_samples() -> N
     )
 
     assert obs.sample_count == 0
+
+
+def test_run_verification_raises_when_an_objective_hold_entry_has_no_hold_window_sec() -> None:
+    """Regression: a missing hold_window_sec must not reach a float parameter unchecked.
+
+    VerificationEntry's own validation normally rejects this at spec-parse
+    time; ``model_copy`` bypasses that validation here to simulate an entry
+    reaching verification with the invariant already broken.
+    """
+    entry = _objective_hold_entry({"type": "sg_always_pass"})
+    broken_entry = entry.model_copy(update={"hold_window_sec": None})
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    with pytest.raises(ValueError, match="hold_window_sec"):
+        harness._run_verification([broken_entry])  # noqa: SLF001
 
 
 # --- role-based dispatch: the landmine regression --------------------------

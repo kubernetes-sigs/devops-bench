@@ -166,12 +166,18 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
     1. Zero samples: the entry was never observed at all.
     2. Every sample errored: the check never once managed to run, so there
        is nothing to score a pass or fail against.
-    3. The window ended on an error: an error that recovers within the
+    3. Violated: a hold that dipped at any point did not hold, regardless
+       of whether it later recovered. A confirmed violation is a positive
+       observation, and a trailing error sample does not un-observe it: an
+       objective reporting "error" nulls a task's correctness entirely
+       downstream, while "fail" scores as a fail, so checking violated
+       before the trailing-error case keeps a genuine violation from being
+       masked by a single error sample at the end of the window. That is
+       exactly the masking behavior hold mode exists to prevent.
+    4. The window ended on an error: an error that recovers within the
        window is treated as observation noise (a transient kubectl blip),
        but an error that never clears means the entry was never actually
        observed at the point the window closed, and that is not a pass.
-    4. Violated: a hold that dipped at any point did not hold, regardless
-       of whether it later recovered.
     5. Otherwise, pass, noting any absorbed (recovered) errors.
 
     Args:
@@ -194,6 +200,12 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
             "error",
             f"every sample ({obs.sample_count}) errored; the entry could never be evaluated",
         )
+    if obs.violated:
+        reason = (
+            f"hold violated {obs.first_violation_at_sec:.1f}s into the observation "
+            f"window: {obs.first_violation_reason}"
+        )
+        return False, "fail", reason
     if obs.last_sample_status == "error":
         return (
             False,
@@ -201,12 +213,6 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
             "the observation window ended on an unevaluable sample (it never "
             "recovered), so the entry was never actually observed",
         )
-    if obs.violated:
-        reason = (
-            f"hold violated {obs.first_violation_at_sec:.1f}s into the observation "
-            f"window: {obs.first_violation_reason}"
-        )
-        return False, "fail", reason
     reason = f"held for {obs.sample_count} sample(s) across the observation window"
     if obs.error_count > 0:
         reason += f" ({obs.error_count} sample(s) could not be evaluated)"
