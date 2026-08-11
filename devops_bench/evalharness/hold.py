@@ -165,17 +165,34 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
         elapsed_sec: Seconds into the observation window this sample was
             taken, recorded on the first violation only.
     """
+    if result.status == "error":
+        _fold_error_sample(obs)
+        return
     obs.sample_count += 1
     obs.last_sample_status = result.status
-    if result.status == "error":
-        obs.error_count += 1
-        obs.trailing_error_count += 1
-        return
     obs.trailing_error_count = 0
     if not result.success and not obs.violated:
         obs.violated = True
         obs.first_violation_reason = result.reason
         obs.first_violation_at_sec = elapsed_sec
+
+
+def _fold_error_sample(obs: HoldObservation) -> None:
+    """Record one sample that could not be evaluated at all.
+
+    Exists so an exception raised while sampling (the check never even ran)
+    is folded into ``obs`` identically to an in-band ``status == "error"``
+    result from :func:`_fold_sample`. Both drivers must call this rather than
+    updating the fields directly, so the two cases can never drift out of
+    sync.
+
+    Args:
+        obs: The observation to update in place.
+    """
+    obs.sample_count += 1
+    obs.error_count += 1
+    obs.last_sample_status = "error"
+    obs.trailing_error_count += 1
 
 
 def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
@@ -374,10 +391,7 @@ class SafeguardMonitor:
             _log.warning("safeguard monitor: sampling %r raised: %s", entry.name, exc)
             with self._lock:
                 obs = self._observations[entry.name]
-                obs.sample_count += 1
-                obs.error_count += 1
-                obs.last_sample_status = "error"
-                obs.trailing_error_count += 1
+                _fold_error_sample(obs)
             return
 
         with self._lock:
@@ -439,10 +453,7 @@ def run_hold_window(
             result = agent.run_entry(entry, timeout_sec=0.0)
         except Exception as exc:  # noqa: BLE001 - a hold driver bug must not sink the run
             _log.warning("hold window: sampling %r raised: %s", entry.name, exc)
-            obs.sample_count += 1
-            obs.error_count += 1
-            obs.last_sample_status = "error"
-            obs.trailing_error_count += 1
+            _fold_error_sample(obs)
         else:
             _fold_sample(obs, result, elapsed)
 
