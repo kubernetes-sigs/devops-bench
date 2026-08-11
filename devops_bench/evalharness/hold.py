@@ -68,7 +68,13 @@ from dataclasses import dataclass
 from devops_bench.core import get_logger
 from devops_bench.verification import VerificationEntry, VerificationResult, VerifierAgent
 
-__all__ = ["HOLD_POLL_INTERVAL_SEC", "HoldObservation", "SafeguardMonitor", "hold_verdict"]
+__all__ = [
+    "HOLD_POLL_INTERVAL_SEC",
+    "HoldObservation",
+    "SafeguardMonitor",
+    "hold_verdict",
+    "run_hold_window",
+]
 
 _log = get_logger("evalharness.hold")
 
@@ -345,3 +351,71 @@ class SafeguardMonitor:
         with self._lock:
             obs = self._observations[entry.name]
             _fold_sample(obs, result, elapsed)
+
+
+def run_hold_window(
+    entry: VerificationEntry,
+    window_sec: float,
+    *,
+    interval_sec: float,
+    deadline: float,
+) -> HoldObservation:
+    """Synchronously soak-sample ``entry`` for an objective-role hold window.
+
+    An objective starts false and must become true and stay true; that
+    cannot be observed live during the agent's turn (the first sample would
+    fail before the agent has done anything and latch a permanent
+    violation). This runs after the agent's turn ends instead, sampling
+    ``entry`` on the caller's own thread in a blocking loop for up to
+    ``window_sec``, folding every sample through the same :func:`_fold_sample`
+    :class:`SafeguardMonitor` uses.
+
+    ``deadline`` is an absolute ``time.monotonic()`` value bounding the
+    caller's whole post-run verification pass (see
+    ``VERIFICATION_TOTAL_BUDGET_SEC`` in
+    ``devops_bench.evalharness.scenario``). The window stops at whichever of
+    ``window_sec`` or ``deadline`` is sooner, so one entry's soak can never
+    overrun the shared budget the rest of the task's verification draws
+    from.
+
+    On a violation, sampling does NOT stop early. It keeps sampling to the
+    end of the window so the report can show whether the entry recovered.
+    The verdict is still a fail either way: a hold that dipped at any point
+    did not hold, so continuing cannot turn a fail into a pass, it only adds
+    detail (and matches how :class:`SafeguardMonitor` already behaves across
+    the agent's turn).
+
+    Args:
+        entry: The objective-role, hold-mode entry to sample.
+        window_sec: How long to sample for, in seconds.
+        interval_sec: Seconds to sleep between samples.
+        deadline: Absolute ``time.monotonic()`` deadline for the caller's
+            whole post-run verification pass; the window stops early if this
+            is reached before ``window_sec`` has elapsed.
+
+    Returns:
+        The resulting :class:`HoldObservation`, ready for :func:`hold_verdict`.
+    """
+    obs = HoldObservation()
+    agent = VerifierAgent()
+    start = time.monotonic()
+    window_deadline = min(start + window_sec, deadline)
+
+    while time.monotonic() < window_deadline:
+        elapsed = time.monotonic() - start
+        try:
+            result = agent.run_entry(entry, timeout_sec=0.0)
+        except Exception as exc:  # noqa: BLE001 - a hold driver bug must not sink the run
+            _log.warning("hold window: sampling %r raised: %s", entry.name, exc)
+            obs.sample_count += 1
+            obs.error_count += 1
+            obs.last_sample_status = "error"
+        else:
+            _fold_sample(obs, result, elapsed)
+
+        remaining = window_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval_sec, remaining))
+
+    return obs
