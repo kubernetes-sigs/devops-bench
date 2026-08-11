@@ -246,9 +246,7 @@ def test_scenario_resolves_verify_against_mapping() -> None:
     # ``check`` node) flowed straight to the VerifierAgent: the lookup is O(1),
     # never imports verification on the chaos side, and the entry's resolved
     # mode (converge vs assert) governs the check.
-    mock_run_entry.assert_called_once_with(
-        verification_entry, timeout_sec=VERIFICATION_TIMEOUT_SEC
-    )
+    mock_run_entry.assert_called_once_with(verification_entry, timeout_sec=VERIFICATION_TIMEOUT_SEC)
 
     chaos_report, perf_report = manager.get_reports()
     assert chaos_report["verification"]["success"] is True
