@@ -8,9 +8,16 @@ _As contributors and maintainers of this project, and in the interest of fosteri
 
 We have full documentation on how to get started contributing here:
 
-<!---
-If your repo has certain guidelines for contribution, put them here ahead of the general k8s resources
--->
+### DevOps Bench Contribution Tracks
+
+Before diving into the general Kubernetes contributor docs below, here's where devops-bench-specific work lives. See [roadmap.md](roadmap.md) for the current backlog these tracks feed into.
+
+| Track | Description | Good First Issues & Opportunities |
+| --- | --- | --- |
+| **Task & Scenario Authorship** | Build and certify complex multi-step incident challenges under `tasks/`, tagged to the operator persona(s) they target. | Convert historical SRE postmortems into reproducible Kind scenarios; define declarative `devops_bench/verification/` rubrics (service readiness, data consistency). |
+| **Harnesses & Models** | Add support for open-source AI harnesses or new inference providers under `devops_bench/agents/` and `devops_bench/models/`. | Add CLI/API adapters for community frameworks; optimize prompt instrumentation and token efficiency reporting. |
+| **Infrastructure & Providers** | Enhance local sandboxing (`devops_bench/deployers/`, Kind/vCluster integration) or add cloud providers alongside the existing GCP support in `devops_bench/providers/`, to widen vendor-neutral coverage. | Lightweight vCluster lifecycle automation; contribute an AWS or Azure infra provider matching `devops_bench/providers/base.py`. |
+| **Verification & Judge Extensions** | Strengthen deterministic state checkers and automated evaluation metrics under `devops_bench/verification/` and `devops_bench/metrics/`. | Implement new Kubernetes condition verifiers; standardize Pass@N confidence interval reporting. |
 
 - [Contributor License Agreement](https://git.k8s.io/community/CLA.md) - Kubernetes projects require that you sign a Contributor License Agreement (CLA) before we can accept your pull requests
 - [Kubernetes Contributor Guide](https://k8s.dev/guide) - Main contributor documentation, or you can just jump directly to the [contributing page](https://k8s.dev/docs/guide/contributing/)
