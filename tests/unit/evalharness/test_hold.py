@@ -30,8 +30,15 @@ from typing import Any, Literal
 
 import pytest
 
+from devops_bench.agents.result import AgentResult
 from devops_bench.evalharness.default import DefaultEvalHarness
-from devops_bench.evalharness.hold import HoldObservation, SafeguardMonitor
+from devops_bench.evalharness.hold import (
+    HoldObservation,
+    SafeguardMonitor,
+    _fold_sample,
+    hold_verdict,
+    run_hold_window,
+)
 from devops_bench.tasks import Task
 from devops_bench.verification.base import VERIFIERS, BaseVerifier, VerificationResult
 from devops_bench.verification.spec import VerificationEntry, parse_entries
@@ -108,6 +115,20 @@ def _hold_entry(check: dict[str, Any], **extra: Any) -> VerificationEntry:
         "role": "safeguard",
         "severity": "catastrophic",
         "mode": "hold",
+        "check": check,
+    }
+    payload.update(extra)
+    entries, errors = parse_entries([payload])
+    assert errors == []
+    return entries[0]
+
+
+def _objective_hold_entry(check: dict[str, Any], **extra: Any) -> VerificationEntry:
+    payload = {
+        "name": "e",
+        "role": "objective",
+        "mode": "hold",
+        "hold_window_sec": _SAMPLE_WINDOW_SEC,
         "check": check,
     }
     payload.update(extra)
@@ -250,3 +271,190 @@ def test_run_one_stops_and_joins_the_safeguard_monitor_when_the_agent_raises(
 
     assert record["status"] == "failed"
     assert not any(t.name == "safeguard-monitor" for t in threading.enumerate())
+
+
+# --- hold_verdict: every branch, in order --------------------------------
+
+
+def _result(**overrides: Any) -> VerificationResult:
+    base: dict[str, Any] = {"success": True, "elapsed_time": 0.0, "reason": "held"}
+    base.update(overrides)
+    return VerificationResult(**base)
+
+
+def test_hold_verdict_zero_samples_is_error() -> None:
+    success, status, reason = hold_verdict(HoldObservation())
+    assert success is False
+    assert status == "error"
+    assert "never sampled" in reason
+
+
+def test_hold_verdict_every_sample_errored_is_error() -> None:
+    obs = HoldObservation()
+    for _ in range(3):
+        _fold_sample(obs, _result(success=False, status="error", reason="boom"), 0.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is False
+    assert status == "error"
+    assert "could never be evaluated" in reason
+
+
+def test_hold_verdict_a_window_that_errors_then_recovers_and_ends_clean_is_a_pass() -> None:
+    """Regression: an error absorbed mid-window must not sink an otherwise clean hold."""
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=False, status="error", reason="transient blip"), 0.0)
+    _fold_sample(obs, _result(success=True, reason="held"), 1.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is True
+    assert status == "pass"
+    assert obs.error_count == 1
+
+
+def test_hold_verdict_a_window_ending_on_an_error_is_an_error_even_after_recovering_earlier() -> (
+    None
+):
+    """Regression: a window that never recovers by its end must not read as a pass."""
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=True, reason="held"), 0.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="never recovered"), 1.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is False
+    assert status == "error"
+    assert "never recovered" in reason
+    assert obs.error_count < obs.sample_count  # not every sample errored
+
+
+def test_hold_verdict_a_violation_is_a_fail_regardless_of_later_recovery() -> None:
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=False, reason="replicas dropped to 2"), 3.5)
+    _fold_sample(obs, _result(success=True, reason="held"), 4.5)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is False
+    assert status == "fail"
+    assert "replicas dropped to 2" in reason
+    assert "3.5" in reason
+
+
+def test_hold_verdict_a_clean_pass_notes_absorbed_errors() -> None:
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=True, reason="held"), 0.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="blip"), 1.0)
+    _fold_sample(obs, _result(success=True, reason="held"), 2.0)
+
+    success, status, reason = hold_verdict(obs)
+    assert success is True
+    assert status == "pass"
+    assert obs.error_count == 1
+    assert "1" in reason
+
+
+# --- run_hold_window: the post-run objective driver -----------------------
+
+
+def test_run_hold_window_keeps_sampling_after_a_violation_and_still_reports_fail() -> None:
+    entry = _objective_hold_entry(
+        {"type": "sg_flip", "fail_at": 2}, hold_poll_interval_sec=_POLL_INTERVAL_SEC
+    )
+
+    obs = run_hold_window(
+        entry,
+        entry.hold_window_sec,
+        interval_sec=_POLL_INTERVAL_SEC,
+        deadline=time.monotonic() + 10.0,
+    )
+
+    assert obs.violated is True
+    assert obs.first_violation_reason == "dropped mid-run"
+    # Sampling continued past the violation to the end of the window rather
+    # than exiting early on it.
+    assert obs.sample_count >= 3
+
+
+def test_run_hold_window_stops_early_when_the_callers_deadline_is_reached() -> None:
+    entry = _objective_hold_entry(
+        {"type": "sg_always_pass"},
+        hold_window_sec=10.0,
+        hold_poll_interval_sec=_POLL_INTERVAL_SEC,
+    )
+    deadline = time.monotonic() + _SAMPLE_WINDOW_SEC
+
+    start = time.monotonic()
+    obs = run_hold_window(
+        entry, entry.hold_window_sec, interval_sec=_POLL_INTERVAL_SEC, deadline=deadline
+    )
+    elapsed = time.monotonic() - start
+
+    # The window itself asked for 10s; the shared deadline cut it off much
+    # sooner, proving the caller's deadline bounds the window rather than
+    # the window overrunning the shared verification budget.
+    assert elapsed < 5.0
+    assert obs.sample_count >= 1
+
+
+def test_run_hold_window_with_an_already_passed_deadline_takes_no_samples() -> None:
+    entry = _objective_hold_entry({"type": "sg_always_pass"}, hold_window_sec=10.0)
+
+    obs = run_hold_window(
+        entry, entry.hold_window_sec, interval_sec=_POLL_INTERVAL_SEC, deadline=time.monotonic()
+    )
+
+    assert obs.sample_count == 0
+
+
+# --- role-based dispatch: the landmine regression --------------------------
+
+
+def test_objective_hold_entry_is_routed_to_run_hold_window_not_the_live_monitor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: role: objective, mode: hold must never reach the live monitor.
+
+    Sampling an objective through SafeguardMonitor would evaluate it before
+    the agent has done anything and latch a spurious violation on the first
+    sample. The live monitor must only ever be constructed with the
+    safeguard-role subset of an entry's hold entries.
+    """
+    monitor_entries: list[list[VerificationEntry]] = []
+    orig_init = SafeguardMonitor.__init__
+
+    def _capture_init(self: SafeguardMonitor, entries: list[VerificationEntry]) -> None:
+        monitor_entries.append(list(entries))
+        orig_init(self, entries)
+
+    monkeypatch.setattr(SafeguardMonitor, "__init__", _capture_init)
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    monkeypatch.setattr(
+        harness, "execute_agent", lambda prompt, ctx: AgentResult(output="ok", trajectory=[])
+    )
+    task = Task.from_dict(
+        {
+            "task_id": "t",
+            "name": "demo",
+            "prompt": "p",
+            "infrastructure": {"deployer": "noop"},
+            "verification_spec": [
+                {
+                    "name": "eventually-healthy",
+                    "role": "objective",
+                    "mode": "hold",
+                    "hold_window_sec": _SAMPLE_WINDOW_SEC,
+                    "hold_poll_interval_sec": _POLL_INTERVAL_SEC,
+                    "check": {"type": "sg_always_pass"},
+                }
+            ],
+        }
+    )
+
+    record = harness._run_one(task, tmp_path)  # noqa: SLF001
+
+    assert len(monitor_entries) == 1
+    assert monitor_entries[0] == []  # the objective entry never reached the live monitor
+    hold_rows = [row for row in record["verification_report"] if row["mode"] == "hold"]
+    assert len(hold_rows) == 1
+    assert hold_rows[0]["success"] is True
+    assert hold_rows[0]["hold_sample_count"] >= 1
