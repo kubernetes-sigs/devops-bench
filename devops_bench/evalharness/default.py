@@ -511,8 +511,15 @@ class DefaultEvalHarness(Harness):
                 continue
             if entry.resolved_mode == "hold" and entry.role == "objective":
                 # hold_window_sec is required for an objective hold entry;
-                # enforced by VerificationEntry's own validation.
-                assert entry.hold_window_sec is not None
+                # normally enforced by VerificationEntry's own validation, so
+                # reaching here without it means a spec-validation bug let an
+                # invalid entry through to verification.
+                if entry.hold_window_sec is None:
+                    raise ValueError(
+                        f"objective hold entry {entry.name!r} reached verification without "
+                        "hold_window_sec set; this should have been rejected at "
+                        "spec-validation time"
+                    )
                 interval_sec = (
                     entry.hold_poll_interval_sec
                     if entry.hold_poll_interval_sec is not None
