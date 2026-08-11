@@ -66,7 +66,7 @@ import time
 from dataclasses import dataclass
 
 from devops_bench.core import get_logger
-from devops_bench.verification import VerificationEntry, VerifierAgent
+from devops_bench.verification import VerificationEntry, VerificationResult, VerifierAgent
 
 __all__ = ["HOLD_POLL_INTERVAL_SEC", "HoldObservation", "SafeguardMonitor"]
 
@@ -117,6 +117,31 @@ class HoldObservation:
     first_violation_at_sec: float | None = None
     sample_count: int = 0
     error_count: int = 0
+
+
+def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: float) -> None:
+    """Fold one sample's result into ``obs``, shared by every hold driver.
+
+    A check that ERRORS (the check could not run: a transient kubectl
+    failure, an API server blip, a timeout) is recorded separately from a
+    check that ran and reported failure. Only the latter is a violation.
+    Getting this backwards would turn a flaky cluster into a failed hold,
+    which is worse than the bug hold mode exists to fix.
+
+    Args:
+        obs: The observation to update in place.
+        result: The single sample's :class:`VerificationResult`.
+        elapsed_sec: Seconds into the observation window this sample was
+            taken, recorded on the first violation only.
+    """
+    obs.sample_count += 1
+    if result.status == "error":
+        obs.error_count += 1
+        return
+    if not result.success and not obs.violated:
+        obs.violated = True
+        obs.first_violation_reason = result.reason
+        obs.first_violation_at_sec = elapsed_sec
 
 
 class SafeguardMonitor:
@@ -238,12 +263,6 @@ class SafeguardMonitor:
     def _sample_one(self, entry: VerificationEntry) -> None:
         """Evaluate one entry once and fold the outcome into its observation.
 
-        A check that ERRORS (the check could not run: a transient kubectl
-        failure, an API server blip, a timeout) is recorded separately from a
-        check that ran and reported failure. Only the latter is a violation.
-        Getting this backwards would turn a flaky cluster into a failed
-        safeguard, which is worse than the bug this monitor exists to fix.
-
         Any exception raised while evaluating (a bug in a leaf verifier, an
         unexpected error in the runner) is caught here and folded in as an
         error sample, not a violation, and never propagates.
@@ -261,11 +280,4 @@ class SafeguardMonitor:
 
         with self._lock:
             obs = self._observations[entry.name]
-            obs.sample_count += 1
-            if result.status == "error":
-                obs.error_count += 1
-                return
-            if not result.success and not obs.violated:
-                obs.violated = True
-                obs.first_violation_reason = result.reason
-                obs.first_violation_at_sec = elapsed
+            _fold_sample(obs, result, elapsed)
