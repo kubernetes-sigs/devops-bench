@@ -12,22 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Background sampling for ``mode: hold`` safeguards, concurrent with the agent's turn.
+"""``mode: hold`` sampling: two drivers sharing one fold and one verdict.
 
-``mode: hold`` means a safeguard must hold continuously from seed through the
-end of the agent's turn. Verification that only runs AFTER the agent exits
-(the ``assert`` mode's single evaluation) cannot see a violation the agent
-commits and then undoes before the run ends. That is the motivating failure
-this module closes: an agent that scales a deployment down and back up
-between two ``kubectl`` calls has its violation read as healthy if the only
-observation happens once, at the end, after the replica count has already
-recovered.
+``mode: hold`` means a condition must hold continuously over some window,
+rather than being checked once at a single point in time. What that window
+is, and when it must be observed, differs by role, so this module provides
+two drivers instead of one:
+
+* :class:`SafeguardMonitor` drives a **safeguard** hold: the window is the
+  agent's turn, and the property must never break. It runs on a daemon
+  thread started before the agent's turn and drained after it, sampling
+  concurrently with the agent so a violation the agent commits and then
+  undoes before the run ends is still observed. Verification that only runs
+  AFTER the agent exits (the ``assert`` mode's single evaluation) cannot see
+  that: an agent that scales a deployment down and back up between two
+  ``kubectl`` calls has its violation read as healthy if the only
+  observation happens once, at the end, after the replica count has already
+  recovered. That is the motivating failure this driver closes.
+* :func:`run_hold_window` drives an **objective** hold: the window is an
+  explicit post-run soak, sampled synchronously after the agent's turn ends.
+  An objective starts false and must become true and then stay true;
+  sampling it live, during the agent's turn, would latch a violation before
+  the agent has done anything. Running an objective through the live monitor
+  is a bug, not a feature: it is not a different way to check the same
+  thing, it is checking the wrong window.
+
+Both drivers fold every sample through the same :func:`_fold_sample` into a
+:class:`HoldObservation`, and both outcomes are scored through the same
+:func:`hold_verdict`, so a hold entry's pass/fail/error rule is defined
+exactly once regardless of which driver produced its samples.
 
 :class:`SafeguardMonitor` is modeled on
 :class:`~devops_bench.evalharness.scenario.ScenarioManager`: it runs on a
-daemon thread started before the agent's turn and drained after it, writes
-into a lock-guarded observation table, and never lets an internal failure
-propagate out to the run.
+daemon thread, writes into a lock-guarded observation table, and never lets
+an internal failure propagate out to the run.
 
 FIDELITY LIMIT. This is sampling, not a watch: a violation that starts and
 ends entirely between two samples is never observed. The poll interval is the
@@ -52,7 +70,7 @@ from devops_bench.verification import VerificationEntry, VerifierAgent
 
 __all__ = ["HOLD_POLL_INTERVAL_SEC", "HoldObservation", "SafeguardMonitor"]
 
-_log = get_logger("evalharness.safeguard_monitor")
+_log = get_logger("evalharness.hold")
 
 # Default seconds between samples for a hold entry that does not set its own
 # ``hold_poll_interval_sec``. Overridable via BENCH_HOLD_INTERVAL_SEC, mirroring

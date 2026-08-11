@@ -198,9 +198,9 @@ class VerifierAgent:
         will not heal, and polling one would only waste the run's time. ``hold``
         also evaluates once with a zero budget per call: continuous holding is
         not achieved by polling inside this one call, it is achieved by the
-        caller (the background safeguard monitor; see
-        ``devops_bench.evalharness.safeguard_monitor``) invoking ``run_entry``
-        repeatedly over the agent's turn and aggregating the samples.
+        caller (the background safeguard monitor or the post-run hold window;
+        see ``devops_bench.evalharness.hold``) invoking ``run_entry``
+        repeatedly over the entry's hold window and aggregating the samples.
 
         Args:
             entry: The parsed entry to evaluate.

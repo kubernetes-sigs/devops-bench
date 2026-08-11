@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for :mod:`devops_bench.evalharness.safeguard_monitor`.
+"""Unit tests for :mod:`devops_bench.evalharness.hold`.
 
 Fake leaves stand in for real cluster I/O so these tests run fast and never
 touch kubectl. ``_FlipThenRestore`` is the ``_Countdown``-shaped test double
@@ -31,7 +31,7 @@ from typing import Any, Literal
 import pytest
 
 from devops_bench.evalharness.default import DefaultEvalHarness
-from devops_bench.evalharness.safeguard_monitor import HoldObservation, SafeguardMonitor
+from devops_bench.evalharness.hold import HoldObservation, SafeguardMonitor
 from devops_bench.tasks import Task
 from devops_bench.verification.base import VERIFIERS, BaseVerifier, VerificationResult
 from devops_bench.verification.spec import VerificationEntry, parse_entries

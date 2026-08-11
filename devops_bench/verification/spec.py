@@ -311,7 +311,7 @@ class VerificationEntry(BaseModel):
             turn ends. ``"hold"`` requires the condition to hold continuously
             from seed through the end of the agent's turn: it is sampled on a
             background thread while the agent runs (see
-            ``devops_bench.evalharness.safeguard_monitor``), not evaluated
+            ``devops_bench.evalharness.hold``), not evaluated
             fresh in the post-run verification pass. Sampling cannot see a
             violation shorter than the poll interval between two samples;
             this is a fidelity limit, not a guarantee of continuous
@@ -321,7 +321,7 @@ class VerificationEntry(BaseModel):
         hold_poll_interval_sec: Seconds between samples for a ``hold`` entry.
             Ignored for every other mode. ``None`` defers to the monitor's
             module-level default (``BENCH_HOLD_INTERVAL_SEC``, see
-            ``devops_bench.evalharness.safeguard_monitor``).
+            ``devops_bench.evalharness.hold``).
     """
 
     model_config = ConfigDict(extra="forbid")

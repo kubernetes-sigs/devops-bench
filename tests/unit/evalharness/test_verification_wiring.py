@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from devops_bench.evalharness.default import DefaultEvalHarness
-from devops_bench.evalharness.safeguard_monitor import HoldObservation
+from devops_bench.evalharness.hold import HoldObservation
 from devops_bench.verification.base import MIN_LEAF_BUDGET_SECONDS, VerificationResult
 from devops_bench.verification.spec import parse_entries
 

@@ -48,7 +48,7 @@ from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
 from devops_bench.evalharness.reporter import ResultReporter
-from devops_bench.evalharness.safeguard_monitor import HoldObservation, SafeguardMonitor
+from devops_bench.evalharness.hold import HoldObservation, SafeguardMonitor
 from devops_bench.evalharness.scenario import (
     VERIFICATION_TIMEOUT_SEC,
     VERIFICATION_TOTAL_BUDGET_SEC,
@@ -467,7 +467,7 @@ class DefaultEvalHarness(Harness):
 
         A ``hold`` entry is never evaluated fresh here: it was sampled on a
         background thread across the agent's turn (see
-        ``devops_bench.evalharness.safeguard_monitor``), and its outcome comes
+        ``devops_bench.evalharness.hold``), and its outcome comes
         entirely from ``hold_observations`` instead. A hold entry with zero
         samples is recorded as an error, not a silent pass: a safeguard
         nobody watched must not read as a safeguard that held.
@@ -477,7 +477,7 @@ class DefaultEvalHarness(Harness):
             timeout_sec: Per-entry budget for converging entries.
             hold_observations: Name-keyed monitor observations for every
                 ``hold`` entry, as returned by
-                :meth:`~devops_bench.evalharness.safeguard_monitor.SafeguardMonitor.get_observations`.
+                :meth:`~devops_bench.evalharness.hold.SafeguardMonitor.get_observations`.
                 ``None`` (or a missing name) is treated the same as zero
                 samples.
 
@@ -884,8 +884,8 @@ class DefaultEvalHarness(Harness):
 
             # Hold entries must be observed continuously from here through the
             # end of the agent's turn, not just at the moment verification
-            # runs after the agent exits (see safeguard_monitor's module
-            # docstring for the failure this closes). Started as close to the
+            # runs after the agent exits (see hold's module docstring for the
+            # failure this closes). Started as close to the
             # agent's turn as possible so a chaos-induced state change is not
             # mistaken for an agent-caused violation.
             hold_entries = [entry for entry in entries if entry.resolved_mode == "hold"]
