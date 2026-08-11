@@ -428,6 +428,10 @@ def test_registered_in_models_registry() -> None:
 @pytest.mark.parametrize("provider", ["gemini", "google", "google-vertex", "google_vertex"])
 def test_get_model_resolves_gemini_aliases(mocker: MockerFixture, provider: str) -> None:
     mocker.patch.object(gemini.genai, "Client")
+    # The google-vertex/google_vertex aliases route through _vertex_client,
+    # which resolves ADC; mocked unconditionally here since it is a no-op for
+    # the other aliases, which never call it.
+    mocker.patch.object(gemini.google_auth, "default", return_value=(object(), "proj"))
     mocker.patch.dict(os.environ, {}, clear=True)
 
     client = get_model(provider=provider)

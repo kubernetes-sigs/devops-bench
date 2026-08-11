@@ -27,9 +27,9 @@ from devops_bench.core.logging import get_logger
 from devops_bench.models.base import MODELS, LLMClient
 
 try:
+    import google.auth as google_auth
     from google import genai
     from google.genai import types
-    import google.auth as google_auth
 except ImportError:  # pragma: no cover - exercised only without the SDK
     genai = None
     types = None
