@@ -68,7 +68,10 @@ def _positive_int_env(name: str, default: int) -> int:
             is not strictly positive.
     """
     value = get_int(name, default)
-    assert value is not None
+    if value is None:
+        # Unreachable: get_int only returns None when default is None, and
+        # this function always passes a non-None default.
+        return default
     if value <= 0:
         raise ConfigError(f"environment variable {name!r} must be a positive integer: {value!r}")
     return value
