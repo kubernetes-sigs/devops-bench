@@ -105,9 +105,10 @@ def _positive_float_env(name: str, default: float) -> float:
 
 
 # Default seconds between samples for a hold entry that does not set its own
-# ``hold_poll_interval_sec``. Overridable via BENCH_HOLD_INTERVAL_SEC, mirroring
-# the BENCH_VERIFY_TIMEOUT_SEC / BENCH_VERIFY_TOTAL_BUDGET_SEC precedent in
-# devops_bench.evalharness.scenario.
+# ``hold_poll_interval_sec``. Overridable via BENCH_HOLD_INTERVAL_SEC, a
+# module-level tunable in the same style as VERIFICATION_TIMEOUT_SEC /
+# VERIFICATION_TOTAL_BUDGET_SEC in devops_bench.evalharness.scenario (those
+# two are plain constants, not env-overridable).
 HOLD_POLL_INTERVAL_SEC = _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
 
 # Consecutive errored samples required at the end of an observation window
