@@ -2,13 +2,13 @@
 
 *SIG: Kubernetes SIG-Apps · Status: Incubating*
 
-DevOps Bench is an evaluation harness and scenario suite that measures whether autonomous DevOps/SRE agents can operate real Kubernetes clusters correctly — across any cloud, on-prem, or bare-metal environment — by verifying live cluster and cloud state after the agent acts, rather than grading against static text or a reference diff. It's organized around the day-2 operator personas that actually carry pagers — Cluster/Platform Operators, Database & Stateful Workload Operators, Security & Compliance Operators, Cost/FinOps Operators, and Application SREs — and every task, deployer, and verifier targets a common provider-agnostic interface so results are comparable across Kind, vCluster, and any cloud's managed Kubernetes.
+DevOps Bench is an evaluation harness and scenario suite that measures whether autonomous DevOps/SRE agents can operate real Kubernetes clusters correctly — with a provider-agnostic design targeting any cloud, on-prem, or bare-metal environment — by verifying live cluster and cloud state after the agent acts, rather than grading against static text or a reference diff. It's organized around the day-2 operator personas that actually carry pagers — Cluster/Platform Operators, Database & Stateful Workload Operators, Security & Compliance Operators, Cost/FinOps Operators, and Application SREs — and every task, deployer, and verifier targets a common provider-agnostic interface so results are comparable across Kind, vCluster, and any cloud's managed Kubernetes.
 
 This roadmap tracks initiatives for **DevOps Bench** (the static benchmark) and **DevOps Arena** (adversarial, live-chaos evaluation). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to pick up any of these.
 
 ---
 
-### 🏗️ Core Harness & Orchestration
+## 🏗️ Core Harness & Orchestration
 
 The evaluation loop: scenario management, deployers, verifiers, and result reporting.
 
@@ -21,7 +21,7 @@ The evaluation loop: scenario management, deployers, verifiers, and result repor
 
 ---
 
-### 🤖 Agent Harnesses & Model Integrations
+## 🤖 Agent Harnesses & Model Integrations
 
 CLI agent adapters (`devops_bench/agents/`) and model inference clients (`devops_bench/models/`).
 
@@ -32,7 +32,7 @@ CLI agent adapters (`devops_bench/agents/`) and model inference clients (`devops
 
 Current harness × model support:
 
-| Harness | Opus | Sonnet | G-Flash | G-Pro | GPT-5.5 | GLM-5 | Cells |
+| Harness | Opus | Sonnet | Gemini-Flash | Gemini-Pro | GPT-5.5 | GLM-5 | Supported Models |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenClaw *(model-agnostic)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 6 |
 | Hermes *(model-agnostic)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 6 |
@@ -42,9 +42,9 @@ Current harness × model support:
 
 ---
 
-### ☁️ Infrastructure Providers & Vendor Neutrality
+## ☁️ Infrastructure Providers & Vendor Neutrality
 
-Every task runs unmodified against any provider behind `devops_bench/providers/base.py` and `devops_bench/deployers/base.py` — no scenario logic is hard-coded to one vendor's APIs.
+Every task is written against the provider-agnostic `devops_bench/providers/base.py` and `devops_bench/deployers/base.py` interfaces — no scenario logic is hard-coded to one vendor's APIs, so a task runs unmodified on any provider that implements them.
 
 * **GCP Provider** `✅ Completed` — see Completed section.
 * **Kind Provider (local/default)** `✅ Completed` — see Completed section.
@@ -57,7 +57,7 @@ Every task runs unmodified against any provider behind `devops_bench/providers/b
 
 ---
 
-### 📋 Task Library & Operator Personas
+## 📋 Task Library & Operator Personas
 
 Scenario authorship under `tasks/`, tagged by the operator persona(s) each task targets.
 
@@ -68,7 +68,7 @@ Scenario authorship under `tasks/`, tagged by the operator persona(s) each task 
 
 ---
 
-### 🥊 DevOps Arena — Adversarial & Self-Improving Operations
+## 🥊 DevOps Arena — Adversarial & Self-Improving Operations
 
 Elevates the benchmark from static scenarios to live environments under active perturbation. All initiatives below are gated on the Core Harness and Task Library foundations landing first.
 
@@ -79,7 +79,7 @@ Elevates the benchmark from static scenarios to live environments under active p
 * **Closed-Loop Self-Improvement** `📅 Planned`
   * Evaluate whether an agent can permanently harden a cluster by generating reusable lint rules, custom admission policies, and incident runbooks after encountering an exploit.
 * **Game-Theoretic Duel Framework** `📅 Planned`
-  * Introduce standardized token/budget efficiency metrics ($/Uptime vs. $/Downtime) across continuous, multi-turn adversarial evaluations.
+  * Introduce standardized token/budget efficiency metrics (`$/Uptime` vs. `$/Downtime`) across continuous, multi-turn adversarial evaluations.
 
 ---
 
