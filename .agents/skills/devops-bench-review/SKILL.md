@@ -67,6 +67,8 @@ or fails to fix it).
 
 Apply the lenses that fit the change. Most code wants Correctness, Testability, and
 Conventions; library/registry surfaces add API hygiene and Domain modeling.
+**Vendor neutrality is not optional** — run it on anything touching
+`devops_bench/` or `docs/`.
 
 ### Correctness
 
@@ -129,6 +131,53 @@ state that should be an enum, and parallel lists that should be one list of reco
   intent** the code can't show (a `409`-on-re-run workaround, a length-limit
   rationale). When you flag one, say whether the fix is "delete it" or "rewrite it
   to explain the *why*".
+
+### Vendor neutrality
+
+**Run this lens on every change touching `devops_bench/` or `docs/`.** A
+`.coderabbit.yaml` rule covers the same ground, but in practice it catches
+literal "GKE"/"GCP" strings and little else, so the structural violations below
+are the ones a review has to find. Authors: run this before opening the PR.
+
+The rule from [AGENTS.md](../../../AGENTS.md): user-facing text and the generic
+framework layers stay vendor-neutral. Provider specifics belong in
+`devops_bench/providers/`, deployer implementations, `tf/`, or where they name a
+real provider artifact.
+
+The boundary that decides every call:
+
+| Generic — must stay neutral | Provider-scoped — specifics are fine |
+| --- | --- |
+| `core/`, `evalharness/`, `run.py`, `cli.py`, `tasks/`, `metrics/`, `verification/`, `chaos/`, `agents/`, `models/`, `results/`, `k8s/` | `providers/`, deployer implementations, `tf/`, `tasks/gcp/**` |
+
+What to look for, roughly in order of how often it slips through:
+
+- **A generic layer reading a provider env var.** `GCP_PROJECT_ID`,
+  `GOOGLE_CLOUD_*`, `GKE_*` resolved anywhere in the generic column is a finding
+  even when the surrounding prose is neutral — provider resolution belongs
+  behind the `PROVIDERS` registry. Grep the diff for `get_env(` and `os.environ`
+  and check which module the call lives in.
+- **Error and log messages.** The most-missed surface, because the code is
+  neutral and only the string is not: `"could not reach the GKE cluster"` raised
+  from `core/` should read `"could not reach the cluster"`.
+- **Defaults and fallbacks.** A neutral parameter that quietly defaults to one
+  provider (`location="us-central1"`, `provider="gcp"`) hard-codes a vendor
+  through the back door. The established pattern is deduction that *raises*
+  rather than falls back — see [infra.md](../../../docs/components/infra.md).
+- **Names on public surfaces.** A field, class, or CLI flag named for one
+  provider (`gke_cluster_name`, `--gcp-project`) fixes the vocabulary for every
+  future provider; `cluster_name` / `--project` carry the same meaning.
+- **Docs and docstring examples.** An example is user-facing text. Where a
+  provider-specific example is genuinely clearest, label it as one rather than
+  letting it read as the only way.
+
+Do **not** flag: anything in the provider-scoped column, a term naming a real
+artifact (`gcloud container clusters`, a `google_container_cluster` resource, the
+`gcp` provider key itself), or a GCP-shaped task under `tasks/gcp/`.
+Over-flagging is its own failure mode — it trains authors to ignore the lens.
+
+Give the neutral replacement, not just the objection: "cloud project id",
+"target Kubernetes cluster", "the configured provider".
 
 ### Security
 
