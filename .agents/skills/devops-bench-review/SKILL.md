@@ -50,6 +50,13 @@ express the need generically and consult
 [harness-capabilities](../../references/harness-capabilities.md); degrade to doing
 it inline.
 
+Those two lists are also the shape of a permission profile, if you want your
+tool to enforce the boundary rather than rely on the skill honouring it: allow
+repository reads plus the test and lint commands, deny file writes and the whole
+infra toolchain, and keep `rm`, `sudo`, `git push` and `git commit` denied
+outright. Exact syntax differs per tool and the right allowlist depends on where
+you run, so treat that as the shape rather than a config to copy.
+
 ## Gather the diff
 
 - **A PR** (number/URL): `gh pr view <t> --json title,body,baseRefName,changedFiles`
