@@ -4,7 +4,7 @@
 
 DevOps Bench is an evaluation harness and scenario suite that measures whether autonomous DevOps/SRE agents can operate real Kubernetes clusters correctly — with a provider-agnostic design targeting any cloud, on-prem, or bare-metal environment — by verifying live cluster and cloud state after the agent acts, rather than grading against static text or a reference diff. It's organized around the day-2 operator personas that actually carry pagers — Cluster/Platform Operators, Database & Stateful Workload Operators, Security & Compliance Operators, Cost/FinOps Operators, and Application SREs — and every task, deployer, and verifier targets a common provider-agnostic interface so results are comparable across Kind, vCluster, and any cloud's managed Kubernetes.
 
-This roadmap tracks initiatives for **DevOps Bench** (the static benchmark) and **DevOps Arena** (adversarial, live-chaos evaluation). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to pick up any of these.
+This roadmap tracks initiatives for **DevOps Bench** (the static, single-agent benchmark) and **DevOps Arena** (agent-vs-agent competitive evaluation). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to pick up any of these.
 
 ---
 
@@ -18,6 +18,8 @@ The evaluation loop: scenario management, deployers, verifiers, and result repor
   * Stand up vCluster as a fast, vendor-neutral evaluation environment alongside Kind, for cheaper parallel eval runs.
 * **OSS Visualization Dashboard** `📅 Planned`
   * Inspect agent trajectories, step logs, and assertions locally and in presubmit, for regression tracking across runs.
+* **Multi-Iteration Pass@k Scoring** `📅 Planned`
+  * Land multi-iteration runs so Pass@5 (at least one of 5 attempts succeeds) and Pass^5 (all 5 succeed) reliability metrics become computable — the result schema already carries a continuous `outcome_score` designed for this; iteration execution itself hasn't landed yet.
 
 ---
 
@@ -48,6 +50,8 @@ Every task is written against the provider-agnostic `devops_bench/providers/base
 
 * **GCP Provider** `✅ Completed` — see Completed section.
 * **Kind Provider (local/default)** `✅ Completed` — see Completed section.
+* **vCluster Provider** `⏳ In Progress`
+  * Land a vCluster-backed infra provider matching `devops_bench/providers/base.py`, for fast, low-cost virtual clusters alongside GCP and Kind.
 * **AWS Provider** `📅 Planned`
   * Land an AWS infra provider matching the existing `devops_bench/providers/base.py` interface, for cross-cloud parity with GCP and Kind.
 * **Azure Provider** `📅 Planned`
@@ -59,27 +63,25 @@ Every task is written against the provider-agnostic `devops_bench/providers/base
 
 ## 📋 Task Library & Operator Personas
 
-Scenario authorship under `tasks/`, tagged by the operator persona(s) each task targets.
+Scenario authorship under `tasks/`, tagged by the operator persona(s) each task targets. Scenario coverage spans three broad verification categories: resource-state assertions (JSONPath checks against any Kubernetes object), health/readiness checks (pod and workload conditions), and scaling/capacity checks — rolling up into the benchmark's three signals (correctness, recoverable safety, catastrophic outcome).
 
 * **Task Authorship & Scoring Framework** `⏳ In Progress`
   * Publish a framework for contributing new persona-tagged tasks with declarative `devops_bench/verification/` rubrics.
 * **Scale Complex Scenario Coverage** `⏳ In Progress`
   * Expand beyond the current CVE remediation, OPA remediation, spot rebalancing, migration/upgrade, multi-region failover, and secret rotation tasks toward full persona coverage.
+* **Fault-Injection Scenario Coverage (Agent vs. System)** `📅 Planned`
+  * Build on the completed `devops_bench/chaos/` base to inject faults into live scenarios — GitOps corruption, invalid container tags, broken RBAC policies, configuration drift, unauthorized network policies, container escapes, secret exposure — measuring an agent's diagnostic accuracy and reconciliation speed under real fault conditions.
+* **Closed-Loop Self-Improvement** `📅 Planned`
+  * Evaluate whether an agent can permanently harden a cluster by generating reusable lint rules, custom admission policies, and incident runbooks after encountering an injected fault.
 
 ---
 
-## 🥊 DevOps Arena — Adversarial & Self-Improving Operations
+## 🥊 DevOps Arena — Agent vs. Agent Competitive Evaluation
 
-Elevates the benchmark from static scenarios to live environments under active perturbation. All initiatives below are gated on the Core Harness and Task Library foundations landing first.
+Elevates the benchmark from single-agent scenarios to direct competition between two agents on opposing or shared objectives. Gated on the Core Harness and Task Library foundations landing first.
 
-* **Rogue Developer Simulation** `📅 Planned`
-  * Inject synchronized GitOps corruption, invalid container tags, broken RBAC policies, and subtle configuration drift directly into repository sources. Tracks debugging accuracy and reconciliation speed.
-* **Stealth Attacker & Compliance Security** `📅 Planned`
-  * Evaluate security response to unauthorized network policies, container escape risks, and secret exposure — without causing application service disruption.
-* **Closed-Loop Self-Improvement** `📅 Planned`
-  * Evaluate whether an agent can permanently harden a cluster by generating reusable lint rules, custom admission policies, and incident runbooks after encountering an exploit.
 * **Game-Theoretic Duel Framework** `📅 Planned`
-  * Introduce standardized token/budget efficiency metrics (`$/Uptime` vs. `$/Downtime`) across continuous, multi-turn adversarial evaluations.
+  * Introduce standardized token/budget efficiency metrics (`$/Uptime` vs. `$/Downtime`) across continuous, multi-turn evaluations where two agents compete for control of the same environment.
 
 ---
 
