@@ -19,7 +19,7 @@ The evaluation loop: scenario management, deployers, verifiers, and result repor
 * **OSS Visualization Dashboard** `📅 Planned`
   * Inspect agent trajectories, step logs, and assertions locally and in presubmit, for regression tracking across runs.
 * **Multi-Iteration Pass@k Scoring** `📅 Planned`
-  * Land multi-iteration runs so Pass@5 (at least one of 5 attempts succeeds) and Pass^5 (all 5 succeed) reliability metrics become computable — the result schema already carries a continuous `outcome_score` designed for this; iteration execution itself hasn't landed yet.
+  * Land multi-iteration execution and Pass@k aggregation so Pass@5 (at least one of 5 attempts succeeds) and Pass^5 (all 5 succeed) reliability metrics become computable. The result schema already carries a continuous `outcome_score` designed for this, but both pieces remain pending: `build_rows()` still hard-codes `iteration=0`, and aggregation only de-duplicates rows today — it doesn't yet define a success threshold or compute Pass@k.
 
 ---
 
@@ -28,7 +28,7 @@ The evaluation loop: scenario management, deployers, verifiers, and result repor
 CLI agent adapters (`devops_bench/agents/`) and model inference clients (`devops_bench/models/`).
 
 * **Expand Community Harness Support** `⏳ In Progress`
-  * Add CLI/API adapters for additional open-source agent harnesses beyond the current OpenClaw, Antigravity, and Gemini CLI integrations.
+  * Add CLI/API adapters for additional open-source agent harnesses beyond the current OpenClaw, Antigravity, and Gemini CLI integrations — Hermes, Claude Code, and Codex adapters are next.
 * **Multi-Model Compatibility Leaderboard** `⏳ In Progress`
   * Publish per-harness × per-model pass rates so results are comparable across model-agnostic harnesses and single-vendor harnesses alike.
 
@@ -37,10 +37,8 @@ Current harness × model support:
 | Harness | Opus | Sonnet | Gemini-Flash | Gemini-Pro | GPT-5.5 | GLM-5 | Supported Models |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | OpenClaw *(model-agnostic)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 6 |
-| Hermes *(model-agnostic)* | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 6 |
 | Antigravity | ✓ | ✓ | ✓ | ✓ | | | 4 |
-| Claude Code | ✓ | ✓ | | | | | 2 |
-| Codex | | | | | ✓ | | 1 |
+| Gemini CLI | | | ✓ | ✓ | | | 2 |
 
 ---
 
@@ -81,7 +79,7 @@ Scenario authorship under `tasks/`, tagged by the operator persona(s) each task 
 Elevates the benchmark from single-agent scenarios to direct competition between two agents on opposing or shared objectives. Gated on the Core Harness and Task Library foundations landing first.
 
 * **Game-Theoretic Duel Framework** `📅 Planned`
-  * Introduce standardized token/budget efficiency metrics (`$/Uptime` vs. `$/Downtime`) across continuous, multi-turn evaluations where two agents compete for control of the same environment.
+  * Introduce standardized token/budget efficiency metrics across continuous, multi-turn evaluations where two agents compete for control of the same environment.
 
 ---
 
