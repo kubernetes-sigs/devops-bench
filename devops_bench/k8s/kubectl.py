@@ -107,7 +107,13 @@ def _run_kubectl(
     """
     path = _resolve_kubeconfig(kubeconfig)
     extra_env = {"KUBECONFIG": path} if path else None
-    return run([*argv, *_context_args(context)], extra_env=extra_env, **kwargs)
+    ctx_args = _context_args(context)
+    if ctx_args and "--" in argv:
+        idx = argv.index("--")
+        argv = [*argv[:idx], *ctx_args, *argv[idx:]]
+    else:
+        argv = [*argv, *ctx_args]
+    return run(argv, extra_env=extra_env, **kwargs)
 
 
 def wait(
