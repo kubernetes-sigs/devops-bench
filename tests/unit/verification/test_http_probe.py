@@ -87,6 +87,73 @@ def test_probe_subprocess_error_is_an_error_not_a_fail(mocker: MockerFixture) ->
     assert "kubectl run failed" in result.reason
 
 
+def test_probe_connection_refused_is_a_fail_not_an_error(mocker: MockerFixture) -> None:
+    """Connection refused is an observation curl made, not an evaluation failure."""
+    mocker.patch(
+        "devops_bench.verification.verifiers.http_probe.run_pod",
+        side_effect=SubprocessError(
+            ["kubectl", "run"],
+            returncode=7,
+            stderr='pod default/http-probe-abc123 terminated (Error)',
+        ),
+    )
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0)
+    assert result.success is False
+    assert result.status == "fail"
+    assert "unreachable" in result.reason
+    assert "7" in result.reason
+
+
+def test_probe_connection_refused_classifies_as_fail_not_error(
+    mocker: MockerFixture,
+) -> None:
+    """A real outage returns status "fail", not "error".
+
+    A hold evaluator counts error samples in hold_error_count (which does not
+    trigger a violation) and counts fail samples as violations. Classifying
+    network unreachability as "fail" is therefore the property that prevents a
+    real outage from failing a hold open. The hold machinery itself is not
+    imported here because it lives outside this PR's scope, but the verifier's
+    output contract is the load-bearing assertion.
+    """
+    mocker.patch(
+        "devops_bench.verification.verifiers.http_probe.run_pod",
+        side_effect=SubprocessError(
+            ["kubectl", "run"],
+            returncode=7,
+            stderr='pod default/http-probe-abc123 terminated (Error)',
+        ),
+    )
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0.0)
+
+    assert result.success is False
+    assert result.status == "fail"
+    assert "unreachable" in result.reason
+
+
+def test_probe_kubectl_usage_error_stays_an_error(mocker: MockerFixture) -> None:
+    """A kubectl exit code that overlaps the curl network-failure set is still an error
+
+    when the pod never ran (no ``terminated (Error)`` marker in stderr), e.g. a bad
+    flag or an API/auth failure.
+    """
+    mocker.patch(
+        "devops_bench.verification.verifiers.http_probe.run_pod",
+        side_effect=SubprocessError(
+            ["kubectl", "run"],
+            returncode=1,
+            stderr="error: unable to connect to the server",
+        ),
+    )
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0)
+    assert result.success is False
+    assert result.status == "error"
+    assert "kubectl run failed" in result.reason
+
+
 def test_probe_parses_status_with_trailing_kubectl_noise(mocker: MockerFixture) -> None:
     """kubectl's `pod ... deleted` notice glued onto the code must not break parsing."""
     _patch_run_pod(

@@ -38,6 +38,27 @@ _log = get_logger("verification.http_probe")
 # request itself without leaving the call unbounded.
 _KUBECTL_OVERHEAD_SEC = 30
 
+# curl exit codes that mean the target was unreachable over the network (DNS
+# failure, connection refused, timeout, TLS connect failure, empty reply,
+# recv failure). These are observations, not evaluation errors: the probe pod
+# ran successfully and curl itself reported the target could not be reached.
+# See https://curl.se/libcurl/c/libcurl-errors.html.
+_CURL_NETWORK_FAILURE_EXIT_CODES: dict[int, str] = {
+    6: "could not resolve host",
+    7: "connection refused",
+    28: "operation timed out",
+    35: "TLS connect error",
+    52: "empty reply from server",
+    56: "failure in receiving network data",
+}
+
+# Substring kubectl's stderr carries when an ephemeral ``--rm`` pod's
+# container ran to completion and exited non-zero, as opposed to kubectl
+# itself failing before the pod ever ran (bad flags, API/auth errors). Only
+# in the former case is the container's exit code (surfaced as kubectl's own
+# returncode) meaningful as a curl exit code.
+_POD_TERMINATED_ERROR_MARKER = "terminated (Error)"
+
 
 @VERIFIERS.register("http_probe")
 class HttpProbeVerifier(BaseVerifier):
@@ -97,11 +118,50 @@ class HttpProbeVerifier(BaseVerifier):
             return self._run_probe()
         except SubprocessError as exc:
             stderr = (exc.stderr or "").strip()
+            unreachable = self._classify_unreachable(exc)
+            if unreachable is not None:
+                curl_exit, description = unreachable
+                _log.warning(
+                    "http_probe found %s unreachable: curl exit %d (%s)",
+                    self.url,
+                    curl_exit,
+                    description,
+                )
+                return (
+                    "fail",
+                    f"unreachable: curl exit {curl_exit} ({description})",
+                    {"curl_exit": curl_exit},
+                )
             _log.warning("http_probe kubectl run failed for %s: %s", self.url, stderr)
             return "error", f"kubectl run failed: {stderr}", None
         except Exception as exc:  # noqa: BLE001 - surface unexpected errors as check errors
             _log.warning("http_probe unexpected error for %s: %s", self.url, exc)
             return "error", f"unexpected error: {exc}", None
+
+    @staticmethod
+    def _classify_unreachable(exc: SubprocessError) -> tuple[int, str] | None:
+        """Return ``(curl_exit_code, description)`` when ``exc`` is a network-level probe miss.
+
+        Distinguishes the ephemeral pod's container exiting non-zero (curl
+        itself observed the target was unreachable) from kubectl failing to
+        even run the pod (bad flags, API/auth errors). Only the former is a
+        real observation the probe made; the latter stays an evaluation
+        error, since we cannot say anything about the target's reachability.
+
+        Args:
+            exc: The ``SubprocessError`` raised by ``run_pod``.
+
+        Returns:
+            The matched curl exit code and its description, or ``None`` if
+            ``exc`` does not represent a network-level unreachability.
+        """
+        stderr = exc.stderr or ""
+        if _POD_TERMINATED_ERROR_MARKER not in stderr:
+            return None
+        description = _CURL_NETWORK_FAILURE_EXIT_CODES.get(exc.returncode)
+        if description is None:
+            return None
+        return exc.returncode, description
 
     def _run_probe(self) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
         """Launch an ephemeral curl pod and evaluate its output."""
