@@ -2,6 +2,8 @@
 
 A standardized benchmarking suite to evaluate how well different agents or models perform specific DevOps tasks. Its goal is to provide an open-source, reproducible way to transparently assess agent performance across various infrastructure platforms and operational environments.
 
+See the [project roadmap](roadmap.md) for current initiatives and how to get involved.
+
 ## Community, discussion, contribution, and support
 
 Learn how to engage with the Kubernetes community on the [community page](http://kubernetes.io/community/).
