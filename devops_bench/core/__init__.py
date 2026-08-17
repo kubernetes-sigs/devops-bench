@@ -30,6 +30,7 @@ from devops_bench.core.logging import configure_logging, get_logger
 from devops_bench.core.registry import Registry
 from devops_bench.core.results import Result, Status
 from devops_bench.core.run_env import RunEnv
+from devops_bench.core.scratch import mint_dir, remove_minted, scratch_root
 
 __all__ = [
     "ClusterInfo",
@@ -45,6 +46,9 @@ __all__ = [
     "first_env",
     "get_bool",
     "get_int",
+    "scratch_root",
+    "mint_dir",
+    "remove_minted",
     "DevOpsBenchError",
     "ConfigError",
     "RegistryError",

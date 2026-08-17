@@ -19,8 +19,6 @@ from __future__ import annotations
 import datetime
 import importlib
 import json
-import shutil
-import tempfile
 import threading
 import time
 from dataclasses import replace
@@ -43,6 +41,8 @@ from devops_bench.core import (
     get_bool,
     get_env,
     get_logger,
+    mint_dir,
+    remove_minted,
 )
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
@@ -738,7 +738,7 @@ class DefaultEvalHarness(Harness):
             # Own a real per-run workspace so the artifact diff is rooted at
             # the directory the agent actually writes to (its CLI wrapper's
             # working directory), not the harness process's launch cwd.
-            workspace_path = Path(tempfile.mkdtemp(prefix="devops-bench-workspace-"))
+            workspace_path = mint_dir("workspace-")
             context = self.make_context(task, cluster=cluster_info, workspace_path=workspace_path)
 
             target_dep, ns = self._resolve_deployment_and_namespace(task)
@@ -884,7 +884,24 @@ class DefaultEvalHarness(Harness):
             if deployer is not None:
                 self._teardown(deployer, infra_config, task.name)
             if workspace_path is not None:
-                shutil.rmtree(workspace_path, ignore_errors=True)
+                try:
+                    remove_minted(workspace_path)
+                except ValueError:
+                    # A containment bug, not a cleanup hiccup, but teardown must
+                    # never raise (see _teardown above): results are only
+                    # persisted after every task in the batch completes, so
+                    # letting this escape would discard every prior task's
+                    # results, not just this one's cleanup.
+                    _log.exception(
+                        "refusing to remove workspace %s: not a path this run minted",
+                        workspace_path,
+                    )
+                except OSError:
+                    _log.warning(
+                        "failed to remove workspace %s; leaving it in place",
+                        workspace_path,
+                        exc_info=True,
+                    )
 
         return result
 

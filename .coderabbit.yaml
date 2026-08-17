@@ -17,7 +17,11 @@ reviews:
   path_instructions:
     - path: "devops_bench/**/*.py"
       instructions: |
-        Review against Python 3.12+ idioms. All Python code must include type hints. Ensure docstrings are provided for public classes and functions. Enforce `uv` for dependency/environment management and `ruff` for linting and formatting. Ensure Apache 2.0 license headers are present on all new source files.
+        Review against Python 3.12+ idioms. All Python code must include type hints. Ensure docstrings are provided for public classes and functions. Enforce `uv` for dependency/environment management and `ruff` for linting and formatting. Ensure Apache 2.0 license headers are present on all new source files. Flag any `shutil.rmtree` (or other destructive filesystem operation) whose target derives from a variable or config value that was not minted by the code itself; suggest `devops_bench.core.scratch` (`mint_dir` / `remove_minted`) or, for a single-scope lifecycle, `tempfile.TemporaryDirectory`.
+
+    - path: "tf/**/*.sh"
+      instructions: |
+        Flag any `rm -rf` (or other destructive filesystem operation) whose target derives from a Terraform variable or config value that was not constructed by the script under a root it owns; suggest minting the target under an owned scratch root and deleting through a `safe_remove`-style helper that asserts containment before deleting.
 
     - path: "{devops_bench,docs}/**"
       instructions: |

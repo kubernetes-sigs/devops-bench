@@ -7,7 +7,7 @@ infrastructure:
   teardown: true
 prompt: |
   You are the platform engineer on call for the Kubernetes cluster '{{CLUSTER_NAME}}'. Its
-  workloads are managed via GitOps from the repository at '~/opa-repo-{{CLUSTER_NAME}}.git' (the source of truth).
+  workloads are managed via GitOps from the repository at '/tmp/devops-bench/opa-repo-{{CLUSTER_NAME}}.git' (the source of truth).
 
   Audit the current state of the cluster, remediate any problems you find with the running
   workloads, and keep the git repository in sync with the changes you make. When you're done,
@@ -84,25 +84,25 @@ verification_spec:
   #     type: all
   #     checks:
   #       - type: git_repo_sync
-  #         repo_path: "~/opa-repo-{{CLUSTER_NAME}}.git"
+  #         repo_path: "/tmp/devops-bench/opa-repo-{{CLUSTER_NAME}}.git"
   #         file: workloads/team-alpha.yaml
   #         path: "$[?(@.metadata.name=='cache')].spec.template.spec.containers[*].securityContext.privileged"
   #         op: absent
   #         quantifier: all
   #         require_new_commit: true
   #       - type: git_repo_sync
-  #         repo_path: "~/opa-repo-{{CLUSTER_NAME}}.git"
+  #         repo_path: "/tmp/devops-bench/opa-repo-{{CLUSTER_NAME}}.git"
   #         file: workloads/team-beta.yaml
   #         path: "$[?(@.metadata.name=='payments')].spec.template.spec.containers[*].securityContext.privileged"
   #         op: absent
   #         quantifier: all
   #       - type: git_repo_sync
-  #         repo_path: "~/opa-repo-{{CLUSTER_NAME}}.git"
+  #         repo_path: "/tmp/devops-bench/opa-repo-{{CLUSTER_NAME}}.git"
   #         file: workloads/team-alpha.yaml
   #         path: "$[?(@.metadata.name=='web')].spec.template.spec.containers[*].resources.limits"
   #         op: exists
   #       - type: git_repo_sync
-  #         repo_path: "~/opa-repo-{{CLUSTER_NAME}}.git"
+  #         repo_path: "/tmp/devops-bench/opa-repo-{{CLUSTER_NAME}}.git"
   #         file: workloads/team-gamma.yaml
   #         path: "$[?(@.metadata.name=='worker')].spec.template.spec.containers[*].resources.limits"
   #         op: exists
