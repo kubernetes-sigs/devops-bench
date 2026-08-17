@@ -2,18 +2,18 @@
 
 A benchmark task is a typed contract on disk. You author one directory under `tasks/<provider>/<name>/` containing a single `task.yaml`, and the harness does the rest: it validates the file against the `Task` schema, substitutes infrastructure placeholders, optionally provisions a cluster, runs the agent, and grades the result.
 
-This guide walks you through the schema, the placeholders the harness fills in, the step-by-step authoring flow, two complete worked examples, and the considerations that keep your task safe to run alongside dozens of others. The schema is enforced by `Task` in `devops_bench/tasks/schema.py` and tasks are discovered and loaded by `FileSystemTaskLoader`. If anything here ever disagrees with that schema, the schema wins — and you should fix the doc.
+This guide walks you through the schema, the placeholders the harness fills in, the step-by-step authoring flow, two complete worked examples, and the considerations that keep your task safe to run alongside dozens of others. The schema is enforced by `Task` in `devops_bench/tasks/schema.py`, and tasks are discovered and loaded by `FileSystemTaskLoader`. Those are the source of truth; this guide describes them and can fall behind, so where the two disagree the schema is authoritative.
 
 For how deployers and stacks fit together, see [infrastructure](../components/infra.md).
 
 ## The task schema
 
-Every field below maps to an attribute on `Task`. Fields marked "required" must produce a usable value — the harness validates types strictly (no string-to-bool coercion) and ignores unknown keys, so a typo'd field name is silently dropped rather than flagged. Author carefully.
+Every field below maps to an attribute on `Task`. Fields marked `Required` must produce a usable value — the harness validates types strictly (no string-to-bool coercion) and ignores unknown keys, so a typo'd field name is silently dropped rather than flagged. Author carefully.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `task_id` (alias `id`) | Yes | Unique identifier for the task. `task_id` is accepted as an alias for `id` and is coerced to a string. |
-| `name` | Yes | Human-readable task name. Defaults to the directory name when omitted, but set it explicitly. |
+| `name` | No (defaults to the directory name) | Human-readable task name. Set it explicitly rather than relying on the default. |
 | `prompt` (aliases `goal`, `input`) | Yes | The instruction handed to the agent. Use `{{...}}` placeholders for any infra value — never hardcode a project, cluster, namespace, or deployment name. |
 | `expected_output` | Yes | The grading rubric, written as prose "critical requirements". Graded on **outcome**, so accept any valid path to the goal, not one prescribed method. |
 | `infrastructure` | Yes | `{deployer, stack, teardown, variables, provider?}`. Use `deployer: noop` for generation-only tasks (no cluster) or `deployer: tofu` with a `stack` under `tf/prebuilt/<dir>` to provision real infrastructure. |
@@ -28,12 +28,12 @@ Every field below maps to an attribute on `Task`. Fields marked "required" must 
 
 ## Placeholders
 
-The harness substitutes a fixed set of `{{...}}` placeholders into your `prompt` and `expected_output` (and into chaos/verification spec string leaves) just before the agent runs, using the live cluster and project for that run.
+The harness substitutes a fixed set of `{{...}}` placeholders into your `prompt` and `expected_output` (and into chaos/verification spec string leaves) just before the agent runs, using the live cluster and project for that run. The table below is the complete set — a `{{...}}` name that is not listed is left in the prompt verbatim rather than reported as an error, so check it against `_substitute_placeholders` in `devops_bench/evalharness/default.py` if in doubt.
 
 | Placeholder | Resolves to |
 | --- | --- |
-| `{{PROJECT_ID}}` / `{{GCP_PROJECT_ID}}` | The active GCP project ID. |
-| `{{CLUSTER_NAME}}` / `{{GKE_CLUSTER_NAME}}` | The active cluster name for this run. |
+| `{{PROJECT_ID}}` | The cloud project id for this run. |
+| `{{CLUSTER_NAME}}` | The target Kubernetes cluster name for this run. |
 | `{{APP_LOCATION}}` | The configured application location. |
 | `{{TARGET_DEPLOYMENT_NAME}}` | The deployment the agent operates on (and the chaos port-forward target). |
 | `{{NAMESPACE}}` | The namespace the target workload lives in. |
@@ -48,9 +48,9 @@ Write everything infra-specific as a placeholder. That is what lets the *same* t
 4. **Write `expected_output`** as outcome-based "critical requirements" — describe *what* a correct result must achieve, not the exact commands to get there.
 5. **(Optional) Add a `verification_spec` and `chaos_spec`.** Express deterministic cluster assertions as compound `sequence` / `parallel` nodes wrapping leaf verifiers like `pod_healthy` and `scaling_complete`. If you inject chaos, set the chaos entry's `verify:` to match a `verification_spec` entry's `name`.
 6. **(Optional) Add `documentation`** entries to ground scoring against authoritative docs.
-7. **Smoke-test with no infra.** This forces the `noop` deployer and skips provisioning, so it's fast and free:
+7. **Smoke-test with no infra.** This forces the `noop` deployer and skips provisioning, so it's fast and free. The `--no-infra` CLI flag does the same thing as the environment variable, and `--infra` forces provisioning back on:
    ```bash
-   BENCH_NO_INFRA=true python -m devops_bench tasks/<provider>/<name>/task.yaml
+   BENCH_NO_INFRA=true python -m devops_bench "tasks/PROVIDER/NAME/task.yaml"
    ```
 8. **Run for real, review the scores, then promote.** Once you've run the task against real infra and are satisfied with the grading, set `validated: true`.
 
@@ -65,13 +65,13 @@ name: "create-deployment"
 # never applied. generation_only is derived automatically from deployer == noop.
 infrastructure:
   deployer: "noop"
-prompt: "Generate a Kubernetes manifest for deploying our finetuned model to GKE cluster {{GKE_CLUSTER_NAME}}. The models are stored in GCS bucket models-{{GCP_PROJECT_ID}}. Ensure it can scale up and down with traffic."
+prompt: "Generate a Kubernetes manifest for deploying our finetuned model to cluster {{CLUSTER_NAME}}. The models are stored in the object storage bucket models-{{PROJECT_ID}}. Ensure it can scale up and down with traffic."
 expected_output: |
   critical requirements:
 
   - Deploy a vLLM server for the model.
   - Configure the deployment to use 1 NVIDIA L4 GPU and the 'nvidia.com/gpu' toleration.
-  - Mount the model bucket 'models-{{GCP_PROJECT_ID}}' using the gcsfuse CSI driver.
+  - Mount the model bucket 'models-{{PROJECT_ID}}' using the gcsfuse CSI driver.
   - Create a 'ClusterIP' Service exposing the server on a feasible port.
   - Create an HPA with feasible scaling parameters (max replicas, CPU utilization).
   - Use a dedicated service account for the deployment.
@@ -131,7 +131,7 @@ verification_spec:
 ## Key considerations
 
 > [!IMPORTANT]
-> **Parallel safety is non-negotiable.** Tasks run concurrently across a matrix of models and configs. Any GCP-global resource your task creates must be run-scoped — derive its name from `var.cluster_name` or a random suffix — and it must be destroyed at teardown. A fixed, shared name means two concurrent runs collide and both fail. Keep `variables.namespace` and `variables.target_deployment_name` in your stack consistent with the `{{NAMESPACE}}` and `{{TARGET_DEPLOYMENT_NAME}}` placeholders in your prompt, or the agent and the chaos injector will address different workloads.
+> **Parallel safety is non-negotiable.** Tasks run concurrently across a matrix of models and configs. Any project-global resource your task creates must be run-scoped — derive its name from `var.cluster_name` or a random suffix — and it must be destroyed at teardown. A fixed, shared name means two concurrent runs collide and both fail. Keep `variables.namespace` and `variables.target_deployment_name` in your stack consistent with the `{{NAMESPACE}}` and `{{TARGET_DEPLOYMENT_NAME}}` placeholders in your prompt, or the agent and the chaos injector will address different workloads.
 
 A few more habits that keep tasks healthy:
 
@@ -142,11 +142,11 @@ A few more habits that keep tasks healthy:
 
 ## Reviewing and validating your task
 
-Before you submit, run the `task-review` skill over your task. It checks the schema and rubric
+Before you submit, run the `task-review` skill over your task, once it lands — it is not in this repo yet, so until then work the checklist above by hand. It checks the schema and rubric
 quality and, most importantly, hunts the parallel-safety problems above — shared state that would
 make your task fail when the full matrix runs at once. It's review-only: static analysis plus maybe
 unit tests and linters, never provisioning infra or running an eval. (For changes to the harness
-*code* rather than a task, use `devops-bench-review` instead.)
+*code* rather than a task, use `devops-bench-review` instead, which is migrating alongside it.)
 
 To actually prove the task runs and grades correctly, use the `validate-eval` skill, which runs it in
 a self-healing loop and recommends setting `validated: true` once it's green.

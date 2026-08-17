@@ -10,4 +10,4 @@ A task is `tasks/<provider>/<name>/task.yaml` — the typed eval contract.
   its verification/chaos specs.
 - Run the **task-review** skill before submitting.
 
-Deeper guide: `../docs/how-to/add-a-task.md`.
+Deeper guide: [how to add a task](../docs/how-to/add-a-task.md).
