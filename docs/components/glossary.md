@@ -26,22 +26,22 @@ Every term below names a real concept in the codebase. The "Where it lives" colu
 
 The planned-disruption subsystem (`devops_bench/chaos/`) that stresses the cluster while the agent works.
 
-| Term | What it is |
-| --- | --- |
-| **ChaosSpec** | The disruption definition on a task: pairs a trigger, an action/fault, and a `verify` reference. |
-| **Trigger** | Decides *when* a fault fires (e.g. a time delay). |
-| **Fault** | The disruptive action itself (e.g. generate load against a service). |
-| **ChaosAgent** | An LLM tool-loop that drives the fault's commands. |
+| Term | What it is | Where it lives |
+| --- | --- | --- |
+| **ChaosSpec** | The disruption definition on a task: pairs a trigger, an action/fault, and a `verify` reference. | `devops_bench/chaos/spec.py` |
+| **Trigger** | Decides *when* a fault fires (e.g. a time delay). | `devops_bench/chaos/base.py`; concrete triggers in `chaos/triggers/` |
+| **Fault** | The disruptive action itself (e.g. generate load against a service). | `devops_bench/chaos/base.py`; concrete faults in `chaos/faults/` |
+| **ChaosAgent** | An LLM tool-loop that drives the fault's commands. | `devops_bench/chaos/agent.py` |
 
 ### Verification
 
 Type-safe assertions about cluster state (`devops_bench/verification/`).
 
-| Term | What it is |
-| --- | --- |
-| **VerificationSpec** | The assertion tree on a task, referenced by a chaos spec's `verify`. |
-| **Compound nodes** | Nodes that combine other verifiers: `sequence` and `parallel` for ordering, `all` / `any` / `none` for boolean combination. |
-| **Verifier** | A leaf check against live cluster state (`pod_healthy`, `scaling_complete`, `resource_property`), evaluated against one shared deadline. |
+| Term | What it is | Where it lives |
+| --- | --- | --- |
+| **VerificationSpec** | The assertion tree on a task, referenced by a chaos spec's `verify`. | `devops_bench/verification/spec.py` |
+| **Compound nodes** | Nodes that combine other verifiers: `sequence` and `parallel` for ordering, `all` / `any` / `none` for boolean combination. | `devops_bench/verification/spec.py`; executed by `verification/runner.py` |
+| **Verifier** | A leaf check against live cluster state (`pod_healthy`, `scaling_complete`, `resource_property`), evaluated against one shared deadline. | `devops_bench/verification/verifiers/` |
 
 ### Run state
 
