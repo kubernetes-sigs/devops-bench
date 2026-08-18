@@ -5,10 +5,10 @@ description: Discover and remove cloud or local resources leaked by aborted or f
 
 # Clean up orphaned resources
 
-A crashed or aborted run leaves debris: scratch state on the runner host, kind
-clusters and `-eval` containers, stuck processes, and — worse — cloud resources a
-failed teardown never removed. The cloud leftovers cause the classic "a fresh run
-fails instantly" symptom, often a `409 already exists`. This skill finds that
+A crashed or aborted run leaves debris: scratch state on the host the run
+executed on, kind clusters and `-eval` containers, stuck processes, and — worse —
+cloud resources a failed teardown never removed. The cloud leftovers cause the
+classic "a fresh run fails instantly" symptom, often a `409 already exists`. This skill finds that
 debris and removes it **after explicit confirmation**.
 
 - "Before any retry" local checklist (don't duplicate it — run it) →
@@ -81,7 +81,7 @@ project.
 # clusters
 gcloud container clusters delete <name> --location <loc> --project "$PROJECT" --quiet
 # node SAs (the 409 culprit)
-gcloud iam service-accounts delete gke-nodes-<cluster>@"$PROJECT".iam.gserviceaccount.com --project "$PROJECT" --quiet
+gcloud iam service-accounts delete "gke-nodes-<cluster>@${PROJECT}.iam.gserviceaccount.com" --project "$PROJECT" --quiet
 # secrets
 gcloud secrets delete <name> --project "$PROJECT" --quiet
 # auto-mode VPCs — delete dependent firewall rules first, then the network

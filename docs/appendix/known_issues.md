@@ -7,7 +7,7 @@ Failure recovery and deliberate workarounds for the eval pipeline (`python -m de
 
 ## Section 1 — Issue router (recover from eval failures)
 
-If an eval fails, find the symptom below and apply the action. Many failures are transient infrastructure flakes — those are marked **Retry** and should simply be retried (after cleaning stale state), not debugged.
+If an eval fails, find the symptom below and apply the action. Many failures are transient infrastructure flakes — those are marked **Infra flake — retry** and should simply be retried (after cleaning stale state), not debugged.
 
 > [!TIP]
 > **Class** tells you what to do without reading the row. `Infra flake — retry`: re-run the combo after the *Before any retry* cleanup; do **not** open the code. `Config / auth`: a credential or settings fix is required before it will ever pass. `Setup`: a one-time host or cloud-project prerequisite is missing.
@@ -40,7 +40,7 @@ After applying a fix, retry the run. For any infra-flake row, run the cleanup be
 > [!IMPORTANT]
 > Stale run state and orphaned cloud resources are the most common cause of a "fresh" run failing instantly. Clean them before every (re)launch.
 
-On the runner host:
+On the host the run executed on:
 
 ```bash
 # 1. Wipe stale per-run scratch + state (fixes "could not locate any control plane nodes")
