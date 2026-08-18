@@ -28,7 +28,10 @@ Notes:
   harness chains the supporting calls (args, follow-ups, file reads) from it.
 - **Codex**: Codex CLI / `codex exec`; background via a shell job; state in files;
   isolation via `git worktree`; prompt the user to clarify; keepalive via periodic
-  re-check. No native scheduler — re-poll on a `sleep`/cron.
+  re-check. No native scheduler — re-poll on a `sleep`/cron. **Unverified**: these
+  cells are inferred from Codex CLI's documented behaviour, not confirmed against a
+  live instance the way the Antigravity row was. Treat them as a starting point and
+  fall back to the generic column if a primitive does not behave as described.
 - **Antigravity tool set** (confirmed from a live instance): files `view_file` ·
   `list_dir` · `grep_search` · `write_to_file` · `replace_file_content` ·
   `multi_replace_file_content`; exec `run_command` · `ask_permission` ·

@@ -148,8 +148,8 @@ trajectory end-to-end without standing up infrastructure:
 ```bash
 export BENCH_AGENT_TYPE=myagent
 export BENCH_NO_INFRA=true
-export AGENT_PROVIDER=...
-export AGENT_MODEL=...
+export AGENT_PROVIDER=myprovider
+export AGENT_MODEL=mymodel
 # run a single generation-only task and inspect results.json
 ```
 
