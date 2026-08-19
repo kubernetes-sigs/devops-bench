@@ -46,7 +46,8 @@ PROJECT=<sandbox-project>   # verify: gcloud config get-value project
 gcloud container clusters list --project "$PROJECT" \
   --filter="name~'^c[0-9a-f]{8}-'" --format="table(name,location,status)"
 
-# gke-nodes-* node SAs — deterministic names cause 409 already exists on re-run
+# gke-nodes-* node SAs. These now carry an md5 discriminator so they no longer
+# collide, but a failed teardown still strands them.
 gcloud iam service-accounts list --project "$PROJECT" \
   --filter="email~'^gke-nodes-'" --format="table(email)"
 
@@ -110,5 +111,6 @@ and confirm the discovery list is now empty so a re-run won't `409`.
   production project.
 - Match the aborted run's token prefix; never touch shared or long-lived infra.
 - Default to list/dry-run mode; deletion is opt-in.
-- The deterministic `gke-nodes-*` SA is the usual `409 already exists` cause — when
-  in doubt, that's the one to sweep.
+- A stranded `gke-nodes-*` SA no longer causes `409 already exists` on re-run — the
+  name carries an md5 of the cluster name — but it is still the most commonly
+  leaked resource, so sweep it.
