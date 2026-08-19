@@ -23,7 +23,10 @@ from pytest_mock import MockerFixture
 from devops_bench.core import SubprocessError
 from devops_bench.k8s.conditions import poll_until as _real_poll_until
 from devops_bench.verification import VerificationSpec
-from devops_bench.verification.verifiers.http_probe import HttpProbeVerifier
+from devops_bench.verification.verifiers.http_probe import (
+    _BODY_MATCH_LIMIT_CHARS,
+    HttpProbeVerifier,
+)
 
 
 def _patch_run_pod(mocker: MockerFixture, output: str) -> Any:
@@ -94,7 +97,7 @@ def test_probe_connection_refused_is_a_fail_not_an_error(mocker: MockerFixture) 
         side_effect=SubprocessError(
             ["kubectl", "run"],
             returncode=7,
-            stderr='pod default/http-probe-abc123 terminated (Error)',
+            stderr="pod default/http-probe-abc123 terminated (Error)",
         ),
     )
     v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
@@ -122,7 +125,7 @@ def test_probe_connection_refused_classifies_as_fail_not_error(
         side_effect=SubprocessError(
             ["kubectl", "run"],
             returncode=7,
-            stderr='pod default/http-probe-abc123 terminated (Error)',
+            stderr="pod default/http-probe-abc123 terminated (Error)",
         ),
     )
     v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
@@ -174,6 +177,20 @@ def test_probe_unparseable_output_is_an_error(mocker: MockerFixture) -> None:
     assert result.status == "error"
 
 
+def test_probe_body_match_is_bounded(mocker: MockerFixture) -> None:
+    """Only the leading slice of the body is matched, so a huge body cannot stall the regex."""
+    body = ("a" * _BODY_MATCH_LIMIT_CHARS) + "needle"
+    _patch_run_pod(mocker, f"{body}\n200")
+    v = HttpProbeVerifier.model_validate(
+        {"type": "http_probe", "url": "http://svc", "expect_body_matches": "needle"}
+    )
+    result = v.verify(0)
+    assert result.success is False
+    assert result.status == "fail"
+    # body_length still reports the full observed body, not the matched slice.
+    assert result.raw["body_length"] == len(body)
+
+
 def test_probe_polls_until_success(mocker: MockerFixture) -> None:
     """Converge mode retries a fresh probe until the expected status appears."""
     run_pod = mocker.patch(
@@ -196,6 +213,10 @@ def test_probe_polls_until_success(mocker: MockerFixture) -> None:
     result = v.verify(30)
     assert result.success is True
     assert run_pod.call_count == 3
+    # Each retry must launch a fresh pod name: reusing one would collide with a
+    # prior attempt's pod that has not finished terminating.
+    pod_names = [call.args[0] for call in run_pod.call_args_list]
+    assert len(set(pod_names)) == 3
 
 
 def test_probe_assert_mode_is_single_shot(mocker: MockerFixture) -> None:

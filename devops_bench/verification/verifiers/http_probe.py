@@ -59,6 +59,14 @@ _CURL_NETWORK_FAILURE_EXIT_CODES: dict[int, str] = {
 # returncode) meaningful as a curl exit code.
 _POD_TERMINATED_ERROR_MARKER = "terminated (Error)"
 
+# Upper bound on the response-body characters handed to ``re.search``. The
+# probed service is deployed by the agent under evaluation, so its body is
+# untrusted input: an adversarial body paired with a backtracking-prone
+# pattern could otherwise burn evaluator CPU well past the verification
+# budget. A match that only appears past this prefix is not seen; the
+# reported ``body_length`` is still the full observed length.
+_BODY_MATCH_LIMIT_CHARS = 64 * 1024
+
 
 @VERIFIERS.register("http_probe")
 class HttpProbeVerifier(BaseVerifier):
@@ -78,7 +86,9 @@ class HttpProbeVerifier(BaseVerifier):
         type: Discriminator literal, always ``"http_probe"``.
         url: URL to probe (must be reachable from inside the cluster).
         expect_status: Expected HTTP status code; default 200.
-        expect_body_matches: Optional regex applied to the response body.
+        expect_body_matches: Optional regex applied to the response body. Only
+            the first :data:`_BODY_MATCH_LIMIT_CHARS` characters are matched
+            against, since the body is untrusted input.
         namespace: Namespace the ephemeral pod runs in; active context when None.
         probe_timeout: Seconds the curl command may run. The ``kubectl run``
             call is bounded by this value plus :data:`_KUBECTL_OVERHEAD_SEC`.
@@ -207,6 +217,8 @@ class HttpProbeVerifier(BaseVerifier):
                 f"expected HTTP {self.expect_status}, got {status_code} from {self.url}",
                 raw,
             )
-        if self.expect_body_matches and not re.search(self.expect_body_matches, body):
+        if self.expect_body_matches and not re.search(
+            self.expect_body_matches, body[:_BODY_MATCH_LIMIT_CHARS]
+        ):
             return "fail", f"body did not match pattern {self.expect_body_matches!r}", raw
         return "pass", f"HTTP {status_code} from {self.url}", raw
