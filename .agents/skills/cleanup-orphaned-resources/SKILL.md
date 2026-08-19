@@ -1,12 +1,12 @@
 ---
 name: cleanup-orphaned-resources
-description: Discover and remove cloud or local resources leaked by aborted or failed eval runs — stale per-run state, leftover kind clusters and `-eval` containers, stuck harness processes, and orphaned GKE clusters, node service accounts, secrets, VPCs, and Artifact Registry repos in the sandbox project. Invoke when a "fresh" run fails instantly, when someone reports leaked or orphaned resources, or asks to "clean up after a failed run", "sweep the sandbox project", or "why does re-running 409?".
+description: Discover and remove cloud or local resources leaked by aborted or failed eval runs — stale per-run state, leftover kind clusters and their node containers, stuck harness processes, and orphaned GKE clusters, node service accounts, secrets, VPCs, and Artifact Registry repos in the sandbox project. Invoke when a "fresh" run fails instantly, when someone reports leaked or orphaned resources, or asks to "clean up after a failed run", "sweep the sandbox project", or "why does re-running 409?".
 ---
 
 # Clean up orphaned resources
 
 A crashed or aborted run leaves debris: scratch state on the host the run
-executed on, kind clusters and `-eval` containers, stuck processes, and — worse —
+executed on, kind clusters and their node containers, stuck processes, and — worse —
 cloud resources a failed teardown never removed. The cloud leftovers cause the
 classic "a fresh run fails instantly" symptom, often a `409 already exists`. This skill finds that
 debris and removes it **after explicit confirmation**.
@@ -27,7 +27,7 @@ confirm, delete in dependency order.
 Most "instant fresh failure" cases are local stale state, not cloud leaks. Run the
 **"Before any retry"** checklist in
 [`known_issues.md`](../../../docs/appendix/known_issues.md) — it wipes
-`/tmp/devops-bench-runs/*`, deletes leftover kind clusters and orphaned `-eval`
+`/tmp/devops-bench-runs/*`, deletes leftover kind clusters and their orphaned node
 containers (which `kind get clusters` does not track), and kills stale
 `devops_bench` / agent processes from a prior launch. Do this on the host the run
 actually ran on. Don't restate the commands here — follow the checklist.
@@ -41,9 +41,10 @@ Match on run-token prefixes so you never sweep shared infra.
 ```bash
 PROJECT=<sandbox-project>   # verify: gcloud config get-value project
 
-# -eval GKE clusters from a crashed run
+# Run-scoped GKE clusters from a crashed run. RunEnv names a cluster
+# c<blake2s digest of the run id>, so match that shape rather than a fixed suffix.
 gcloud container clusters list --project "$PROJECT" \
-  --filter="name~'-eval$'" --format="table(name,location,status)"
+  --filter="name~'^c[0-9a-f]{8}-'" --format="table(name,location,status)"
 
 # gke-nodes-* node SAs — deterministic names cause 409 already exists on re-run
 gcloud iam service-accounts list --project "$PROJECT" \
