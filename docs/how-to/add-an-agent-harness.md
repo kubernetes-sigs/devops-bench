@@ -13,7 +13,7 @@ For the concepts (harness vs model, capabilities, configuration), read
 | You do | Where |
 | --- | --- |
 | Subclass `AgentHarness` | `devops_bench/agents/base.py` |
-| Implement `_execute(self, prompt) -> AgentResult` | your new module |
+| Implement `_execute(self, prompt, workspace_path=None) -> AgentResult` | your new module |
 | Register with `@AGENTS.register("<key>")` | your new module |
 | Add the module to `_BUILTIN_AGENT_MODULES` | `devops_bench/evalharness/default.py` |
 
