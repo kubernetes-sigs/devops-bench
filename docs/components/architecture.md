@@ -1,6 +1,6 @@
 # Architecture
 
-devops-bench is built as a set of pluggable components wired together by a single orchestration engine. Everything extensible is a registry, so adding a new agent, model, cloud, fault, verifier, or metric means registering a class — not editing the engine.
+devops-bench is built as a set of pluggable components wired together by a single orchestration engine. Almost every extension axis is a registry, so adding a new agent, model, cloud, fault, verifier, or metric means registering a class rather than editing the engine. Deployers are the exception: they are selected by the factory in `devops_bench/deployers/factory.py`.
 
 ## The big picture
 
@@ -23,7 +23,7 @@ flowchart TD
 Each task moves through these steps in order. The responsible component is named in parentheses.
 
 1. **Invocation** — `python -m devops_bench` parses arguments (`cli.py`) and calls `run_benchmark` (`run.py`).
-2. **Per-run isolation (optional)** — under `--parallel`, a `RunEnv` gives the run its own kubeconfig, gcloud config, tofu data dir, and a run-unique cluster name (`core/run_env.py`).
+2. **Per-run isolation (optional)** — under `--parallel`, a `RunEnv` gives the run its own kubeconfig, cloud CLI configuration, tofu data dir, and a run-unique cluster name (`core/run_env.py`).
 3. **Load tasks** — task files are read from disk and validated into typed `Task` objects (`FileSystemTaskLoader`).
 4. **Build the harness** — `DefaultEvalHarness` is constructed and snapshots one gated agent config so every run and every record reads the same capabilities.
 5. **Deploy infrastructure** — the deployer is resolved and brought up (`get_deployer` → `up()`).
@@ -45,7 +45,7 @@ Every axis is a registry. To extend the benchmark, add a class with the matching
 | Agents | `AGENTS` |
 | Models | `MODELS` |
 | Cloud providers | `PROVIDERS` |
-| Deployers | deployer factory |
+| Deployers | `get_deployer` factory (not a registry) |
 | Chaos faults / triggers | `FAULTS`, `TRIGGERS` |
 | Verifiers | `VERIFIERS` |
 | Metrics | `METRICS` |

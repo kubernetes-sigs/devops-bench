@@ -79,28 +79,36 @@ Flag any task/stack/prompt that pins one of these to a fixed value.
 
 1. **Every globally-unique cloud resource name is run-scoped.** Service accounts,
    AR repos, Cloud SQL instances, external IPs, buckets — embed `var.cluster_name`
-   and/or a `random_id` suffix so two concurrent runs coexist (compare the
-   `secret-rotation` stack's `random_id`-suffixed `sa-*` / `db-credentials-*`). A
-   fixed name → `409 already exists` the moment a second run starts.
+   and/or a `random_id` suffix so two concurrent runs coexist. The pattern to look for is a
+   `random_id` resource feeding the name, or interpolation of `var.cluster_name`
+   into it. A fixed name → `409 already exists` the moment a second run starts.
 2. **Teardown sweeps project-global resources the stack doesn't own.** Anything an
    agent or seed script creates outside the stack's managed resources (e.g. a
    `hello-app-*` AR repo) survives `tofu destroy` — the stack needs a destroy-time
-   sweep, or teardown leaks (see the leaked-AR-repo sweep in known-issues §2).
+   sweep, or teardown leaks (see the leaked-AR-repo sweep in known-issues §2). The
+   sweep must filter on the run's own token (`var.cluster_name` or an equivalent
+   ownership label) — an unscoped sweep deletes a sibling run's resources while
+   that run is still using them.
 3. **Namespace consistency.** The namespace must match across the prompt's
    `{{NAMESPACE}}`, the stack's `variables.namespace`, and any matrix override — or
    the agent and the chaos injector address different workloads.
-4. **Node-SA names are deterministic today** (`gke-nodes-<cluster>`, not suffixed,
-   and multi-cluster stacks truncate to `substr(cluster_name, 0, 15)` collapsing
-   east/west to one id). So a **multi-cluster GKE task is NOT parallel-safe until
-   the node SA is suffixed** — flag it as a blocker and cite known-issues §2 H6 / the
+4. **Node-SA names carry their own discriminator.** `tf/modules/cluster/gke`
+   builds `account_id = "gke-nodes-<slug>-<md5(cluster_name)[:6]>"`, so two
+   clusters whose names collide after slug truncation still get distinct service
+   accounts. This used to be a parallel-safety blocker for multi-cluster GKE
+   tasks and no longer is — do not flag it. A stack that names its own service
+   account without such a discriminator still should be flagged. The
    `409 gke-nodes-*` router row.
 5. **No per-task mutation of the shared VM service-account IAM.** A stack that
    grants a project role to the shared `openclaw-vm-sa` via
    `google_project_iam_member` in its own state: the first `tofu destroy` strips the
    binding while sibling runs still need it → mid-run auth loss.
-6. **Name-length budget.** Cluster base name **+ run token ≤ 40 chars** (GKE limit),
-   and the discriminator must survive any stack-side truncation (a suffix the gke
-   module then truncates off collapses two runs to one name).
+6. **Name-length budget.** Check the *resolved* name that `RunEnv.cluster_name()`
+   produces, not the raw base-plus-token sum: it already clamps to the GKE limit
+   and the run token is the prefix, so a long base name does not by itself drop
+   the discriminator. What to verify is that any *stack-side* truncation
+   preserves that prefix — a suffix the module truncates off collapses two runs
+   to one name.
 
 For each parallel finding, **state which axis triggers it** (Task / Model /
 AgentConfig) and whether `RunEnv` already covers it — that's what the maintainer
@@ -117,8 +125,8 @@ kind/gcp resolver won't populate are a red flag — the harness can't set them.
 
 ### Placeholders
 
-`{{GKE_CLUSTER_NAME}}` / `{{CLUSTER_NAME}}`, `{{NAMESPACE}}`,
-`{{TARGET_DEPLOYMENT_NAME}}`, `{{PROJECT_ID}}` used **consistently** and only from
+`{{PROJECT_ID}}`, `{{CLUSTER_NAME}}`, `{{APP_LOCATION}}`,
+`{{TARGET_DEPLOYMENT_NAME}}`, `{{NAMESPACE}}` used **consistently** and only from
 the fixed supported set — there is **no `{{REPO_PATH}}`** or other invented token (an
 unknown `{{...}}` is left un-substituted and reaches the agent literally). Every
 infra-specific value in the prompt/rubric/specs is a placeholder, never a hardcoded

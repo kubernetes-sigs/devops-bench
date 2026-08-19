@@ -51,7 +51,7 @@ Per-run plumbing in `devops_bench/core/`.
 | --- | --- |
 | **RunContext** | Per-task state threaded through a run. |
 | **ClusterInfo** | Cluster connection details (name, location, kubeconfig). |
-| **RunEnv** | Per-run isolation (kubeconfig, gcloud config, tofu data dir, unique cluster name) that lets concurrent runs share a host without colliding. |
+| **RunEnv** | Per-run isolation (kubeconfig, cloud CLI configuration, tofu data dir, unique cluster name) that lets concurrent runs share a host without colliding. |
 
 ## Part B — Directory structure
 

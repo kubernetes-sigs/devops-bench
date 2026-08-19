@@ -4,7 +4,7 @@ description: >
   Use when the user asks for a CODE review of devops-bench changes — e.g.
   "review this PR", "review my changes", "review the working tree", "code-review
   this diff", "is this harness/deployer/metric change sound". Reviews a PR
-  (number/URL) or the current working tree across seven code lenses —
+  (number/URL) or the current working tree across eight code lenses —
   correctness, testability, maintainability, API hygiene, domain modeling,
   conventions, and security — and returns ranked, actionable findings with
   severity + file:line evidence + a concrete fix. Review-only: it analyzes
@@ -190,8 +190,10 @@ Give the neutral replacement, not just the objection: "cloud project id",
 
 Secrets and inputs: no committed credentials, keys, or tokens (Grep the diff for
 obvious patterns); secrets read from env/secret-store, not hardcoded; user/agent/
-task-supplied strings that reach a shell are validated or passed argv-style (no
-`shell=True` interpolation); no path traversal from un-sanitized names. Flag a
+task-supplied strings that reach a shell are passed argv-style, never
+interpolated into a shell string — validation does not make interpolation safe,
+so an allowlist is an extra check rather than a substitute, and `shell=True`
+with untrusted input is always a finding; no path traversal from un-sanitized names. Flag a
 secret echoed into logs.
 
 ## Verify, then present
