@@ -78,10 +78,16 @@ Flag any task/stack/prompt that pins one of these to a fixed value.
 **What the author MUST guarantee** (none of this is isolated for you):
 
 1. **Every globally-unique cloud resource name is run-scoped.** Service accounts,
-   AR repos, Cloud SQL instances, external IPs, buckets — embed `var.cluster_name`
-   and/or a `random_id` suffix so two concurrent runs coexist. The pattern to look for is a
-   `random_id` resource feeding the name, or interpolation of `var.cluster_name`
-   into it. A fixed name → `409 already exists` the moment a second run starts.
+   AR repos, Cloud SQL instances, external IPs, buckets — a fixed name means
+   `409 already exists` the moment a second run starts. Which discriminator is
+   acceptable depends on who destroys the resource:
+   - **Terraform manages it** — a `random_id` suffix is enough, since `tofu
+     destroy` knows what it owns and never has to search for it by name.
+   - **A teardown sweep removes it** (anything created outside the stack's
+     managed resources) — it must carry `var.cluster_name` or an equivalent
+     ownership label. A random suffix prevents collisions but does not say
+     *which run* owns the resource, so the sweep in item 2 cannot select it
+     without risking a sibling run's resources.
 2. **Teardown sweeps project-global resources the stack doesn't own.** Anything an
    agent or seed script creates outside the stack's managed resources (e.g. a
    `hello-app-*` AR repo) survives `tofu destroy` — the stack needs a destroy-time
