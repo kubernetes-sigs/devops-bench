@@ -2,7 +2,7 @@
 name: task-review
 description: >
   Use when the user adds or changes a benchmark TASK and asks to review it — e.g.
-  "review this new task", "is this task parallel-safe", "review the secret-rotation
+  "review this new task", "is this task parallel-safe", "review this
   task.yaml + stack", "will this task collide under the matrix", "check my new
   tf/prebuilt stack". Reviews a newly added/changed `tasks/**/task.yaml` together
   with its TF stack across schema/metadata, spec parsing, outcome rubric,
