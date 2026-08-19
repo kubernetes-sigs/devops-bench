@@ -16,7 +16,7 @@ Every field below maps to an attribute on `Task`. Fields marked `Required` must 
 | `name` | No (defaults to the directory name) | Human-readable task name. Set it explicitly rather than relying on the default. |
 | `prompt` (aliases `goal`, `input`) | Yes | The instruction handed to the agent. Use `{{...}}` placeholders for any infra value — never hardcode a project, cluster, namespace, or deployment name. |
 | `expected_output` | Yes | The grading rubric, written as prose "critical requirements". Graded on **outcome**, so accept any valid path to the goal, not one prescribed method. |
-| `infrastructure` | Yes | `{deployer, stack, teardown, variables, provider?}`. Use `deployer: noop` for generation-only tasks (no cluster) or `deployer: tofu` with a `stack` under `tf/prebuilt/<dir>` to provision real infrastructure. |
+| `infrastructure` | No (defaults to a local kind cluster) | `{deployer, stack, teardown, variables, provider}`. Omitting it entirely gives `deployer: tofu` with the `prebuilt/kind` stack, whose provider is deduced as `kind`. Use `deployer: noop` for generation-only tasks (no cluster), or `deployer: tofu` with a `stack` under `tf/prebuilt/<dir>` for real infrastructure — any stack whose final path segment is not `kind` **must** set `provider` explicitly, since no cloud is ever assumed. |
 | `validated` | No (defaults `false`) | Set `true` only after a human has vetted the task. Required for leaderboard eligibility — an unvetted task never counts. |
 | `verification_spec` | No | A list of `{name, spec: <typed node>}` entries. Deterministic cluster assertions; `name` is the cross-reference key a `chaos_spec` resolves against. |
 | `chaos_spec` | No | A list of `{name, trigger, action, verify}` entries, where `verify` matches a `verification_spec` entry's `name`. |
@@ -91,7 +91,8 @@ For a task that needs a live cluster, swap the `infrastructure` block for a `tof
 ```yaml
 infrastructure:
   deployer: "tofu"
-  stack: "prebuilt/optimize-scale"
+  provider: "gcp"          # required: the stack is not named `kind`
+  stack: "prebuilt/minimum"
   teardown: true
   variables:
     namespace: "default"
@@ -110,9 +111,10 @@ chaos_spec:
     verify: "Planned Load Spike Verification"
 verification_spec:
   - name: "Planned Load Spike Verification"
-    spec:
+    role: objective
+    weight: 1.0
+    check:
       type: parallel
-      name: "Planned Load Spike Verification"
       checks:
         - type: pod_healthy
           name: pod_spec
@@ -123,7 +125,34 @@ verification_spec:
           deployment: "{{TARGET_DEPLOYMENT_NAME}}"
           min_replicas: 2
           namespace: "{{NAMESPACE}}"
+  # A safeguard asserts the agent did not do something harmful. Severity picks
+  # how it scores: `recoverable` drags the outcome down, `catastrophic` zeroes it.
+  - name: "nothing-in-default"
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: resource_property
+      kind: deployment
+      selector: "app={{TARGET_DEPLOYMENT_NAME}}"
+      namespace: default
+      op: absent
 ```
+
+Each entry carries the scoring vocabulary, not just a check tree:
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | Cross-reference key; a `chaos_spec` entry's `verify:` matches this. |
+| `role` | Yes | `objective` feeds correctness; `safeguard` asserts the agent avoided harm. |
+| `severity` | Safeguards only | `recoverable` or `catastrophic`. A failed catastrophic safeguard zeroes the outcome. |
+| `weight` | No (default `1.0`) | Relative contribution within its role. Must be greater than zero. |
+| `mode` | No (derived from `role`) | `converge` polls until true, `assert` evaluates once. Objectives converge, safeguards assert. |
+| `check` | Yes | The verifier tree: a leaf, or `sequence` / `parallel` / `all` / `any` / `none` wrapping others. |
+
+> [!IMPORTANT]
+> The entry schema is strict (`extra="forbid"`), so a stray or misspelled key is
+> rejected outright rather than ignored. In particular the check tree lives under
+> `check:`, not `spec:`.
 
 > [!NOTE]
 > A typo'd `verify:` (no matching `verification_spec` name) does not crash the run — it's recorded as a verification parse error on the result. Check that your cross-references line up before you rely on them.
