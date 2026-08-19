@@ -59,9 +59,11 @@ you run, so treat that as the shape rather than a config to copy.
 
 ## Gather the diff
 
-- **A PR** (number/URL): `gh pr view <pr> --json title,body,baseRefName,changedFiles`
-  and `gh pr diff <pr>`. Read enclosing code from this checkout if it matches the PR
-  branch, else `git show <ref>:<path>`.
+- **A PR** (number/URL): `gh pr view <pr> --json title,body,baseRefName,headRefOid,changedFiles`
+  and `gh pr diff <pr>`. Read enclosing code from this checkout when it is already on
+  the PR branch; otherwise `gh pr checkout <pr>`, or read one file at the PR head with
+  `git show <headRefOid>:<path>` after a `git fetch` — the object is not local until
+  you fetch it.
 - **Working tree:** `git diff @{upstream}...HEAD` (or `main...HEAD`) **plus**
   `git diff HEAD` for uncommitted work — review is often pre-commit. Treat the union
   as scope.
