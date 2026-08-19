@@ -158,7 +158,7 @@ Each entry carries the scoring vocabulary, not just a check tree:
 > `check:`, not `spec:`.
 
 > [!NOTE]
-> A typo'd `verify:` (no matching `verification_spec` name) does not crash the run — it's recorded as a verification parse error on the result. Check that your cross-references line up before you rely on them.
+> A typo'd `verify:` (no matching `verification_spec` name) does not crash the run. The chaos entry records a failed verification on `chaos_report["verification"]` with `success: false`, plus `unresolved_reference` and `known_references` so you can see what it looked for and what existed. Note this is **not** a `verification_parse_errors` entry — that field is for specs that fail to parse, so grepping for it will not surface a bad cross-reference.
 
 ## Key considerations
 
