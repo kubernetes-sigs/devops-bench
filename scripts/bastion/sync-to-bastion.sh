@@ -93,8 +93,8 @@ COPYFILE_DISABLE=1 tar \
   -czf "${ARCHIVE}" "${PRESENT[@]}"
 
 # Transport selection. Default: gcloud IAP tunnel (works on a standard GCP
-# project). Override for special environments (e.g. Google corp hosts reachable
-# reachable directly over SSH) WITHOUT changing the default by setting:
+# project). Override for an environment where the host is reachable directly
+# over SSH, WITHOUT changing the default, by setting:
 #   BASTION_SSH_HOST   explicit host to ssh/scp to (raw ssh, no gcloud)
 #   BASTION_SSH_USER   login user for that host (defaults to the local user)
 upload_archive() { :; }

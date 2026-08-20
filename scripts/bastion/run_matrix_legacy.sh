@@ -29,11 +29,11 @@
 # docs/components/bastion.md "Parallel agent support".
 #
 # CUJs supported: one task x many models, and all tasks x one model. E.g.:
-#   MATRIX_TASKS="tasks/gcp/secret-rotation/task.yaml" \
+#   MATRIX_TASKS="tasks/common/opa-remediation/task.yaml" \
 #   MATRIX_MODELS="gemini-3.1-pro gemini-3.5-flash" \
-#   GCP_PROJECT_ID=<proj> run_matrix_legacy.sh
+#   PROJECT_ID=<proj> run_matrix_legacy.sh
 #
-#   MATRIX_TASKS=ALL MATRIX_MODELS="gemini-3.1-pro" GCP_PROJECT_ID=<proj> run_matrix_legacy.sh
+#   MATRIX_TASKS=ALL MATRIX_MODELS="gemini-3.1-pro" PROJECT_ID=<proj> run_matrix_legacy.sh
 #
 # Prereq: run `scripts/bastion/configure-oc.sh --mcp --skills` (or --no-*) once
 # to set the global oc config the legacy arm uses. DRY_RUN=1 previews the matrix.

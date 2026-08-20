@@ -26,7 +26,7 @@
 #
 # Connection env (same as sync-to-bastion.sh): BASTION_VM/ZONE/PROJECT, and
 # either the default IAP tunnel, or direct SSH via BASTION_SSH_HOST / BASTION_SSH_USER.
-# Run config: GCP_PROJECT_ID (req unless DRY_RUN), GKE_CLUSTER_NAME, GCP_LOCATION,
+# Run config: PROJECT_ID (req unless DRY_RUN), CLUSTER_NAME, GCP_LOCATION,
 # AGENT_PROVIDER, JUDGE_PROVIDER, JUDGE_MODEL, MAX_PARALLEL, RESULTS_DIR,
 # GKE_MCP_BIN, SKILLS_PATHS, SKIP_SYNC, DRY_RUN, MATRIX_TASKS, MATRIX_MODELS.
 # RESUME_STAMP=<stamp>: skip launching; re-poll + pull an existing remote run
@@ -48,10 +48,13 @@ BASTION_ZONE="${BASTION_ZONE:-us-central1-a}"
 BASTION_PROJECT="${BASTION_PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}"
 REMOTE_DIR="${REMOTE_DIR:-devops-bench}"
 
-MATRIX_TASKS="${MATRIX_TASKS:-tasks/gcp/secret-rotation/task.yaml}"
+MATRIX_TASKS="${MATRIX_TASKS:-tasks/common/opa-remediation/task.yaml}"
 MATRIX_MODELS="${MATRIX_MODELS:-gemini-3.1-pro}"
 
-GKE_CLUSTER_NAME="${GKE_CLUSTER_NAME:-eval}"
+# PROJECT_ID is the name the harness reads; GCP_PROJECT_ID is accepted as an
+# alias so an existing bench.env keeps working.
+PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT_ID:-}}"
+CLUSTER_NAME="${CLUSTER_NAME:-eval}"
 GCP_LOCATION="${GCP_LOCATION:-us-central1-a}"
 AGENT_PROVIDER="${AGENT_PROVIDER:-google}"
 JUDGE_PROVIDER="${JUDGE_PROVIDER:-google}"
@@ -241,7 +244,7 @@ matrix_dispatch() {
   fi
 
   [ "${#COMBOS[@]}" -gt 0 ] || { echo "ERROR: empty matrix" >&2; exit 2; }
-  [ -n "${GCP_PROJECT_ID:-}" ] || { echo "ERROR: set GCP_PROJECT_ID" >&2; exit 2; }
+  [ -n "${PROJECT_ID:-}" ] || { echo "ERROR: set PROJECT_ID" >&2; exit 2; }
 
   if [ -n "${BENCH_REMOTE}" ] && [ -z "${SKIP_SYNC:-}" ]; then
     echo "==> syncing working tree to ${BASTION_VM}"
@@ -271,10 +274,14 @@ matrix_dispatch() {
       # gemini CLI and the google-genai judge ignore it (they pick ADC from
       # GOOGLE_GENAI_USE_VERTEXAI + project/location).
       echo 'export GOOGLE_CLOUD_API_KEY=gcp-vertex-credentials'
-      echo "export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT='${GCP_PROJECT_ID}' GOOGLE_CLOUD_LOCATION='${GOOGLE_CLOUD_LOCATION:-global}' GCP_VERTEX_LOCATION='${GCP_VERTEX_LOCATION:-global}'"
+      echo "export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT='${PROJECT_ID}' GOOGLE_CLOUD_LOCATION='${GOOGLE_CLOUD_LOCATION:-global}' GCP_VERTEX_LOCATION='${GCP_VERTEX_LOCATION:-global}'"
     fi
     echo "OUT=\"\$HOME/${REMOTE_OUT}\"; mkdir -p \"\$OUT\""
-    echo "export GCP_PROJECT_ID='${GCP_PROJECT_ID}' GKE_CLUSTER_NAME='${GKE_CLUSTER_NAME}' GCP_LOCATION='${GCP_LOCATION}'"
+    # PROJECT_ID / CLUSTER_NAME are what the harness reads (run.py). GCP_PROJECT_ID
+    # and GCP_LOCATION are additionally exported because the GCP provider and the
+    # Vertex model auth resolve those directly.
+    echo "export PROJECT_ID='${PROJECT_ID}' CLUSTER_NAME='${CLUSTER_NAME}'"
+    echo "export GCP_PROJECT_ID='${PROJECT_ID}' GCP_LOCATION='${GCP_LOCATION}'"
     echo "export AGENT_PROVIDER='${AGENT_PROVIDER}' JUDGE_PROVIDER='${JUDGE_PROVIDER}' JUDGE_MODEL='${JUDGE_MODEL}'"
     echo "export AGENT_TIMEOUT_SEC='${AGENT_TIMEOUT_SEC}'"
     echo "export BENCH_PARALLEL=true"
@@ -292,7 +299,7 @@ matrix_dispatch() {
     echo '      [ -n "$rdir" ] && cp -a "$rdir/." "$d/" 2>/dev/null || true'
     echo '    else'
     echo '      python3 -m devops_bench --parallel --run-id "$rid" \'
-    echo '        --project "$GCP_PROJECT_ID" --cluster "$GKE_CLUSTER_NAME" \'
+    echo '        --project "$PROJECT_ID" --cluster "$CLUSTER_NAME" \'
     echo '        --results-root "$d" "$task"; rc=$?'
     echo '    fi'
     echo '    echo "exit=$rc" >"$d/status"'

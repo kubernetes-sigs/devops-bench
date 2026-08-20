@@ -23,9 +23,9 @@
 # independent. CUJs:
 #
 #   1) one task, many models, one config
-#      MATRIX_TASKS="tasks/gcp/secret-rotation/task.yaml" \
+#      MATRIX_TASKS="tasks/common/opa-remediation/task.yaml" \
 #      MATRIX_MODELS="gemini-3.1-pro gemini-3.5-flash" \
-#      MATRIX_AGENT_CONFIGS="gcli+mcp+skills" GCP_PROJECT_ID=<proj> run_matrix.sh
+#      MATRIX_AGENT_CONFIGS="gcli+mcp+skills" PROJECT_ID=<proj> run_matrix.sh
 #
 #   2) one task, one model, many configs
 #      MATRIX_AGENT_CONFIGS="oc oc+mcp+skills gcli gcli+mcp+skills" ... run_matrix.sh

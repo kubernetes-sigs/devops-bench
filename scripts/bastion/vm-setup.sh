@@ -191,11 +191,15 @@ if [ ! -f "${ENV_FILE}" ]; then
   install -m 600 /dev/null "${ENV_FILE}"
   cat > "${ENV_FILE}" <<'EOF'
 # DevOps Bench harness environment. Fill in, then: source ~/bench.env
-# --- GCP target ---
-export GCP_PROJECT_ID=""
-export GKE_CLUSTER_NAME="secret-rotation-cluster"
+# --- Target infrastructure ---
+# PROJECT_ID and CLUSTER_NAME are what the harness reads.
+export PROJECT_ID=""
+export CLUSTER_NAME="bench-cluster"
+export NAMESPACE="bench-run-1"
+# The GCP provider and Vertex model auth resolve these directly; set them only
+# when running against GCP.
+export GCP_PROJECT_ID="$PROJECT_ID"
 export GCP_LOCATION="us-central1-a"
-export NAMESPACE="secret-rotation-run-1"
 
 # --- Agent (openclaw / oc) ---
 export BENCH_AGENT_TYPE="openclaw"
@@ -219,4 +223,4 @@ echo ""
 echo "==> setup complete. To run the secret-rotation eval:"
 echo "    source ~/bench.env   # after filling in project + keys"
 echo "    cd ${REPO_DIR} && source .venv/bin/activate"
-echo "    devops-bench tasks/gcp/secret-rotation/task.yaml"
+echo "    devops-bench tasks/common/opa-remediation/task.yaml"
