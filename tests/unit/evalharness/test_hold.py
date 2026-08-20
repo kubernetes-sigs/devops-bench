@@ -400,13 +400,36 @@ def test_hold_verdict_a_window_ending_on_two_consecutive_errors_is_an_error() ->
     obs = HoldObservation()
     _fold_sample(obs, _result(success=True, reason="held"), 0.0)
     _fold_sample(obs, _result(success=False, status="error", reason="blip one"), 1.0)
-    _fold_sample(obs, _result(success=False, status="error", reason="never recovered"), 2.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="etcd unreachable"), 2.0)
 
     success, status, reason = hold_verdict(obs)
     assert success is False
     assert status == "error"
     assert "never recovered" in reason
     assert obs.error_count < obs.sample_count  # not every sample errored
+
+
+def test_hold_verdict_a_sustained_trailing_error_reports_the_last_error_reason() -> None:
+    """Regression: the trailing-error verdict must carry the final sample's own reason.
+
+    The previous check above only asserts the string "never recovered", which
+    is also present in the verdict's generic boilerplate ("it never
+    recovered") regardless of any per-sample reason, so it does not actually
+    prove a sample's own reason reaches the verdict. Use a reason that shares
+    no words with that boilerplate to prove it.
+    """
+    obs = HoldObservation()
+    _fold_sample(obs, _result(success=True, reason="held"), 0.0)
+    _fold_sample(obs, _result(success=False, status="error", reason="blip one"), 1.0)
+    _fold_sample(
+        obs, _result(success=False, status="error", reason="etcd unreachable in region-west"), 2.0
+    )
+
+    success, status, reason = hold_verdict(obs)
+    assert success is False
+    assert status == "error"
+    assert "etcd unreachable in region-west" in reason
+    assert obs.last_error_reason == "etcd unreachable in region-west"
 
 
 def test_hold_verdict_a_mid_window_error_that_recovers_resets_the_trailing_run() -> None:

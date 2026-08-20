@@ -170,6 +170,12 @@ class HoldObservation:
             :func:`hold_verdict` to tell a single error that recovered
             before the window ended (noise) from a sustained run that never
             cleared (the entry was never actually observed).
+        last_error_reason: The most recent errored sample's reason (the
+            leaf verifier's ``result.reason``, or the stringified exception
+            when the sample raised instead of returning a result). ``None``
+            until an errored sample is folded in. Lets a sustained-trailing-
+            error verdict report what actually went wrong instead of only a
+            generic message.
     """
 
     violated: bool = False
@@ -179,6 +185,7 @@ class HoldObservation:
     error_count: int = 0
     last_sample_status: str | None = None
     trailing_error_count: int = 0
+    last_error_reason: str | None = None
 
 
 def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: float) -> None:
@@ -197,7 +204,7 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
             taken, recorded on the first violation only.
     """
     if result.status == "error":
-        _fold_error_sample(obs)
+        _fold_error_sample(obs, result.reason)
         return
     obs.sample_count += 1
     obs.last_sample_status = result.status
@@ -208,7 +215,7 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
         obs.first_violation_at_sec = elapsed_sec
 
 
-def _fold_error_sample(obs: HoldObservation) -> None:
+def _fold_error_sample(obs: HoldObservation, reason: str | None = None) -> None:
     """Record one sample that could not be evaluated at all.
 
     Exists so an exception raised while sampling (the check never even ran)
@@ -219,11 +226,14 @@ def _fold_error_sample(obs: HoldObservation) -> None:
 
     Args:
         obs: The observation to update in place.
+        reason: What went wrong on this sample, so a sustained-trailing-error
+            verdict can report it instead of only a generic message.
     """
     obs.sample_count += 1
     obs.error_count += 1
     obs.last_sample_status = "error"
     obs.trailing_error_count += 1
+    obs.last_error_reason = reason
 
 
 def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
@@ -284,7 +294,8 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
             "error",
             f"the observation window ended on {obs.trailing_error_count} consecutive "
             "unevaluable samples (it never recovered), so the entry was never "
-            "actually observed",
+            "actually observed; last error reason: "
+            f"{obs.last_error_reason or 'no error reason provided'}",
         )
     reason = f"held for {obs.sample_count} sample(s) across the observation window"
     if obs.error_count > 0:
@@ -422,7 +433,7 @@ class SafeguardMonitor:
             _log.warning("safeguard monitor: sampling %r raised: %s", entry.name, exc)
             with self._lock:
                 obs = self._observations[entry.name]
-                _fold_error_sample(obs)
+                _fold_error_sample(obs, str(exc))
             return
 
         with self._lock:
@@ -484,7 +495,7 @@ def run_hold_window(
             result = agent.run_entry(entry, timeout_sec=0.0)
         except Exception as exc:  # noqa: BLE001 - a hold driver bug must not sink the run
             _log.warning("hold window: sampling %r raised: %s", entry.name, exc)
-            _fold_error_sample(obs)
+            _fold_error_sample(obs, str(exc))
         else:
             _fold_sample(obs, result, elapsed)
 
