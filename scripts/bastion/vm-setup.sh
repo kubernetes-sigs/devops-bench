@@ -141,20 +141,22 @@ if [ -x "${HOME}/bin/fortio" ] && [ ! -e /usr/local/bin/fortio ]; then
     || echo "    WARN: could not symlink fortio to /usr/local/bin; chaos may not find it."
 fi
 
-# gke-mcp operational skills — the source for the AGENT's +skills capability
+# MCP server skills — the source for the AGENT's +skills capability. This
+# bastion installs GoogleCloudPlatform/gke-mcp; point MCP_SKILLS_REPO at another
+# server's checkout to use different skills.
 # (oc/gcli). The refactored matrix points AGENT_SKILLS_PATHS at this repo's
 # skills/ dir (19 SKILL.md skills: gke-compute-class-creator, gke-workload-scaling,
 # gke-networking-edge, gke-productionize, ...). These are operational skills, NOT
 # the judge rubric markdown under ~/oc-skills. Clone to a stable path OUTSIDE the
 # synced ~/devops-bench tree so sync-to-bastion never clobbers it. Idempotent.
 echo "==> gke-mcp skills check (agent +skills source)"
-GKE_MCP_REPO="${GKE_MCP_REPO:-${HOME}/gke-mcp-repo}"
-if [ -d "${GKE_MCP_REPO}/skills" ]; then
-  echo "    present: ${GKE_MCP_REPO}/skills ($(find "${GKE_MCP_REPO}/skills" -name SKILL.md 2>/dev/null | wc -l) skills)"
+MCP_SKILLS_REPO="${MCP_SKILLS_REPO:-${HOME}/gke-mcp-repo}"
+if [ -d "${MCP_SKILLS_REPO}/skills" ]; then
+  echo "    present: ${MCP_SKILLS_REPO}/skills ($(find "${MCP_SKILLS_REPO}/skills" -name SKILL.md 2>/dev/null | wc -l) skills)"
 else
-  echo "    cloning gke-mcp -> ${GKE_MCP_REPO}..."
-  if git clone --depth 1 https://github.com/GoogleCloudPlatform/gke-mcp "${GKE_MCP_REPO}"; then
-    echo "    gke-mcp skills ready ($(find "${GKE_MCP_REPO}/skills" -name SKILL.md 2>/dev/null | wc -l) skills)"
+  echo "    cloning gke-mcp -> ${MCP_SKILLS_REPO}..."
+  if git clone --depth 1 https://github.com/GoogleCloudPlatform/gke-mcp "${MCP_SKILLS_REPO}"; then
+    echo "    gke-mcp skills ready ($(find "${MCP_SKILLS_REPO}/skills" -name SKILL.md 2>/dev/null | wc -l) skills)"
   else
     echo "    WARN: gke-mcp clone failed; agent +skills will be empty until it is cloned."
   fi

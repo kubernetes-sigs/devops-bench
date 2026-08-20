@@ -38,7 +38,8 @@
 # which is what makes auth portable across parallel runs' isolated state dirs.
 #
 # Env overrides:
-#   GKE_MCP_BIN    path to the gke-mcp binary    (default: ~/gke-mcp)
+#   MCP_SERVER_BIN path to the MCP server binary  (default: ~/gke-mcp, the
+#                  server this bastion installs)
 #   SECRETS_ENV    file exporting GEMINI_API_KEY  (default: ~/secrets.env)
 #   SKILLS_SRC     dir of skill markdowns         (default: ~/devops-bench/skills)
 #   OC_SKILLS_DIR  staging dir for <name>/SKILL.md (default: ~/oc-skills)
@@ -54,7 +55,7 @@ set -euo pipefail
 WANT_MCP=1
 WANT_SKILLS=1
 WANT_VERTEX=0
-GKE_MCP_BIN="${GKE_MCP_BIN:-${HOME}/gke-mcp}"
+MCP_SERVER_BIN="${MCP_SERVER_BIN:-${HOME}/gke-mcp}"
 SECRETS_ENV="${SECRETS_ENV:-${HOME}/secrets.env}"
 SKILLS_SRC="${SKILLS_SRC:-${HOME}/devops-bench/skills}"
 OC_SKILLS_DIR="${OC_SKILLS_DIR:-${HOME}/oc-skills}"
@@ -140,8 +141,8 @@ fi
 # --- 2. GKE MCP server ------------------------------------------------------ #
 oc mcp unset gke-mcp >/dev/null 2>&1 || true   # idempotent: clear any prior entry
 if [ "${WANT_MCP}" = "1" ]; then
-  [ -x "${GKE_MCP_BIN}" ] || { echo "ERROR: gke-mcp not executable at ${GKE_MCP_BIN}" >&2; exit 1; }
-  oc mcp add gke-mcp --command "${GKE_MCP_BIN}" --no-probe >/dev/null
+  [ -x "${MCP_SERVER_BIN}" ] || { echo "ERROR: gke-mcp not executable at ${MCP_SERVER_BIN}" >&2; exit 1; }
+  oc mcp add gke-mcp --command "${MCP_SERVER_BIN}" --no-probe >/dev/null
   echo "==> gke-mcp registered (global oc config)"
 else
   echo "==> gke-mcp NOT registered (--no-mcp)"

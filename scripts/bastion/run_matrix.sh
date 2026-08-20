@@ -57,7 +57,7 @@ agent_config_env() {
   for feat in $(echo "${preset}" | tr '+' ' '); do
     case "$feat" in mcp) want_mcp=1 ;; skills) want_skills=1 ;; esac
   done
-  if [ "${want_mcp}" = 1 ]; then out+=("BENCH_USE_MCP=true" "AGENT_MCP_SERVER=${GKE_MCP_BIN}"); else out+=("BENCH_USE_MCP=false"); fi
+  if [ "${want_mcp}" = 1 ]; then out+=("BENCH_USE_MCP=true" "AGENT_MCP_SERVER=${MCP_SERVER_BIN}"); else out+=("BENCH_USE_MCP=false"); fi
   [ "${want_skills}" = 1 ] && out+=("AGENT_SKILLS_PATHS=${SKILLS_PATHS}")
   ( IFS=';'; echo "${out[*]}" )
 }

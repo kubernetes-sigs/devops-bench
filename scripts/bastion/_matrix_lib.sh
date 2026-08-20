@@ -28,7 +28,7 @@
 # either the default IAP tunnel, or direct SSH via BASTION_SSH_HOST / BASTION_SSH_USER.
 # Run config: PROJECT_ID (req unless DRY_RUN), CLUSTER_NAME, GCP_LOCATION,
 # AGENT_PROVIDER, JUDGE_PROVIDER, JUDGE_MODEL, MAX_PARALLEL, RESULTS_DIR,
-# GKE_MCP_BIN, SKILLS_PATHS, SKIP_SYNC, DRY_RUN, MATRIX_TASKS, MATRIX_MODELS.
+# MCP_SERVER_BIN, SKILLS_PATHS, SKIP_SYNC, DRY_RUN, MATRIX_TASKS, MATRIX_MODELS.
 # RESUME_STAMP=<stamp>: skip launching; re-poll + pull an existing remote run
 #   (use the stamp printed by the original invocation) — survives a dead local
 #   process. SSH keepalive + a retrying pull keep brief drops from aborting.
@@ -64,8 +64,8 @@ MAX_PARALLEL="${MAX_PARALLEL:-3}"
 # infra-bearing tasks (e.g. deploy-hello-app timed out); give matrix runs more
 # headroom. Override by exporting AGENT_TIMEOUT_SEC before launch.
 AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-1200}"
-GKE_MCP_BIN="${GKE_MCP_BIN:-\$HOME/gke-mcp}"     # expanded on the bastion
-# Agent +skills source: the 19 operational gke-mcp skills (SKILL.md form), cloned
+MCP_SERVER_BIN="${MCP_SERVER_BIN:-\$HOME/gke-mcp}"     # expanded on the bastion
+# Agent +skills source: the MCP server's operational skills (SKILL.md form), cloned
 # by vm-setup.sh. NOT ~/oc-skills, which holds the judge rubric markdown (the
 # grader's criteria), not operational agent skills. Expanded on the bastion.
 SKILLS_PATHS="${SKILLS_PATHS:-\$HOME/gke-mcp-repo/skills}"
