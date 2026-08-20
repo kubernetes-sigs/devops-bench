@@ -219,8 +219,12 @@ matrix_dispatch() {
     echo "==> RESUME: attaching to existing run ~/${REMOTE_OUT} on ${where}"
     host_exec "test -d \$HOME/${REMOTE_OUT}" 2>/dev/null \
       || { echo "ERROR: no run at ~/${REMOTE_OUT} on ${where}" >&2; exit 2; }
+    # run_one mkdirs each combo dir lazily, so counting dirs undercounts a run
+    # still in flight; the staged runner has one run_one line per combo.
     local exp
-    exp="$(host_exec "ls -d \$HOME/${REMOTE_OUT}/*/ 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]' || echo '?')"
+    exp="$(host_exec "grep -c '^run_one ' \$HOME/.matrix-runner-${STAMP}.sh" 2>/dev/null | tr -d '[:space:]')"
+    [ "${exp:-0}" -gt 0 ] 2>/dev/null \
+      || { echo "ERROR: no staged runner for ${STAMP}; cannot resume" >&2; return 2; }
     local poll_rc=0
     _poll_until_done "${exp}" || poll_rc=$?
     _pull_and_summarize || return $?

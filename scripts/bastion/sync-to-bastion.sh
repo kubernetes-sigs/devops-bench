@@ -103,9 +103,10 @@ if [ -n "${BASTION_SSH_HOST:-}" ]; then
   SSH_HOST="${BASTION_SSH_HOST}"
   SSH_USER="${BASTION_SSH_USER:-$(id -un)}"
   SSH_TARGET="${SSH_USER}@${SSH_HOST}"
-  # Same options as _matrix_lib.sh: no interactive prompts, and keepalive so the
-  # transfer rides out brief network blips instead of hanging.
-  _SSH_KA=(-o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o ConnectTimeout=30)
+  # Bound the connection so a stalled network cannot hang the sync. No BatchMode
+  # here (unlike _matrix_lib.sh's detached poller): this step is run by hand and
+  # must still be able to prompt for a host key on the first connection.
+  _SSH_KA=(-o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o ConnectTimeout=30)
   echo "==> transport: direct ssh to ${SSH_TARGET}"
   upload_archive() { scp "${_SSH_KA[@]}" "${ARCHIVE}" "${SSH_TARGET}:${REMOTE_ARCHIVE}"; }
   remote_exec() { ssh "${_SSH_KA[@]}" "${SSH_TARGET}" "$1"; }
