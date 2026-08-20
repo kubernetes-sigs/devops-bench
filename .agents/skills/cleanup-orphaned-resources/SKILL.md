@@ -45,7 +45,7 @@ CLUSTER=""                          # set in step 1 below
 
 # Step 1 lists CANDIDATE clusters across all runs — it is not yet scoped to one.
 # RunEnv names a cluster c<blake2s digest of the run id>. Pick the aborted run's
-# from the output; run-scoped filtering begins once CLUSTER is set below, and
+# cluster from the output; run-scoped filtering begins once CLUSTER is set below, and
 # each later filter is anchored to that exact name so a resource that merely
 # contains the token (shared-$CLUSTER-net) never matches.
 gcloud container clusters list --project "$PROJECT" \
