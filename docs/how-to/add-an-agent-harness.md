@@ -2,7 +2,7 @@
 
 This guide walks through wrapping a new agent so the benchmark can drive it. The
 contract is small: subclass `AgentHarness`, implement `_execute`, register the
-class with `@AGENTS.register`, and add your module to the builtin import list.
+class with `@AGENTS.register`, and add your module to the built-in import list.
 That's it — no `cli.py` or `run.py` edits.
 
 For the concepts (harness vs model, capabilities, configuration), read
@@ -43,7 +43,9 @@ Protocols (`SupportsMcp` / `SupportsSkills` / `SupportsRules`) — no mixin need
 
 ### 3. Implement only `_execute`
 
-`_execute(self, prompt: str) -> AgentResult` is the single extension point.
+`_execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult`
+is the single extension point. `run()` calls it positionally, so the second
+parameter is required even if your harness ignores it.
 Inside it:
 
 - Build the invocation for your agent (argv, an API call, whatever it takes).
@@ -128,7 +130,7 @@ class MyAgent(AgentHarness):
         self.skills = caps.skills
         self.rules = caps.rules
 
-    def _execute(self, prompt: str) -> AgentResult:
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
         # 1. Build and run the invocation for `prompt`.
         # 2. Parse output into canonical ToolCall entries.
         trajectory: list[dict] = [

@@ -24,7 +24,7 @@ Four harnesses ship today. Each self-registers under a canonical key.
 | --- | --- | --- | --- |
 | `gemini` | The Google **Gemini CLI** binary | Headless subprocess; trajectory parsed from `--output-format stream-json` on stdout | MCP, skills, rules, allowed-tools |
 | `openclaw` | The **Openclaw Agent CLI** | `openclaw agent --local` with per-run isolated state/config; trajectory via `openclaw sessions export-trajectory` | MCP, skills, rules |
-| `antigravity` | The **Antigravity CLI** (`agy` binary) | Headless subprocess that keeps the real `HOME` so cached OAuth/ADC credentials work; trajectory parsed from the transcript JSONL it writes, token usage read from the conversation DB | MCP, skills, rules |
+| `antigravity` | The **Antigravity CLI** (`agy` binary) | Headless subprocess that keeps the real `HOME` so cached OAuth/ADC credentials work (see the trust-boundary note below); trajectory parsed from the transcript JSONL it writes, token usage read from the conversation DB | MCP, skills, rules |
 | `api` | **In-process** model call | Calls `get_model(provider, model)` and runs a model-agnostic MCP tool-use loop (`max_turns`, default 50) | MCP (spawns a stdio server), skills (served as tools), rules (system instruction) |
 
 > `oc` is just a shorthand alias for the `openclaw` CLI; this doc uses `openclaw` throughout.
@@ -49,6 +49,21 @@ The CLI harnesses (`gemini`, `openclaw`) use it to route `AGENT_API_KEY` onto th
 binary's provider-specific env var(s) and pass the model through: the Gemini CLI
 gets `GEMINI_MODEL`, and openclaw gets a `--model provider/id` flag. Either way,
 the model is a runtime input, never baked into the harness.
+
+`antigravity` is the exception: it does not go through the shared contract. It
+writes `AGENT_API_KEY` straight onto `GEMINI_API_KEY` and `GOOGLE_API_KEY` and
+maps the model onto `GEMINI_MODEL` (`agents/cli/antigravity/agent.py`), so it is
+Gemini-only in practice — pointing `AGENT_PROVIDER` at another provider will not
+route it.
+
+> [!WARNING]
+> **`antigravity` runs with the operator's real `HOME`.** That is deliberate, so
+> cached OAuth/ADC credentials keep working without a re-login, but it means the
+> agent under test inherits read access to everything in that home directory —
+> `~/.config/gcloud`, `~/.ssh`, shell history, other tools' tokens. Every other
+> harness gets an isolated per-run state directory. Run untrusted agents under a
+> dedicated account or an isolated `HOME`, and treat any credential reachable
+> from that home as exposed to the agent.
 
 For everything about providers, model ids, and how `get_model` resolves them, see
 [Model providers](./model_providers.md).
