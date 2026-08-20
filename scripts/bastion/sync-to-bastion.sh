@@ -94,17 +94,14 @@ COPYFILE_DISABLE=1 tar \
 
 # Transport selection. Default: gcloud IAP tunnel (works on a standard GCP
 # project). Override for special environments (e.g. Google corp hosts reachable
-# at nic0.<vm>.<zone>.c.<project>.internal.gcpnode.com) WITHOUT changing the
-# default by setting either:
-#   BASTION_SSH_HOST   explicit host to ssh/scp to (raw ssh, no gcloud), or
-#   BASTION_USE_GCPNODE=1   auto-build the gcpnode host from VM/zone/project.
-# BASTION_SSH_USER overrides the login user (default for the gcpnode form is
-# "<localuser>_google_com", matching that environment's convention).
+# reachable directly over SSH) WITHOUT changing the default by setting:
+#   BASTION_SSH_HOST   explicit host to ssh/scp to (raw ssh, no gcloud)
+#   BASTION_SSH_USER   login user for that host (defaults to the local user)
 upload_archive() { :; }
 remote_exec() { :; }
-if [ -n "${BASTION_SSH_HOST:-}" ] || [ "${BASTION_USE_GCPNODE:-}" = "1" ]; then
-  SSH_HOST="${BASTION_SSH_HOST:-nic0.${BASTION_VM}.${BASTION_ZONE}.c.${BASTION_PROJECT}.internal.gcpnode.com}"
-  SSH_USER="${BASTION_SSH_USER:-$(id -un)_google_com}"
+if [ -n "${BASTION_SSH_HOST:-}" ]; then
+  SSH_HOST="${BASTION_SSH_HOST}"
+  SSH_USER="${BASTION_SSH_USER:-$(id -un)}"
   SSH_TARGET="${SSH_USER}@${SSH_HOST}"
   echo "==> transport: direct ssh to ${SSH_TARGET}"
   upload_archive() { scp "${ARCHIVE}" "${SSH_TARGET}:${REMOTE_ARCHIVE}"; }

@@ -66,7 +66,7 @@ INFRA_PROVIDER=kind devops-bench tasks/common/opa-remediation/task.yaml
 When defining a task in `task.yaml`, write it using the provider-neutral prebuilt stacks:
 
 ```yaml
-# tasks/gcp/my-task/task.yaml
+# tasks/common/my-task/task.yaml
 name: "my-generic-task"
 infrastructure:
   deployer: "tofu"

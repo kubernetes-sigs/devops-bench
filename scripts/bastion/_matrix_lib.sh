@@ -25,7 +25,7 @@
 # the bastion (its own cluster); results are copied back to RESULTS_DIR.
 #
 # Connection env (same as sync-to-bastion.sh): BASTION_VM/ZONE/PROJECT, and
-# either default IAP or BASTION_USE_GCPNODE=1 / BASTION_SSH_HOST / BASTION_SSH_USER.
+# either the default IAP tunnel, or direct SSH via BASTION_SSH_HOST / BASTION_SSH_USER.
 # Run config: GCP_PROJECT_ID (req unless DRY_RUN), GKE_CLUSTER_NAME, GCP_LOCATION,
 # AGENT_PROVIDER, JUDGE_PROVIDER, JUDGE_MODEL, MAX_PARALLEL, RESULTS_DIR,
 # GKE_MCP_BIN, SKILLS_PATHS, SKIP_SYNC, DRY_RUN, MATRIX_TASKS, MATRIX_MODELS.
@@ -81,9 +81,9 @@ REPO_ROOT="$(cd "${_MATRIX_LIB_DIR}/../.." && pwd)"
 # --- SSH transport (mirrors sync-to-bastion.sh) ----------------------------- #
 # Keepalive so sessions ride out brief network blips instead of dropping.
 _SSH_KA=(-o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o ConnectTimeout=30)
-if [ -n "${BASTION_SSH_HOST:-}" ] || [ "${BASTION_USE_GCPNODE:-}" = "1" ]; then
-  SSH_HOST="${BASTION_SSH_HOST:-nic0.${BASTION_VM}.${BASTION_ZONE}.c.${BASTION_PROJECT}.internal.gcpnode.com}"
-  SSH_USER="${BASTION_SSH_USER:-$(id -un)_google_com}"
+if [ -n "${BASTION_SSH_HOST:-}" ]; then
+  SSH_HOST="${BASTION_SSH_HOST}"
+  SSH_USER="${BASTION_SSH_USER:-$(id -un)}"
   SSH_TARGET="${SSH_USER}@${SSH_HOST}"
   remote_exec() { ssh -o BatchMode=yes "${_SSH_KA[@]}" "${SSH_TARGET}" "$1"; }
   push_file()   { scp -o BatchMode=yes "${_SSH_KA[@]}" "$1" "${SSH_TARGET}:$2"; }
