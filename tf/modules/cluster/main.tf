@@ -15,7 +15,7 @@
 # This dispatch module instantiates only one concrete cluster sub-module and
 # declares no concrete-provider requirements or provider blocks of its own:
 # each sub-module only declares required_providers (google in ./gke,
-# tehcyx/kind in ./kind, google/helm/kubernetes in ./vcluster) and inherits
+# tehcyx/kind in ./kind, helm/kubernetes in ./vcluster) and inherits
 # the actual provider configuration implicitly from whatever root caller
 # instantiates this module, so a KinD-only run does not pull in the GCP
 # provider plugin. A module invoked with `count`, as these are, cannot itself
@@ -56,6 +56,7 @@ module "vcluster" {
   cluster_name           = var.cluster_name
   location               = var.location != "" ? var.location : "us-central1"
   project_id             = var.project_id
+  host_cloud             = var.host_cloud
   host_context           = var.host_context
   host_cluster_name      = var.host_cluster_name
   kubeconfig_path_host   = var.kubeconfig_path_host

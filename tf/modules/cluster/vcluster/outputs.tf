@@ -21,7 +21,7 @@ output "cluster_location" {
 }
 
 output "endpoint" {
-  value = "https://${google_compute_address.vcluster.address}:443"
+  value = "https://${local.lb_address}:443"
 }
 
 output "kubeconfig_path" {

@@ -104,15 +104,26 @@ variable "node_image" {
   default     = "kindest/node:v1.29.2"
 }
 
+variable "host_cloud" {
+  type        = string
+  description = "Cloud the vcluster host cluster runs on: 'gke', 'eks', or 'aks' (vcluster-only). Only 'gke' is currently implemented end-to-end; 'eks'/'aks' require host_context to be set explicitly"
+  default     = "gke"
+
+  validation {
+    condition     = contains(["gke", "eks", "aks"], var.host_cloud)
+    error_message = "host_cloud must be one of: 'gke', 'eks', 'aks'."
+  }
+}
+
 variable "host_context" {
   type        = string
-  description = "Kube context of the host GKE cluster the virtual cluster runs inside (vcluster-only). Defaults to 'gke_<project_id>_<location>_<host_cluster_name>' when empty"
+  description = "Kube context of the host cluster the virtual cluster runs inside (vcluster-only). On GKE, defaults to 'gke_<project_id>_<location>_<host_cluster_name>' when empty; required for eks/aks host_cloud"
   default     = ""
 }
 
 variable "host_cluster_name" {
   type        = string
-  description = "Name of the host GKE cluster the virtual cluster runs inside (vcluster-only); used to derive host_context when host_context is not set"
+  description = "Name of the host cluster the virtual cluster runs inside (vcluster-only); used to derive host_context on GKE hosts when host_context is not set"
   default     = ""
 }
 

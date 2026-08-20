@@ -42,7 +42,9 @@ terraform {
 }
 
 locals {
-  host_context = var.host_context != "" ? var.host_context : "gke_${var.project_id}_${var.location}_${var.host_cluster_name}"
+  host_context = var.host_context != "" ? var.host_context : (
+    var.host_cloud == "gke" ? "gke_${var.project_id}_${var.location}_${var.host_cluster_name}" : ""
+  )
   # Only the vcluster path talks to the host cluster through helm/kubernetes.
   # Leaving these unset for gcp/kind keeps plans from requiring the host
   # context to exist in the local kubeconfig.
@@ -84,6 +86,7 @@ module "cluster" {
   agent_service_account    = var.agent_service_account
   enable_iap_ssh           = var.enable_iap_ssh
   node_image               = var.node_image
+  host_cloud               = var.host_cloud
   host_context             = var.host_context
   host_cluster_name        = var.host_cluster_name
   vcluster_chart_version   = var.vcluster_chart_version

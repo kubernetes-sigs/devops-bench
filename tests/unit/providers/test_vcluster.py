@@ -45,15 +45,25 @@ def test_resolve_variables_fills_defaults(
 ) -> None:
     monkeypatch.delenv("VCLUSTER_HOST_CLUSTER", raising=False)
     monkeypatch.delenv("VCLUSTER_HOST_CONTEXT", raising=False)
+    monkeypatch.delenv("VCLUSTER_HOST_CLOUD", raising=False)
     variables = VclusterProvider().resolve_variables(ctx, {})
     assert variables["infra_provider"] == "vcluster"
     assert variables["project_id"] == "test-project"
     assert variables["cluster_name"] == "test-cluster"
     assert variables["location"] == "us-central1"
+    assert variables["host_cloud"] == "gke"
     assert variables["host_cluster_name"] == ""
     assert "host_context" not in variables
     expected_kubeconfig = str(Path("~/.kube").expanduser() / "vcluster-test-cluster.yaml")
     assert variables["kubeconfig_path"] == expected_kubeconfig
+
+
+def test_resolve_variables_host_cloud_env(
+    ctx: ResolveContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VCLUSTER_HOST_CLOUD", "eks")
+    variables = VclusterProvider().resolve_variables(ctx, {})
+    assert variables["host_cloud"] == "eks"
 
 
 def test_resolve_variables_custom_precedence(ctx: ResolveContext) -> None:
@@ -101,6 +111,7 @@ def test_ensure_account_credentials_runs_gcloud_when_host_cluster_set(
     monkeypatch.setenv("VCLUSTER_HOST_CLUSTER", "host-cluster")
     monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
     monkeypatch.setenv("VCLUSTER_HOST_LOCATION", "us-central1")
+    monkeypatch.delenv("VCLUSTER_HOST_CLOUD", raising=False)
     mock_run = mocker.patch("devops_bench.providers.vcluster.run")
     VclusterProvider().ensure_account_credentials()
     mock_run.assert_called_once_with(
@@ -117,3 +128,15 @@ def test_ensure_account_credentials_runs_gcloud_when_host_cluster_set(
         ],
         capture=False,
     )
+
+
+def test_ensure_account_credentials_noop_for_eks_host_cloud(
+    mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VCLUSTER_HOST_CLOUD", "eks")
+    monkeypatch.setenv("VCLUSTER_HOST_CLUSTER", "host-cluster")
+    monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+    monkeypatch.setenv("VCLUSTER_HOST_LOCATION", "us-central1")
+    mock_run = mocker.patch("devops_bench.providers.vcluster.run")
+    VclusterProvider().ensure_account_credentials()
+    mock_run.assert_not_called()

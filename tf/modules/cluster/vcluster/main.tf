@@ -14,10 +14,6 @@
 
 terraform {
   required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = ">= 5.0.0"
-    }
     helm = {
       source  = "hashicorp/helm"
       version = "~> 3.0"
@@ -30,25 +26,28 @@ terraform {
 }
 
 locals {
-  host_context = var.host_context != "" ? var.host_context : "gke_${var.project_id}_${var.location}_${var.host_cluster_name}"
+  host_context = var.host_context != "" ? var.host_context : (
+    var.host_cloud == "gke" ? "gke_${var.project_id}_${var.location}_${var.host_cluster_name}" : ""
+  )
+}
+
+# EKS/AKS host clusters have no reliable way to derive a kube context name
+# the way GKE's `gke_<project>_<location>_<cluster>` convention allows, so
+# host_context must be set explicitly whenever host_cloud isn't "gke".
+check "host_context_required_for_non_gke" {
+  assert {
+    condition     = var.host_cloud == "gke" || var.host_context != ""
+    error_message = "set host_context explicitly for eks/aks hosts"
+  }
 }
 
 # No local `provider "helm"` / `provider "kubernetes"` blocks here: a module
 # that declares its own provider configurations cannot be called with
 # `count`, which the dispatch module (tf/modules/cluster) needs to select
 # between gke/kind/vcluster. Instead this module only declares
-# required_providers and relies on the default (unaliased) helm/kubernetes/
-# google provider configurations passed down implicitly from its root
-# caller (e.g. tf/prebuilt/vcluster), which points them at the host cluster.
-
-# Reserving the IP up front lets it be baked into the proxy cert SANs and the
-# exported kubeconfig before the vcluster Service exists, avoiding a
-# TLS-SAN chicken-and-egg problem between the Service's LoadBalancer IP and
-# the certificate the control plane serves.
-resource "google_compute_address" "vcluster" {
-  name   = "${var.cluster_name}-ip"
-  region = var.location
-}
+# required_providers and relies on the default (unaliased) helm/kubernetes
+# provider configurations passed down implicitly from its root caller (e.g.
+# tf/prebuilt/vcluster), which points them at the host cluster.
 
 # Managed explicitly (not via helm's create_namespace) so `tofu destroy`
 # deletes the namespace, and with it the vcluster StatefulSet's PVC. A plain
@@ -58,6 +57,48 @@ resource "kubernetes_namespace" "vcluster" {
   metadata {
     name = var.cluster_name
   }
+}
+
+# Pre-created LoadBalancer Service fronting the vcluster syncer pods
+# (selector verified against the loft-sh/vcluster chart's own StatefulSet
+# pod template and Service selector: `app: vcluster`, `release: <release
+# name>`). Creating it up front lets its external address be baked into the
+# proxy cert SANs and the exported kubeconfig before the helm release
+# renders, avoiding a TLS-SAN chicken-and-egg problem between the Service's
+# external address and the certificate the control plane serves. This
+# replaces a GCP-specific `google_compute_address` with a cloud-agnostic
+# Kubernetes resource: GKE/AKS hand back an IP, EKS NLBs hand back a
+# hostname, and local.lb_address below picks whichever is set. The chart's
+# own Service stays ClusterIP (its default); this Service just fronts the
+# same pods.
+resource "kubernetes_service_v1" "lb" {
+  metadata {
+    name      = "${var.cluster_name}-lb"
+    namespace = kubernetes_namespace.vcluster.metadata[0].name
+  }
+
+  spec {
+    type = "LoadBalancer"
+
+    selector = {
+      app     = "vcluster"
+      release = var.cluster_name
+    }
+
+    port {
+      port        = 443
+      target_port = 8443
+    }
+  }
+
+  wait_for_load_balancer = true
+}
+
+locals {
+  lb_address = coalesce(
+    try(kubernetes_service_v1.lb.status[0].load_balancer[0].ingress[0].ip, ""),
+    try(kubernetes_service_v1.lb.status[0].load_balancer[0].ingress[0].hostname, "")
+  )
 }
 
 resource "helm_release" "vcluster" {
@@ -73,7 +114,7 @@ resource "helm_release" "vcluster" {
 
   values = [
     templatefile("${path.module}/vcluster.yaml.tftpl", {
-      lb_ip = google_compute_address.vcluster.address
+      lb_address = local.lb_address
     })
   ]
 }
@@ -81,8 +122,8 @@ resource "helm_release" "vcluster" {
 # Polls for the vcluster kubeconfig secret, writes it locally, then polls the
 # vcluster API through that kubeconfig until it answers. Both steps can take
 # a while after the Helm release reports ready: the LoadBalancer Service
-# needs to program the reserved IP, and the vcluster API needs to come up
-# behind it.
+# needs to finish programming its external address, and the vcluster API
+# needs to come up behind it.
 resource "terraform_data" "kubeconfig" {
   depends_on = [helm_release.vcluster]
 

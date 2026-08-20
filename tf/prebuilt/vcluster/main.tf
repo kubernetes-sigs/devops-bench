@@ -15,10 +15,6 @@
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = ">= 5.0.0"
-    }
     helm = {
       source  = "hashicorp/helm"
       version = "~> 3.0"
@@ -31,12 +27,9 @@ terraform {
 }
 
 locals {
-  host_context = var.host_context != "" ? var.host_context : "gke_${var.project_id}_${var.location}_${var.host_cluster_name}"
-}
-
-provider "google" {
-  project = var.project_id
-  region  = var.location
+  host_context = var.host_context != "" ? var.host_context : (
+    var.host_cloud == "gke" ? "gke_${var.project_id}_${var.location}_${var.host_cluster_name}" : ""
+  )
 }
 
 provider "helm" {
@@ -56,6 +49,7 @@ module "vcluster" {
   cluster_name         = var.cluster_name
   project_id           = var.project_id
   location             = var.location
+  host_cloud           = var.host_cloud
   host_context         = var.host_context
   host_cluster_name    = var.host_cluster_name
   kubeconfig_path_host = var.kubeconfig_path_host

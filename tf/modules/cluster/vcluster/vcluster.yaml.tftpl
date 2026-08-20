@@ -1,11 +1,7 @@
 controlPlane:
   proxy:
     extraSANs:
-      - "${lb_ip}"
-  service:
-    spec:
-      type: LoadBalancer
-      loadBalancerIP: "${lb_ip}"
+      - "${lb_address}"
   statefulSet:
     resources:
       requests:
@@ -14,4 +10,4 @@ controlPlane:
         ephemeral-storage: 2Gi
 
 exportKubeConfig:
-  server: "https://${lb_ip}:443"
+  server: "https://${lb_address}:443"

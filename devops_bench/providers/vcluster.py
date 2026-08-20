@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vcluster provider: virtual clusters running inside an existing GKE host."""
+"""vcluster provider: virtual clusters running inside an existing host cluster."""
 
 from __future__ import annotations
 
@@ -30,28 +30,44 @@ _log = get_logger("providers.vcluster")
 
 @PROVIDERS.register("vcluster")
 class VclusterProvider(Provider):
-    """Provider for loft-sh vcluster virtual clusters hosted on GKE.
+    """Provider for loft-sh vcluster virtual clusters hosted on gke/eks/aks.
 
     A vcluster is a virtual Kubernetes control plane running as a workload
-    inside an existing GKE host cluster, provisioned in a couple of minutes
-    instead of the ten-plus minutes a real GKE cluster takes. Access to the
+    inside an existing host cluster, provisioned in a couple of minutes
+    instead of the ten-plus minutes a real cluster takes. Access to the
     vcluster itself goes through the kubeconfig the OpenTofu module writes to
-    disk, not through ``gcloud``; only reaching the *host* cluster (to run the
-    vcluster's own control plane) may need ``gcloud`` credentials.
+    disk, not through the host cloud's CLI; only reaching the *host* cluster
+    (to run the vcluster's own control plane) may need host cloud
+    credentials.
     """
 
     def ensure_account_credentials(self) -> None:
-        """Ensure the host GKE cluster's context is available for kubectl/helm.
+        """Ensure the host cluster's context is available for kubectl/helm.
 
-        If ``VCLUSTER_HOST_CLUSTER`` is set and a project is resolvable from
-        ``GCP_PROJECT_ID``, runs ``gcloud container clusters get-credentials``
-        for the host cluster so its context exists in kubeconfig. Otherwise a
-        no-op: assumes the host context is already present in kubeconfig.
+        Reads ``VCLUSTER_HOST_CLOUD`` (default ``gke``) to decide how. On
+        ``gke``, if ``VCLUSTER_HOST_CLUSTER`` is set and a project is
+        resolvable from ``GCP_PROJECT_ID``, runs ``gcloud container clusters
+        get-credentials`` for the host cluster so its context exists in
+        kubeconfig; otherwise a no-op, assuming the host context is already
+        present in kubeconfig. On ``eks``/``aks`` this is always a no-op for
+        now: host credential automation (``aws eks update-kubeconfig`` /
+        ``az aks get-credentials``) is not yet implemented, so the host
+        context is assumed to already be present in kubeconfig.
 
         Raises:
-            ConfigError: If ``VCLUSTER_HOST_CLUSTER`` is set but no location is
-                resolvable from ``VCLUSTER_HOST_LOCATION`` or ``GCP_LOCATION``.
+            ConfigError: If ``VCLUSTER_HOST_CLUSTER`` is set on a ``gke`` host
+                but no location is resolvable from ``VCLUSTER_HOST_LOCATION``
+                or ``GCP_LOCATION``.
         """
+        host_cloud = get_env("VCLUSTER_HOST_CLOUD") or "gke"
+        if host_cloud != "gke":
+            _log.debug(
+                "vcluster provider: host_cloud=%s, assuming host cluster credentials "
+                "are already present (no automation yet for eks/aks)",
+                host_cloud,
+            )
+            return
+
         host_cluster = get_env("VCLUSTER_HOST_CLUSTER")
         project = get_env("GCP_PROJECT_ID")
         if not host_cluster or not project:
@@ -112,14 +128,15 @@ class VclusterProvider(Provider):
 
         Returns:
             A new mapping with ``project_id``, ``cluster_name``, ``location``,
-            ``host_cluster_name``, ``host_context``, and ``kubeconfig_path``
-            filled in where not already set.
+            ``host_cloud``, ``host_cluster_name``, ``host_context``, and
+            ``kubeconfig_path`` filled in where not already set.
         """
         variables = custom_variables.copy()
         variables.setdefault("infra_provider", "vcluster")
         variables.setdefault("project_id", ctx.project_id)
         variables.setdefault("cluster_name", ctx.cluster_name)
         variables.setdefault("location", ctx.location)
+        variables.setdefault("host_cloud", get_env("VCLUSTER_HOST_CLOUD") or "gke")
         variables.setdefault("host_cluster_name", get_env("VCLUSTER_HOST_CLUSTER") or "")
         host_context = get_env("VCLUSTER_HOST_CONTEXT")
         if host_context:
