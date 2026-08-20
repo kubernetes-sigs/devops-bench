@@ -114,6 +114,8 @@ other code changes are required — the registry resolves it at run time.
 ## Skeleton
 
 ```python
+from pathlib import Path
+
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
