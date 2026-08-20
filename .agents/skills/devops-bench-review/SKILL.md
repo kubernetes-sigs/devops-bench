@@ -190,8 +190,10 @@ What to look for, roughly in order of how often it slips through:
   through the back door. The established pattern is deduction that *raises*
   rather than falls back — see [infra.md](../../../docs/components/infra.md).
 - **Names on public surfaces.** A field, class, or CLI flag named for one
-  provider (`gke_cluster_name`, `--gcp-project`) fixes the vocabulary for every
-  future provider; `cluster_name` / `--project` carry the same meaning.
+  provider fixes the vocabulary for every future provider. The surface is
+  already neutral — `--project` / `--cluster` in `cli.py`, `project_id`,
+  `cluster_name` — so what to catch is a *new* name that reintroduces a vendor,
+  not the ones already there.
 - **Docs and docstring examples.** An example is user-facing text. Where a
   provider-specific example is genuinely clearest, label it as one rather than
   letting it read as the only way.
