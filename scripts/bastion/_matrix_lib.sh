@@ -51,9 +51,7 @@ REMOTE_DIR="${REMOTE_DIR:-devops-bench}"
 MATRIX_TASKS="${MATRIX_TASKS:-tasks/common/opa-remediation/task.yaml}"
 MATRIX_MODELS="${MATRIX_MODELS:-gemini-3.1-pro}"
 
-# PROJECT_ID is the name the harness reads; GCP_PROJECT_ID is accepted as an
-# alias so an existing bench.env keeps working.
-PROJECT_ID="${PROJECT_ID:-${GCP_PROJECT_ID:-}}"
+PROJECT_ID="${PROJECT_ID:-}"
 CLUSTER_NAME="${CLUSTER_NAME:-eval}"
 GCP_LOCATION="${GCP_LOCATION:-us-central1-a}"
 AGENT_PROVIDER="${AGENT_PROVIDER:-google}"
