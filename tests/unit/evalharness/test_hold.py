@@ -31,13 +31,12 @@ from typing import Any, Literal
 import pytest
 
 from devops_bench.agents.result import AgentResult
-from devops_bench.core import ConfigError
 from devops_bench.evalharness.default import DefaultEvalHarness
 from devops_bench.evalharness.hold import (
     HoldObservation,
     SafeguardMonitor,
+    _default_poll_interval,
     _fold_sample,
-    _positive_float_env,
     hold_verdict,
     run_hold_window,
 )
@@ -275,46 +274,56 @@ def test_run_one_stops_and_joins_the_safeguard_monitor_when_the_agent_raises(
     assert not any(t.name == "safeguard-monitor" for t in threading.enumerate())
 
 
-# --- _positive_float_env: validating BENCH_HOLD_INTERVAL_SEC ---------------
+# --- _default_poll_interval: validating BENCH_HOLD_INTERVAL_SEC -----------
 
 
-def test_positive_float_env_parses_a_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_poll_interval_parses_a_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BENCH_HOLD_INTERVAL_SEC", "2.5")
-    assert _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0) == 2.5
+    assert _default_poll_interval() == 2.5
 
 
-def test_positive_float_env_falls_back_to_the_default_when_unset(
+def test_default_poll_interval_falls_back_to_5_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("BENCH_HOLD_INTERVAL_SEC", raising=False)
-    assert _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0) == 5.0
+    assert _default_poll_interval() == 5.0
 
 
-def test_positive_float_env_rejects_a_non_numeric_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_poll_interval_falls_back_to_5_on_a_malformed_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("BENCH_HOLD_INTERVAL_SEC", "soon")
-    with pytest.raises(ConfigError, match="BENCH_HOLD_INTERVAL_SEC"):
-        _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
+    with caplog.at_level("WARNING"):
+        assert _default_poll_interval() == 5.0
+    assert "BENCH_HOLD_INTERVAL_SEC" in caplog.text
 
 
-def test_positive_float_env_rejects_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_poll_interval_falls_back_to_5_on_zero(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("BENCH_HOLD_INTERVAL_SEC", "0")
-    with pytest.raises(ConfigError, match="BENCH_HOLD_INTERVAL_SEC"):
-        _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
+    with caplog.at_level("WARNING"):
+        assert _default_poll_interval() == 5.0
+    assert "BENCH_HOLD_INTERVAL_SEC" in caplog.text
 
 
-def test_positive_float_env_rejects_a_negative_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_poll_interval_falls_back_to_5_on_a_negative_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("BENCH_HOLD_INTERVAL_SEC", "-1.0")
-    with pytest.raises(ConfigError, match="BENCH_HOLD_INTERVAL_SEC"):
-        _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
+    with caplog.at_level("WARNING"):
+        assert _default_poll_interval() == 5.0
+    assert "BENCH_HOLD_INTERVAL_SEC" in caplog.text
 
 
 @pytest.mark.parametrize("raw", ["inf", "-inf", "nan"])
-def test_positive_float_env_rejects_non_finite_values(
-    monkeypatch: pytest.MonkeyPatch, raw: str
+def test_default_poll_interval_falls_back_to_5_on_non_finite_values(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, raw: str
 ) -> None:
     monkeypatch.setenv("BENCH_HOLD_INTERVAL_SEC", raw)
-    with pytest.raises(ConfigError, match="BENCH_HOLD_INTERVAL_SEC"):
-        _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
+    with caplog.at_level("WARNING"):
+        assert _default_poll_interval() == 5.0
+    assert "BENCH_HOLD_INTERVAL_SEC" in caplog.text
 
 
 # --- hold_verdict: every branch, in order --------------------------------

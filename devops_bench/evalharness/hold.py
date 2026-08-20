@@ -66,7 +66,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from devops_bench.core import ConfigError, get_logger
+from devops_bench.core import get_logger
 from devops_bench.verification import VerificationEntry, VerificationResult, VerifierAgent
 
 __all__ = [
@@ -80,27 +80,31 @@ __all__ = [
 _log = get_logger("evalharness.hold")
 
 
-def _positive_float_env(name: str, default: float) -> float:
-    """Parse ``name`` from the environment as a finite float greater than zero.
+def _default_poll_interval() -> float:
+    """Parse ``BENCH_HOLD_INTERVAL_SEC`` as a finite float greater than zero.
 
-    Falls back to ``default`` when the variable is unset. Raises
-    :class:`ConfigError` with a message naming the variable and its offending
-    value when the variable is set but is not a finite positive number, so a
-    bad override fails clearly instead of raising a bare ``ValueError`` deep
-    inside module import or letting a zero/negative value make the scheduler
-    spin without sleeping.
+    Falls back to ``5.0`` when the variable is unset. Also falls back to
+    ``5.0``, logging a warning naming the variable and its offending value,
+    when the variable is set but is not a finite positive number, so a bad
+    override degrades to the safe default instead of raising a bare
+    ``ValueError`` deep inside module import or letting a zero/negative value
+    make the scheduler spin without sleeping.
     """
-    raw = os.environ.get(name)
+    raw = os.environ.get("BENCH_HOLD_INTERVAL_SEC")
     if raw is None:
-        return default
+        return 5.0
     try:
         value = float(raw)
-    except ValueError as exc:
-        raise ConfigError(
-            f"{name}={raw!r} is not a valid number; it must be a finite number greater than zero"
-        ) from exc
+    except ValueError:
+        _log.warning("BENCH_HOLD_INTERVAL_SEC=%r is not a valid number; falling back to 5.0", raw)
+        return 5.0
     if not math.isfinite(value) or value <= 0:
-        raise ConfigError(f"{name}={raw!r} must be a finite number greater than zero")
+        _log.warning(
+            "BENCH_HOLD_INTERVAL_SEC=%r must be a finite number greater than zero; "
+            "falling back to 5.0",
+            raw,
+        )
+        return 5.0
     return value
 
 
@@ -109,7 +113,7 @@ def _positive_float_env(name: str, default: float) -> float:
 # module-level tunable in the same style as VERIFICATION_TIMEOUT_SEC /
 # VERIFICATION_TOTAL_BUDGET_SEC in devops_bench.evalharness.scenario (those
 # two are plain constants, not env-overridable).
-HOLD_POLL_INTERVAL_SEC = _positive_float_env("BENCH_HOLD_INTERVAL_SEC", 5.0)
+HOLD_POLL_INTERVAL_SEC = _default_poll_interval()
 
 # Consecutive errored samples required at the end of an observation window
 # before hold_verdict() reports "error" instead of "pass". One errored
