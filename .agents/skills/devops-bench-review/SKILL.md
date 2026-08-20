@@ -150,14 +150,30 @@ are the ones a review has to find. Authors: run this before opening the PR.
 
 The rule from [AGENTS.md](../../../AGENTS.md): user-facing text and the generic
 framework layers stay vendor-neutral. Provider specifics belong in
-`devops_bench/providers/`, deployer implementations, `tf/`, or where they name a
+provider-scoped code — the table below is the full list — or where they name a
 real provider artifact.
 
-The boundary that decides every call:
+The boundary that decides every call. Paths in the left column are under
+`devops_bench/`; `tasks/<provider>/**` on the right is the on-disk task tree at
+the repo root, which is a different thing from the `devops_bench/tasks/` schema
+package:
 
 | Generic — must stay neutral | Provider-scoped — specifics are fine |
 | --- | --- |
-| `core/`, `evalharness/`, `run.py`, `cli.py`, `tasks/`, `metrics/`, `verification/`, `chaos/`, `agents/`, `models/`, `results/`, `k8s/` | `providers/`, deployer implementations, `tf/`, `tasks/gcp/**` |
+| `core/`, `evalharness/`, `run.py`, `cli.py`, `tasks/`, `metrics/`, `verification/`, `chaos/`, `agents/`, `models/`, `results/`, `k8s/` | `providers/`, deployer implementations, `tf/`, `agents/cli/<vendor>/**`, `models/<vendor>.py`, `tasks/<provider>/**` |
+
+Write the pattern, not the instance: the carve-out is `tasks/<provider>/`, so
+`tasks/aws/` is as exempt as `tasks/gcp/` the day someone adds it.
+
+**Two different axes share the word "provider".** A *cloud provider* (`gcp`,
+`kind`) provisions the cluster; a *model provider* (`gemini`, `claude`,
+`ollama`) serves the LLM — see [glossary.md](../../../docs/components/glossary.md).
+This lens is about the cloud axis. Most of the Google strings in `devops_bench/`
+are on the model axis and are not findings: `models/gemini.py` is the
+google-genai adapter, `models/claude.py` reads `GCP_PROJECT_ID` because Vertex
+genuinely needs a project id, and `agents/cli/antigravity/` shells out to
+`gcloud` because that is what that agent CLI does. `agents/` and `models/` sit
+in the generic column for their shared layers; their per-vendor subtrees do not.
 
 What to look for, roughly in order of how often it slips through:
 
@@ -182,8 +198,9 @@ What to look for, roughly in order of how often it slips through:
 
 Do **not** flag: anything in the provider-scoped column, a term naming a real
 artifact (`gcloud container clusters`, a `google_container_cluster` resource, the
-`gcp` provider key itself), or a GCP-shaped task under `tasks/gcp/`.
-Over-flagging is its own failure mode — it trains authors to ignore the lens.
+`gcp` provider key itself), a provider-shaped task under `tasks/<provider>/`, or
+a model-provider string on the model axis. Over-flagging is its own failure mode
+— it trains authors to ignore the lens.
 
 Give the neutral replacement, not just the objection: "cloud project id",
 "target Kubernetes cluster", "the configured provider".

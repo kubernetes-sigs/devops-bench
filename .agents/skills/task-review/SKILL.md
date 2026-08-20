@@ -72,7 +72,8 @@ The matrix runs **Task × Model × AgentConfig** concurrently on one host. `RunE
 isolates each run; a task is unsafe when it names state shared *outside* that
 isolation. **What `RunEnv` gives for free — do NOT hardcode these:** `KUBECONFIG`,
 `CLOUDSDK_CONFIG`, `TF_DATA_DIR` (+ tofu state beside it), `OPENCLAW_STATE_DIR`,
-ports, and the **cluster name** (run-token-prefixed, clamped to GKE's 40 chars).
+ports, and the **cluster name** (run-token-prefixed, clamped to the framework's
+`_MAX_CLUSTER_NAME` — 40 chars, set by the tightest provider limit).
 Flag any task/stack/prompt that pins one of these to a fixed value.
 
 **What the author MUST guarantee** (none of this is isolated for you):
@@ -110,9 +111,9 @@ Flag any task/stack/prompt that pins one of these to a fixed value.
    `google_project_iam_member` in its own state: the first `tofu destroy` strips the
    binding while sibling runs still need it → mid-run auth loss.
 6. **Name-length budget.** Check the *resolved* name that `RunEnv.cluster_name()`
-   produces, not the raw base-plus-token sum: it already clamps to the GKE limit
-   and the run token is the prefix, so a long base name does not by itself drop
-   the discriminator. What to verify is that any *stack-side* truncation
+   produces, not the raw base-plus-token sum: it already clamps to
+   `_MAX_CLUSTER_NAME` and the run token is the prefix, so a long base name does
+   not by itself drop the discriminator. What to verify is that any *stack-side* truncation
    preserves that prefix — a suffix the module truncates off collapses two runs
    to one name.
 
@@ -127,7 +128,7 @@ expects (`cluster_name` / `cluster_location`; kind stacks emit
 `cluster_location = "local"`). For **every project-global resource it creates** (AR
 repos, Cloud SQL, external IPs, auto-mode VPCs), there is destroy-time cleanup so a
 re-apply after a failed run isn't blocked by orphans. New stack variables the
-kind/gcp resolver won't populate are a red flag — the harness can't set them.
+provider resolver won't populate are a red flag — the harness can't set them.
 
 ### Placeholders
 
@@ -154,7 +155,7 @@ tests; note pre-existing failures aren't the author's). For each candidate, try 
 **refute** it against `run_env.py` and the resolver before keeping it. Present:
 
 1. **Overview** — what the task tests and its infra shape (deployer/stack, kind vs
-   GKE, chaos or not).
+   a cloud provider, chaos or not).
 2. **Findings**, most-severe first, each `severity — file:line — summary` then the
    failure/why, the concrete fix, and **how to verify** (the parse to run, the
    `grep` for the duplicate id, the axis that triggers the collision).
