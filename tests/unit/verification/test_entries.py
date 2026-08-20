@@ -88,6 +88,22 @@ def test_hold_poll_interval_must_be_positive() -> None:
     assert errors[0]["name"] == "e1"
 
 
+def test_hold_poll_interval_rejects_infinity() -> None:
+    entries, errors = parse_entries(
+        [_entry(mode="hold", hold_poll_interval_sec=float("inf"), hold_window_sec=30.0)]
+    )
+    assert entries == []
+    assert "finite" in errors[0]["reason"]
+
+
+def test_hold_poll_interval_rejects_nan() -> None:
+    entries, errors = parse_entries(
+        [_entry(mode="hold", hold_poll_interval_sec=float("nan"), hold_window_sec=30.0)]
+    )
+    assert entries == []
+    assert "finite" in errors[0]["reason"]
+
+
 def test_hold_poll_interval_sec_is_rejected_on_an_assert_entry() -> None:
     entries, errors = parse_entries(
         [_entry(role="safeguard", severity="recoverable", mode="assert", hold_poll_interval_sec=5)]
@@ -123,6 +139,18 @@ def test_objective_hold_with_window_parses() -> None:
     entries, errors = parse_entries([_entry(mode="hold", hold_window_sec=30.0)])
     assert errors == []
     assert entries[0].hold_window_sec == 30.0
+
+
+def test_hold_window_sec_rejects_infinity() -> None:
+    entries, errors = parse_entries([_entry(mode="hold", hold_window_sec=float("inf"))])
+    assert entries == []
+    assert "finite" in errors[0]["reason"]
+
+
+def test_hold_window_sec_rejects_nan() -> None:
+    entries, errors = parse_entries([_entry(mode="hold", hold_window_sec=float("nan"))])
+    assert entries == []
+    assert "finite" in errors[0]["reason"]
 
 
 def test_safeguard_hold_with_window_is_an_error() -> None:

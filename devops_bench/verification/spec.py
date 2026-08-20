@@ -343,8 +343,8 @@ class VerificationEntry(BaseModel):
     mode: Literal["converge", "assert", "hold"] | None = None
     weight: float = Field(default=1.0, gt=0)
     check: Any
-    hold_poll_interval_sec: float | None = Field(default=None, gt=0)
-    hold_window_sec: float | None = Field(default=None, gt=0)
+    hold_poll_interval_sec: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    hold_window_sec: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @field_validator("check", mode="before")
     @classmethod
