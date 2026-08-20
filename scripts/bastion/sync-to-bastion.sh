@@ -27,7 +27,7 @@
 # Env overrides:
 #   BASTION_VM       VM name        (default: bench-bastion)
 #   BASTION_ZONE     VM zone        (default: us-central1-a)
-#   BASTION_PROJECT  GCP project    (default: gcloud's active project)
+#   BASTION_PROJECT  cloud project    (default: gcloud's active project)
 #   REMOTE_DIR       dir on the VM  (default: ~/devops-bench)
 set -euo pipefail
 
