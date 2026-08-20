@@ -70,7 +70,7 @@ SKILLS_PATHS="${SKILLS_PATHS:-\$HOME/mcp-skills/skills}"
 DRY_RUN="${DRY_RUN:-}"
 BENCH_REMOTE="${BENCH_REMOTE:-}"  # empty = run locally on this host; set = ssh to the bastion
 
-STAMP="$(date +%Y%m%d_%H%M%S)"
+STAMP="$(date +%Y%m%d_%H%M%S)-$$"
 # Pulled results land in ${RESULTS_DIR}/${STAMP} (the pull re-creates the
 # stamped dir), so the default deliberately omits the stamp.
 RESULTS_DIR="${RESULTS_DIR:-results/matrix}"
@@ -169,7 +169,7 @@ _poll_until_done() {
     fi
     if [ "${waited}" -ge "${max_wait}" ]; then
       echo "    giving up after ${waited}s (MATRIX_POLL_TIMEOUT_SEC); pulling whatever finished" >&2
-      break
+      return 124
     fi
     echo "    ${done_n}/${expected} finished... ($(date +%H:%M:%S))"
     sleep 60
@@ -221,9 +221,10 @@ matrix_dispatch() {
       || { echo "ERROR: no run at ~/${REMOTE_OUT} on ${where}" >&2; exit 2; }
     local exp
     exp="$(host_exec "ls -d \$HOME/${REMOTE_OUT}/*/ 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]' || echo '?')"
-    _poll_until_done "${exp}"
-    _pull_and_summarize
-    return $?
+    local poll_rc=0
+    _poll_until_done "${exp}" || poll_rc=$?
+    _pull_and_summarize || return $?
+    return "${poll_rc}"
   fi
 
   echo "==> ${label} matrix: ${#COMBOS[@]} combo(s), MAX_PARALLEL=${MAX_PARALLEL}"
@@ -336,6 +337,8 @@ matrix_dispatch() {
   fi
   echo "    (to re-attach if this exits: RESUME_STAMP=${STAMP} re-run the same command)"
 
-  _poll_until_done "${#COMBOS[@]}"
-  _pull_and_summarize
+  local poll_rc=0
+  _poll_until_done "${#COMBOS[@]}" || poll_rc=$?
+  _pull_and_summarize || return $?
+  return "${poll_rc}"
 }

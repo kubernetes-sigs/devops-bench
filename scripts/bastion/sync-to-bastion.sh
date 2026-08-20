@@ -103,9 +103,12 @@ if [ -n "${BASTION_SSH_HOST:-}" ]; then
   SSH_HOST="${BASTION_SSH_HOST}"
   SSH_USER="${BASTION_SSH_USER:-$(id -un)}"
   SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+  # Same options as _matrix_lib.sh: no interactive prompts, and keepalive so the
+  # transfer rides out brief network blips instead of hanging.
+  _SSH_KA=(-o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o ConnectTimeout=30)
   echo "==> transport: direct ssh to ${SSH_TARGET}"
-  upload_archive() { scp "${ARCHIVE}" "${SSH_TARGET}:${REMOTE_ARCHIVE}"; }
-  remote_exec() { ssh "${SSH_TARGET}" "$1"; }
+  upload_archive() { scp "${_SSH_KA[@]}" "${ARCHIVE}" "${SSH_TARGET}:${REMOTE_ARCHIVE}"; }
+  remote_exec() { ssh "${_SSH_KA[@]}" "${SSH_TARGET}" "$1"; }
 else
   echo "==> transport: gcloud compute ssh over IAP"
   upload_archive() {
