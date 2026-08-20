@@ -39,36 +39,37 @@ anything. Then *list* (never delete yet) the resources a failed teardown leaks.
 Match on run-token prefixes so you never sweep shared infra.
 
 ```bash
-PROJECT=<sandbox-project>   # verify: gcloud config get-value project
+# Fill these in, then paste the block.
+PROJECT="my-sandbox-project"        # verify: gcloud config get-value project
+CLUSTER=""                          # set in step 1 below
 
-# Step 1 of every sweep: pin the aborted run's cluster name. RunEnv names a
-# cluster c<blake2s digest of the run id>, and every other resource below is
-# selected from it, so nothing is matched by a bare prefix.
+# Step 1: pin the aborted run's cluster. RunEnv names it c<blake2s digest of the
+# run id>. Every filter below is anchored to that exact name, so a resource that
+# merely contains the token (shared-$CLUSTER-net) is never matched.
 gcloud container clusters list --project "$PROJECT" \
   --filter="name~'^c[0-9a-f]{8}-'" --format="table(name,location,status)"
-CLUSTER=<pick the aborted run's cluster from that list>
+CLUSTER="cbd827e1-bench-opa"        # <- copy the aborted run's cluster from that list
 
-# The node SA's account_id is derived, not the cluster name:
-#   gke-nodes-<first 9 chars of the slugified cluster>-<first 6 of md5(cluster)>
+# The node SA account_id is derived, not the cluster name:
+#   gke-nodes-<first 9 of the slugified cluster>-<first 6 of md5(cluster)>
 # (tf/modules/cluster/gke/main.tf). Compute it rather than guessing.
-SLUG=$(printf '%s' "$CLUSTER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g' | cut -c1-9 | sed 's/-$//')
+SLUG=$(printf '%s' "$CLUSTER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9][^a-z0-9]*/-/g' | cut -c1-9 | sed 's/-$//')
 SA="gke-nodes-${SLUG}-$(printf '%s' "$CLUSTER" | md5sum | cut -c1-6)@${PROJECT}.iam.gserviceaccount.com"
-gcloud iam service-accounts list --project "$PROJECT" --filter="email=${SA}" --format="table(email)"
+gcloud iam service-accounts list --project "$PROJECT" --filter="email=$SA" --format="table(email)"
 
-# Artifact Registry repo for this run only (deploy-hello-app creates hello-app-<cluster>)
+# Everything else, anchored to this run's cluster name.
 gcloud artifacts repositories list --project "$PROJECT" \
   --filter="name~'/hello-app-${CLUSTER}$'" --format="table(name,location,createTime)"
-
-# Secrets, VPCs and Cloud SQL, all pinned to the same cluster token
-gcloud secrets list --project "$PROJECT" --filter="name~'${CLUSTER}'" --format="table(name)"
-gcloud compute networks list --project "$PROJECT" --filter="name~'${CLUSTER}'" --format="table(name)"
-gcloud sql instances list --project "$PROJECT" --filter="name~'${CLUSTER}'" --format="table(name,region,state)"
+gcloud secrets list        --project "$PROJECT" --filter="name~'${CLUSTER}$'"  --format="table(name)"
+gcloud compute networks list --project "$PROJECT" --filter="name~'${CLUSTER}$'" --format="table(name)"
+gcloud sql instances list  --project "$PROJECT" --filter="name~'${CLUSTER}$'"  --format="table(name,region,state)"
 ```
 
-Every filter above is pinned to `$CLUSTER`, so the listing only ever shows the
-aborted run's own resources. Do not relax them to a bare `gke-nodes-` or
-`hello-app-` prefix: a sibling matrix run is very likely live in the same
-project, and its resources match those prefixes too.
+Every filter above is anchored to the exact `$CLUSTER` name, not a substring of
+it. Do not relax them to a bare `gke-nodes-` or `hello-app-` prefix, and do not
+drop the trailing `$`: a sibling run is very likely live in the same project and
+its resources share those prefixes. Read the listing and confirm each name
+belongs to the aborted run before deleting anything.
 
 Two notes on Cloud SQL: a deleted instance's dependent resources can take
 several days to disappear, and name reuse after deletion is not guaranteed to
@@ -88,29 +89,30 @@ project.
 ### 4. Delete (only after confirmation)
 
 ```bash
+LOCATION="us-central1"              # the cluster's location
+NET=""                              # set only if the run created its own network
+
 # 1. Cluster first — deleting its node SA earlier can wedge the teardown.
-gcloud container clusters delete "$CLUSTER" --location <loc> --project "$PROJECT" --quiet
+gcloud container clusters delete "$CLUSTER" --location "$LOCATION" --project "$PROJECT" --quiet
 
 # 2. The node SA, using the $SA computed in step 2 rather than a guessed name.
 gcloud iam service-accounts delete "$SA" --project "$PROJECT" --quiet
 
-# 3. Secrets, Artifact Registry, Cloud SQL — all named from $CLUSTER.
-gcloud secrets delete <name> --project "$PROJECT" --quiet
-gcloud artifacts repositories delete "hello-app-${CLUSTER}" --location <loc> --project "$PROJECT" --quiet
-gcloud sql instances delete <name> --project "$PROJECT" --quiet
+# 3. Resources named from $CLUSTER. Substitute the names the listing showed.
+gcloud artifacts repositories delete "hello-app-${CLUSTER}" --location "$LOCATION" --project "$PROJECT" --quiet
+gcloud secrets delete       "$SECRET_NAME"   --project "$PROJECT" --quiet
+gcloud sql instances delete "$INSTANCE_NAME" --project "$PROJECT" --quiet
 
-# 4. A VPC last, and only after every dependency. `networks delete` fails while
-#    anything still references the network, so enumerate before deleting:
-NET=<the run's network>
-gcloud compute forwarding-rules list --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
-gcloud compute routers list        --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
-gcloud compute vpn-gateways list   --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
-gcloud compute networks peerings list --project "$PROJECT" --network="$NET" --format='value(name)'
-gcloud compute routes list         --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name)'
-gcloud compute networks subnets list  --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
-gcloud compute firewall-rules list --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name)'
-# delete each of the above (forwarding rules, routers, VPN gateways, peerings,
-# routes, subnets, firewall rules), then finally:
+# 4. A VPC last, and only after every dependency: `networks delete` fails while
+#    anything still references it. Enumerate first, delete in this order.
+gcloud compute forwarding-rules list  --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
+gcloud compute routers list           --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
+gcloud compute vpn-gateways list      --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
+gcloud compute networks peerings list --project "$PROJECT" --network="$NET"              --format='value(name)'
+gcloud compute routes list            --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name)'
+gcloud compute networks subnets list  --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
+gcloud compute firewall-rules list    --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name)'
+# delete each of the above, then finally:
 gcloud compute networks delete "$NET" --project "$PROJECT" --quiet
 ```
 

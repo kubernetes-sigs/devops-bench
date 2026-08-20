@@ -21,13 +21,13 @@ If an eval fails, find the symptom below and apply the action. Many failures are
 | GCP `409 already exists` on cluster (re)create, naming a `gke-nodes-*` service account | Historic: the node SA name had no discriminator, so a failed teardown's leftover blocked the next run | Fixed — `tf/modules/cluster/gke` now appends `md5(cluster_name)[:6]` to `account_id`. If seen, you are on stale TF; sync and retry | **Setup** | Yes |
 | Task fails in ~2 min at `tofu plan`: `could not locate any control plane nodes for cluster '<cluster>'` | A prior run's per-run state under `/tmp/devops-bench-runs/<RUN_ID>` is reused and references an already-torn-down cluster | **Wipe that run's state before re-running**: `rm -rf /tmp/devops-bench-runs/<RUN_ID>` plus the kind cleanup in *Before any retry*, then retry. Do not wipe the whole directory on a shared host — it belongs to every concurrent run | **Setup** | No |
 | `gemini subprocess error: ... exit code -1` | This is a **timeout, not a crash** — `core.subprocess.run` returns `-1` on `TimeoutExpired` (usually an MCP approval hang) | Fix the *hang* (set `--approval-mode yolo` + folder trust below) rather than just raising `AGENT_TIMEOUT_SEC`; only raise the timeout after | **Config / auth** | No |
-| gemini `mcp list` shows server `Disabled`; model writes its own MCP client; or run hangs to timeout with MCP configured (`--skip-trust` alone insufficient) | Untrusted per-run cwd suppresses MCP, **and** with no approval mode MCP calls block on interactive confirmation | Needs **both**: set `security.folderTrust.enabled=false` in user-level `~/.gemini/settings.json`, **and** pass `--approval-mode yolo` in argv | **Config / auth** | No |
+| gemini `mcp list` shows server `Disabled`; model writes its own MCP client; or run hangs to timeout with MCP configured (`--skip-trust` alone insufficient) | Untrusted per-run cwd suppresses MCP, **and** with no approval mode MCP calls block on interactive confirmation | Needs **both**: set `security.folderTrust.enabled=false` in user-level `~/.gemini/settings.json`, **and** pass `--approval-mode yolo` in argv. Both are broad safety bypasses — folder trust is disabled for every Gemini CLI session under that account, and yolo auto-approves every tool call — so apply them only to a dedicated, isolated runner account, never an interactive workstation | **Config / auth** | No |
 | oc on Vertex: `No API key found for provider "google-vertex"` under parallel runs | The ADC marker lives only in the global sqlite auth store; an isolated `OPENCLAW_STATE_DIR` can't see it | Export `GOOGLE_CLOUD_API_KEY=gcp-vertex-credentials`, the portable env marker | **Config / auth** | No |
 | oc on Vertex: `401 Incorrect API key` (request sent to `platform.openai.com`) | The per-run provider entry **replaces** the built-in one and is missing the Vertex transport, so oc falls back to the OpenAI transport | Run on current code — the harness writes a per-run `openclaw.json` pinning `"api": "google-vertex"` (+ `"baseUrl"`); combine with the ADC marker above. If seen, you are on stale code — sync/reinstall | **Config / auth** | No |
 | Vertex `404 Publisher model ... not found`; judge silently fails / 404s | Wrong location or non-`-preview` model id — `gemini-3.x` previews 404 on regional endpoints | Use the **`global`** location (`GOOGLE_CLOUD_LOCATION=global` / `GCP_VERTEX_LOCATION=global`) and a `-preview` model id; the judge default needs `JUDGE_MODEL=gemini-3.1-pro-preview` | **Config / auth** | No |
 | GKE task: `Error 403: <API> has not been used in project … or it is disabled` | A required GCP API isn't enabled in the eval project | `gcloud services enable <api>.googleapis.com --project=<eval-project-id>` (pass the project explicitly rather than relying on the host's active config, and confirm it is the eval project first), wait a few min to propagate, then retry | **Setup** | No |
 | Multi-node kind task fails: `failed to join node with kubeadm … exit status 1` | Host `fs.inotify.max_user_instances` (default 128) exhausted by a multi-node cluster | `sudo sysctl -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches=1048576` (persist in `/etc/sysctl.d/`), then retry | **Setup** | No |
-| kind task fails instantly: `docker: executable file not found in $PATH` | Docker not installed / socket missing on the host (kind tasks run on the host) | Install `docker.io` and start the daemon, then grant socket access to a **dedicated** runner account (`setfacl -m u:devops-bench-runner:rw /var/run/docker.sock`). Docker socket write access and `docker` group membership are root-equivalent on the host, so never grant them to a shared or interactive account — run kind tasks under a named runner on a trusted, isolated host | **Setup** | No |
+| kind task fails instantly: `docker: executable file not found in $PATH` | Docker not installed / socket missing on the host (kind tasks run on the host) | Install `docker.io` and start the daemon, then grant socket access to a **dedicated** runner account (`sudo setfacl -m u:devops-bench-runner:rw /var/run/docker.sock`). Docker recreates the socket on daemon restart and the ACL is lost, so make it persistent (a systemd drop-in or a udev rule) rather than reapplying by hand. Docker socket write access and `docker` group membership are root-equivalent on the host, so never grant them to a shared or interactive account — run kind tasks under a named runner on a trusted, isolated host | **Setup** | No |
 | Chaos `generate_load` injects nothing; HPA never scales (load is a silent no-op) | `fortio` is not on `PATH` — it is installed at provision time, not baked into any image | Install `fortio` onto the runner's `PATH`, then retry | **Setup** | No |
 | Standalone test on a remote host sees **stale code** (e.g. a flag still showing its pre-fix value) | The host venv has an *installed* `devops_bench`; `python3 /tmp/x.py` imports the package, not the synced source | Run with `PYTHONPATH=<repo>`, or `python -m devops_bench` from the source dir | **Setup** | No |
 | **All trajectories empty** (`trajectory: []`, `tools: []`), `ToolInvocation` 0.0 — though the agent clearly acted; run log shows `oc sessions exited 127: /usr/bin/env: 'node': No such file or directory` | The `oc sessions` / `export-trajectory` extraction runs `oc` as a **direct argv subprocess** (no nvm sourced), so on an nvm-managed host Node isn't on `PATH` → exit 127 → trajectory **silently emptied** → every tool/checklist check fails | Put Node on the runner `PATH` (`mkdir -p "$HOME/bin" && ln -sf "$(command -v node)" "$HOME/bin/node" && export PATH="$HOME/bin:$PATH"` — creating the symlink alone does nothing if `~/bin` is absent or not on `PATH`). Current code also prepends the nvm Node dir for these calls (`_ensure_node_on_path` in `devops_bench/agents/cli/openclaw/agent.py`); if seen, sync/reinstall | **Config / setup** | No |
@@ -38,26 +38,38 @@ After applying a fix, retry the run. For any infra-flake row, run the cleanup be
 ### Before any retry
 
 > [!IMPORTANT]
-> Stale run state and orphaned cloud resources are the most common cause of a "fresh" run failing instantly. Clean them before every (re)launch — but scope every command to the run you are retrying. On a shared host the unscoped forms (`rm -rf /tmp/devops-bench-runs/*`, deleting every kind cluster, a bare `pkill -f devops_bench`) will take out concurrent runs.
+> Stale run state and orphaned cloud resources are the most common cause of a "fresh" run failing instantly. Clean them before every (re)launch — but scope every command to the run you are retrying. Runs may execute concurrently on a shared host, so the unscoped forms (`rm -rf /tmp/devops-bench-runs/*`, deleting every kind cluster, a bare `pkill -f devops_bench`) will take out other runs.
 
 On the host the run executed on:
 
 ```bash
-# Scope everything to the run you are retrying. The bastion runs matrix combos
-# concurrently, so an unscoped wipe destroys a sibling run that is still going.
-RUN_ID=<the failed run's id>
-CLUSTER=<that run's cluster name>
+# Fill these in from the failed run, then paste the block. Everything below is
+# scoped to them: the bastion runs matrix combos concurrently, so an unscoped
+# wipe takes out a sibling run that is still going.
+RUN_ID="int_opa_remediation"        # the failed run's id
+CLUSTER="cbd827e1-bench-opa"        # that run's cluster name
+STATE_ROOT="/tmp/devops-bench-runs"
+
+# Refuse anything that could escape the state root or resolve to the root itself.
+case "$RUN_ID" in
+  ""|*/*|*..*) echo "refusing unsafe RUN_ID: '$RUN_ID'" >&2; return 2 2>/dev/null || exit 2 ;;
+esac
+RUN_DIR="$STATE_ROOT/$RUN_ID"
+echo "will remove: $RUN_DIR"          # eyeball this before continuing
 
 # 1. Wipe only this run's scratch + state
-rm -rf "/tmp/devops-bench-runs/${RUN_ID}"
+rm -rf -- "$RUN_DIR"
 
-# 2. Delete this run's kind cluster and any node containers it left behind
-kind delete cluster --name "$CLUSTER" 2>/dev/null || true
-docker rm -f $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=${CLUSTER}") 2>/dev/null || true
+# 2. Delete this run's kind cluster, then the node containers it labelled
+kind get clusters | grep -qx "$CLUSTER" && kind delete cluster --name "$CLUSTER"
+docker rm -f $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=$CLUSTER") 2>/dev/null || true
 
-# 3. Kill only this run's processes. A bare `pkill -f devops_bench` matches every
-#    concurrent run on the host, so match on the run id instead.
-pkill -f "RUN_ID=${RUN_ID}" 2>/dev/null || true
+# 3. Kill only this run's processes. RUN_ID is an environment prefix and never
+#    appears in argv, so `pkill -f RUN_ID=...` matches nothing. Match the run
+#    directory, which the harness does pass on the command line, and confirm
+#    the list before killing.
+pgrep -af -- "$RUN_DIR"
+pkill -f -- "$RUN_DIR" 2>/dev/null || true
 ```
 
 Then delete orphaned cloud resources left by a failed teardown:
