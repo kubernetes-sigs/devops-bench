@@ -19,18 +19,18 @@ If an eval fails, find the symptom below and apply the action. Many failures are
 | Kyverno setup fails with `PolicyReports never showed failing results for all seeded workloads`, however long it waits | The readiness gate read the report subject from `results[].resources`, which Kyverno 1.12 does not populate — the subject is named in the report's top-level `scope`. The pair set was therefore always empty and the gate could never pass | No workaround — the gate cannot pass without the fix | **Setup** | Pending #69 |
 | `Vertex AI API error (429): Resource exhausted` (`RESOURCE_EXHAUSTED`), agent run ends mid-trajectory | Transient Vertex per-minute quota on long, high-token agentic runs | Not a model miss — **retry the combo**. If it recurs, lower the parallelism or raise the Vertex quota | **Infra flake — retry** | No |
 | GCP `409 already exists` on cluster (re)create, naming a `gke-nodes-*` service account | Historic: the node SA name had no discriminator, so a failed teardown's leftover blocked the next run | Fixed — `tf/modules/cluster/gke` now appends `md5(cluster_name)[:6]` to `account_id`. If seen, you are on stale TF; sync and retry | **Setup** | Yes |
-| Task fails in ~2 min at `tofu plan`: `could not locate any control plane nodes for cluster '<cluster>'` | A prior run's per-run state under `/tmp/devops-bench-runs/<RUN_ID>` is reused and references an already-torn-down cluster | **Wipe stale run state before re-running**: `rm -rf /tmp/devops-bench-runs/*` plus the kind/cluster cleanup in *Before any retry*, then retry | **Setup** | No |
+| Task fails in ~2 min at `tofu plan`: `could not locate any control plane nodes for cluster '<cluster>'` | A prior run's per-run state under `/tmp/devops-bench-runs/<RUN_ID>` is reused and references an already-torn-down cluster | **Wipe that run's state before re-running**: `rm -rf /tmp/devops-bench-runs/<RUN_ID>` plus the kind cleanup in *Before any retry*, then retry. Do not wipe the whole directory on a shared host — it belongs to every concurrent run | **Setup** | No |
 | `gemini subprocess error: ... exit code -1` | This is a **timeout, not a crash** — `core.subprocess.run` returns `-1` on `TimeoutExpired` (usually an MCP approval hang) | Fix the *hang* (set `--approval-mode yolo` + folder trust below) rather than just raising `AGENT_TIMEOUT_SEC`; only raise the timeout after | **Config / auth** | No |
 | gemini `mcp list` shows server `Disabled`; model writes its own MCP client; or run hangs to timeout with MCP configured (`--skip-trust` alone insufficient) | Untrusted per-run cwd suppresses MCP, **and** with no approval mode MCP calls block on interactive confirmation | Needs **both**: set `security.folderTrust.enabled=false` in user-level `~/.gemini/settings.json`, **and** pass `--approval-mode yolo` in argv | **Config / auth** | No |
 | oc on Vertex: `No API key found for provider "google-vertex"` under parallel runs | The ADC marker lives only in the global sqlite auth store; an isolated `OPENCLAW_STATE_DIR` can't see it | Export `GOOGLE_CLOUD_API_KEY=gcp-vertex-credentials`, the portable env marker | **Config / auth** | No |
 | oc on Vertex: `401 Incorrect API key` (request sent to `platform.openai.com`) | The per-run provider entry **replaces** the built-in one and is missing the Vertex transport, so oc falls back to the OpenAI transport | Run on current code — the harness writes a per-run `openclaw.json` pinning `"api": "google-vertex"` (+ `"baseUrl"`); combine with the ADC marker above. If seen, you are on stale code — sync/reinstall | **Config / auth** | No |
 | Vertex `404 Publisher model ... not found`; judge silently fails / 404s | Wrong location or non-`-preview` model id — `gemini-3.x` previews 404 on regional endpoints | Use the **`global`** location (`GOOGLE_CLOUD_LOCATION=global` / `GCP_VERTEX_LOCATION=global`) and a `-preview` model id; the judge default needs `JUDGE_MODEL=gemini-3.1-pro-preview` | **Config / auth** | No |
-| GKE task: `Error 403: <API> has not been used in project … or it is disabled` | A required GCP API isn't enabled in the eval project | `gcloud services enable <api>.googleapis.com`, wait a few min to propagate, then retry | **Setup** | No |
+| GKE task: `Error 403: <API> has not been used in project … or it is disabled` | A required GCP API isn't enabled in the eval project | `gcloud services enable <api>.googleapis.com --project=<eval-project-id>` (pass the project explicitly rather than relying on the host's active config, and confirm it is the eval project first), wait a few min to propagate, then retry | **Setup** | No |
 | Multi-node kind task fails: `failed to join node with kubeadm … exit status 1` | Host `fs.inotify.max_user_instances` (default 128) exhausted by a multi-node cluster | `sudo sysctl -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches=1048576` (persist in `/etc/sysctl.d/`), then retry | **Setup** | No |
-| kind task fails instantly: `docker: executable file not found in $PATH` | Docker not installed / socket missing on the host (kind tasks run on the host) | Install `docker.io`, start the daemon, grant the runner socket access (`setfacl -m u:$USER:rw /var/run/docker.sock`, or the `docker` group + fresh login) | **Setup** | No |
+| kind task fails instantly: `docker: executable file not found in $PATH` | Docker not installed / socket missing on the host (kind tasks run on the host) | Install `docker.io` and start the daemon, then grant socket access to a **dedicated** runner account (`setfacl -m u:devops-bench-runner:rw /var/run/docker.sock`). Docker socket write access and `docker` group membership are root-equivalent on the host, so never grant them to a shared or interactive account — run kind tasks under a named runner on a trusted, isolated host | **Setup** | No |
 | Chaos `generate_load` injects nothing; HPA never scales (load is a silent no-op) | `fortio` is not on `PATH` — it is installed at provision time, not baked into any image | Install `fortio` onto the runner's `PATH`, then retry | **Setup** | No |
 | Standalone test on a remote host sees **stale code** (e.g. a flag still showing its pre-fix value) | The host venv has an *installed* `devops_bench`; `python3 /tmp/x.py` imports the package, not the synced source | Run with `PYTHONPATH=<repo>`, or `python -m devops_bench` from the source dir | **Setup** | No |
-| **All trajectories empty** (`trajectory: []`, `tools: []`), `ToolInvocation` 0.0 — though the agent clearly acted; run log shows `oc sessions exited 127: /usr/bin/env: 'node': No such file or directory` | The `oc sessions` / `export-trajectory` extraction runs `oc` as a **direct argv subprocess** (no nvm sourced), so on an nvm-managed host Node isn't on `PATH` → exit 127 → trajectory **silently emptied** → every tool/checklist check fails | Put Node on the runner `PATH` (`ln -s "$(command -v node)" ~/bin/node`). Current code also prepends the nvm Node dir for these calls (`_ensure_node_on_path` in `devops_bench/agents/cli/openclaw/agent.py`); if seen, sync/reinstall | **Config / setup** | No |
+| **All trajectories empty** (`trajectory: []`, `tools: []`), `ToolInvocation` 0.0 — though the agent clearly acted; run log shows `oc sessions exited 127: /usr/bin/env: 'node': No such file or directory` | The `oc sessions` / `export-trajectory` extraction runs `oc` as a **direct argv subprocess** (no nvm sourced), so on an nvm-managed host Node isn't on `PATH` → exit 127 → trajectory **silently emptied** → every tool/checklist check fails | Put Node on the runner `PATH` (`mkdir -p "$HOME/bin" && ln -sf "$(command -v node)" "$HOME/bin/node" && export PATH="$HOME/bin:$PATH"` — creating the symlink alone does nothing if `~/bin` is absent or not on `PATH`). Current code also prepends the nvm Node dir for these calls (`_ensure_node_on_path` in `devops_bench/agents/cli/openclaw/agent.py`); if seen, sync/reinstall | **Config / setup** | No |
 | Verification records `budget exhausted` for most objectives and the score looks confidently low | The post-run pass shares a total wall-clock budget across converging entries; an entry that polls to its own cap can starve the ones after it | Check `VerificationCoverage` before trusting `VerificationCorrectness` — an abandoned entry leaves both the numerator and the denominator, so a low score computed over a handful of entries reads the same as a real failure | **Infra flake — retry** | No |
 
 After applying a fix, retry the run. For any infra-flake row, run the cleanup below first.
@@ -38,21 +38,26 @@ After applying a fix, retry the run. For any infra-flake row, run the cleanup be
 ### Before any retry
 
 > [!IMPORTANT]
-> Stale run state and orphaned cloud resources are the most common cause of a "fresh" run failing instantly. Clean them before every (re)launch.
+> Stale run state and orphaned cloud resources are the most common cause of a "fresh" run failing instantly. Clean them before every (re)launch — but scope every command to the run you are retrying. On a shared host the unscoped forms (`rm -rf /tmp/devops-bench-runs/*`, deleting every kind cluster, a bare `pkill -f devops_bench`) will take out concurrent runs.
 
 On the host the run executed on:
 
 ```bash
-# 1. Wipe stale per-run scratch + state (fixes "could not locate any control plane nodes")
-rm -rf /tmp/devops-bench-runs/*
+# Scope everything to the run you are retrying. The bastion runs matrix combos
+# concurrently, so an unscoped wipe destroys a sibling run that is still going.
+RUN_ID=<the failed run's id>
+CLUSTER=<that run's cluster name>
 
-# 2. Delete leftover kind clusters, then any node containers they left behind
-#    (kind get clusters does not track containers whose cluster entry is gone)
-for c in $(kind get clusters); do kind delete cluster --name "$c"; done
-docker rm -f $(docker ps -aq --filter label=io.x-k8s.kind.cluster) 2>/dev/null || true
+# 1. Wipe only this run's scratch + state
+rm -rf "/tmp/devops-bench-runs/${RUN_ID}"
 
-# 3. Kill stale harness / agent processes from a prior launch
-pkill -f devops_bench ; pkill -f 'oc agent' 2>/dev/null || true
+# 2. Delete this run's kind cluster and any node containers it left behind
+kind delete cluster --name "$CLUSTER" 2>/dev/null || true
+docker rm -f $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=${CLUSTER}") 2>/dev/null || true
+
+# 3. Kill only this run's processes. A bare `pkill -f devops_bench` matches every
+#    concurrent run on the host, so match on the run id instead.
+pkill -f "RUN_ID=${RUN_ID}" 2>/dev/null || true
 ```
 
 Then delete orphaned cloud resources left by a failed teardown:
@@ -70,7 +75,7 @@ Deliberate workarounds currently in the code path. Each notes what it does and w
 | What | Where (file / area) | Why | Removal condition | Resolved |
 |---|---|---|---|---|
 | **Per-run tofu isolation** copies the whole `tf/` tree into `<run_dir>/tf/` and writes state to `<run_dir>/terraform.tfstate` | `devops_bench/deployers/tofu.py` (`_isolated_work_dir`); `devops_bench/core/run_env.py` (`TF_DATA_DIR`) | Stacks use relative module sources, and concurrent runs would otherwise contend on a shared `.terraform.lock.hcl` + state in `tf/prebuilt/<stack>` | Module sources made run-relocatable without a full-tree copy (this is the principled isolation fix, not pure debt — low priority) | No |
-| **Stale-state manual pre-flight wipe** (`rm -rf /tmp/devops-bench-runs/*` + kind/container cleanup) | Operator step | The per-run state dir is keyed by `RUN_ID`; a prior run's state references a deleted cluster and is reused, failing at `tofu plan` | `RunEnv` (or a `devops-bench clean` subcommand) self-detects dangling state and re-inits instead of relying on a human `rm -rf` | No |
+| **Stale-state manual pre-flight wipe** (`rm -rf /tmp/devops-bench-runs/<RUN_ID>` + that run's kind cleanup) | Operator step | The per-run state dir is keyed by `RUN_ID`; a prior run's state references a deleted cluster and is reused, failing at `tofu plan` | `RunEnv` (or a `devops-bench clean` subcommand) self-detects dangling state and re-inits instead of relying on a human `rm -rf` | No |
 | **Kyverno/OPA admission-webhook retry loop** (bounded retry on policy apply) | `tf/prebuilt/opa-remediation/scripts/setup.sh` | The Kyverno webhook can take seconds to start serving after the deployment is Available; applying too early fails with `context deadline exceeded` | Poll the `Validating`/`MutatingWebhookConfiguration` (or the service endpoint) readiness instead of a fixed-attempt sleep loop | No |
 | **MCP tool-name normalization** strips the `<server>__` prefix before matching | `devops_bench/metrics/pipeline.py` (`_canonical_tool_name`) | MCP tools surface as `<server>__<tool>`; without stripping, `bash` vs `default__bash` scored 0 on tool-invocation | Strip the prefix only against the *known* set of configured MCP server names (from the agent config / `capabilities_granted`), not a blind `split("__")` that would also truncate a legit `my__tool` | No |
 | **KUBECONFIG explicitly passed to MCP server processes** (per-agent, per-spawn) | `devops_bench/agents/cli/openclaw/agent.py` | `RunEnv` sets `KUBECONFIG` in process env, but MCP server spawn didn't inherit it, so MCP servers used the ambient `~/.kube/config` and mixed cluster targets under parallelism | Centralize MCP-server-environment construction in one shared `agents/` helper that always derives env from `RunEnv`, so a new agent can't silently regress to ambient config | No |

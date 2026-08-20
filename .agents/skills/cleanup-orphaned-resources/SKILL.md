@@ -1,6 +1,6 @@
 ---
 name: cleanup-orphaned-resources
-description: Discover and remove cloud or local resources leaked by aborted or failed eval runs — stale per-run state, leftover kind clusters and their node containers, stuck harness processes, and orphaned GKE clusters, node service accounts, secrets, VPCs, and Artifact Registry repos in the sandbox project. Invoke when a "fresh" run fails instantly, when someone reports leaked or orphaned resources, or asks to "clean up after a failed run", "sweep the sandbox project", or "why does re-running 409?".
+description: Discover and remove cloud or local resources leaked by aborted or failed eval runs — stale per-run state, leftover kind clusters and their node containers, stuck harness processes, and orphaned GKE clusters, node service accounts, secrets, VPCs and their dependencies, Cloud SQL instances, and Artifact Registry repos in the sandbox project, all scoped to the aborted run's own token. Invoke when a "fresh" run fails instantly, when someone reports leaked or orphaned resources, or asks to "clean up after a failed run", "sweep the sandbox project", or "why does re-running 409?".
 ---
 
 # Clean up orphaned resources
@@ -41,31 +41,39 @@ Match on run-token prefixes so you never sweep shared infra.
 ```bash
 PROJECT=<sandbox-project>   # verify: gcloud config get-value project
 
-# Run-scoped GKE clusters from a crashed run. RunEnv names a cluster
-# c<blake2s digest of the run id>, so match that shape rather than a fixed suffix.
+# Step 1 of every sweep: pin the aborted run's cluster name. RunEnv names a
+# cluster c<blake2s digest of the run id>, and every other resource below is
+# selected from it, so nothing is matched by a bare prefix.
 gcloud container clusters list --project "$PROJECT" \
   --filter="name~'^c[0-9a-f]{8}-'" --format="table(name,location,status)"
+CLUSTER=<pick the aborted run's cluster from that list>
 
-# gke-nodes-* node SAs. These now carry an md5 discriminator so they no longer
-# collide, but a failed teardown still strands them.
-gcloud iam service-accounts list --project "$PROJECT" \
-  --filter="email~'^gke-nodes-'" --format="table(email)"
+# The node SA's account_id is derived, not the cluster name:
+#   gke-nodes-<first 9 chars of the slugified cluster>-<first 6 of md5(cluster)>
+# (tf/modules/cluster/gke/main.tf). Compute it rather than guessing.
+SLUG=$(printf '%s' "$CLUSTER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g' | cut -c1-9 | sed 's/-$//')
+SA="gke-nodes-${SLUG}-$(printf '%s' "$CLUSTER" | md5sum | cut -c1-6)@${PROJECT}.iam.gserviceaccount.com"
+gcloud iam service-accounts list --project "$PROJECT" --filter="email=${SA}" --format="table(email)"
 
-# Artifact Registry repos a task created outside its own stack
+# Artifact Registry repo for this run only (deploy-hello-app creates hello-app-<cluster>)
 gcloud artifacts repositories list --project "$PROJECT" \
-  --format="table(name,location,createTime)"
+  --filter="name~'/hello-app-${CLUSTER}$'" --format="table(name,location,createTime)"
+
+# Secrets, VPCs and Cloud SQL, all pinned to the same cluster token
+gcloud secrets list --project "$PROJECT" --filter="name~'${CLUSTER}'" --format="table(name)"
+gcloud compute networks list --project "$PROJECT" --filter="name~'${CLUSTER}'" --format="table(name)"
+gcloud sql instances list --project "$PROJECT" --filter="name~'${CLUSTER}'" --format="table(name,region,state)"
 ```
 
-Widen the sweep to match the tasks that actually ran. Beyond the three classes
-above, teardown failures have also stranded:
+Every filter above is pinned to `$CLUSTER`, so the listing only ever shows the
+aborted run's own resources. Do not relax them to a bare `gke-nodes-` or
+`hello-app-` prefix: a sibling matrix run is very likely live in the same
+project, and its resources match those prefixes too.
 
-- **Secrets** — `gcloud secrets list --project "$PROJECT"`, filtered to the
-  run's token prefix.
-- **Auto-mode VPCs and their firewall rules** — a task that creates its own
-  network leaves both; the firewall rules must go first (step 4).
-- **Cloud SQL instances** — note the ~1-week name tombstone: a deleted
-  instance's name stays reserved, so a re-run with the same name can still
-  collide even after a clean delete.
+Two notes on Cloud SQL: a deleted instance's dependent resources can take
+several days to disappear, and name reuse after deletion is not guaranteed to
+be immediate. Neither matters if the instance name carries the run token, which
+is what the task-review checklist requires.
 
 ### 3. LIST findings, then get explicit confirmation
 
@@ -80,22 +88,34 @@ project.
 ### 4. Delete (only after confirmation)
 
 ```bash
-# clusters
-gcloud container clusters delete <name> --location <loc> --project "$PROJECT" --quiet
-# node SAs (the 409 culprit)
-gcloud iam service-accounts delete "gke-nodes-<cluster>@${PROJECT}.iam.gserviceaccount.com" --project "$PROJECT" --quiet
-# secrets
+# 1. Cluster first — deleting its node SA earlier can wedge the teardown.
+gcloud container clusters delete "$CLUSTER" --location <loc> --project "$PROJECT" --quiet
+
+# 2. The node SA, using the $SA computed in step 2 rather than a guessed name.
+gcloud iam service-accounts delete "$SA" --project "$PROJECT" --quiet
+
+# 3. Secrets, Artifact Registry, Cloud SQL — all named from $CLUSTER.
 gcloud secrets delete <name> --project "$PROJECT" --quiet
-# auto-mode VPCs — delete dependent firewall rules first, then the network
-gcloud compute firewall-rules delete <rule> --project "$PROJECT" --quiet
-gcloud compute networks delete <name> --project "$PROJECT" --quiet
-# Artifact Registry repos
-gcloud artifacts repositories delete <name> --location <loc> --project "$PROJECT" --quiet
+gcloud artifacts repositories delete "hello-app-${CLUSTER}" --location <loc> --project "$PROJECT" --quiet
+gcloud sql instances delete <name> --project "$PROJECT" --quiet
+
+# 4. A VPC last, and only after every dependency. `networks delete` fails while
+#    anything still references the network, so enumerate before deleting:
+NET=<the run's network>
+gcloud compute forwarding-rules list --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
+gcloud compute routers list        --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
+gcloud compute vpn-gateways list   --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
+gcloud compute networks peerings list --project "$PROJECT" --network="$NET" --format='value(name)'
+gcloud compute routes list         --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name)'
+gcloud compute networks subnets list  --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name,region)'
+gcloud compute firewall-rules list --project "$PROJECT" --filter="network~'${NET}$'" --format='value(name)'
+# delete each of the above (forwarding rules, routers, VPN gateways, peerings,
+# routes, subnets, firewall rules), then finally:
+gcloud compute networks delete "$NET" --project "$PROJECT" --quiet
 ```
 
-Delete in dependency order: firewall rules before their VPC, and clusters before
-their node SAs (deleting the SA first can wedge the cluster's teardown). After
-deleting, re-run the discovery in step 2 to confirm the leak is gone.
+After deleting, re-run the discovery in step 2 and confirm it returns nothing
+for this run's token.
 
 ### 5. Report
 
