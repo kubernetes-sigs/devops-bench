@@ -141,7 +141,7 @@ fi
 # --- 2. GKE MCP server ------------------------------------------------------ #
 oc mcp unset gke-mcp >/dev/null 2>&1 || true   # idempotent: clear any prior entry
 if [ "${WANT_MCP}" = "1" ]; then
-  [ -x "${MCP_SERVER_BIN}" ] || { echo "ERROR: gke-mcp not executable at ${MCP_SERVER_BIN}" >&2; exit 1; }
+  [ -x "${MCP_SERVER_BIN}" ] || { echo "ERROR: MCP server binary not executable at ${MCP_SERVER_BIN}" >&2; exit 1; }
   oc mcp add gke-mcp --command "${MCP_SERVER_BIN}" --no-probe >/dev/null
   echo "==> gke-mcp registered (global oc config)"
 else

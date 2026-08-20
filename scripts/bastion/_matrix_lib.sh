@@ -275,13 +275,15 @@ matrix_dispatch() {
       # GOOGLE_GENAI_USE_VERTEXAI + project/location).
       echo 'export GOOGLE_CLOUD_API_KEY=gcp-vertex-credentials'
       echo "export GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT='${PROJECT_ID}' GOOGLE_CLOUD_LOCATION='${GOOGLE_CLOUD_LOCATION:-global}' GCP_VERTEX_LOCATION='${GCP_VERTEX_LOCATION:-global}'"
+      # Vertex model auth reads GCP_PROJECT_ID from the environment directly
+      # (models/gemini.py, models/claude.py), with no value passed in.
+      echo "export GCP_PROJECT_ID='${PROJECT_ID}'"
     fi
     echo "OUT=\"\$HOME/${REMOTE_OUT}\"; mkdir -p \"\$OUT\""
-    # PROJECT_ID / CLUSTER_NAME are what the harness reads (run.py). GCP_PROJECT_ID
-    # and GCP_LOCATION are additionally exported because the GCP provider and the
-    # Vertex model auth resolve those directly.
+    # PROJECT_ID / CLUSTER_NAME are what the harness reads (run.py). GCP_LOCATION
+    # is additionally exported because the deployer factory resolves it directly.
     echo "export PROJECT_ID='${PROJECT_ID}' CLUSTER_NAME='${CLUSTER_NAME}'"
-    echo "export GCP_PROJECT_ID='${PROJECT_ID}' GCP_LOCATION='${GCP_LOCATION}'"
+    echo "export GCP_LOCATION='${GCP_LOCATION}'"
     echo "export AGENT_PROVIDER='${AGENT_PROVIDER}' JUDGE_PROVIDER='${JUDGE_PROVIDER}' JUDGE_MODEL='${JUDGE_MODEL}'"
     echo "export AGENT_TIMEOUT_SEC='${AGENT_TIMEOUT_SEC}'"
     echo "export BENCH_PARALLEL=true"
@@ -290,7 +292,7 @@ matrix_dispatch() {
     echo '  local d="$OUT/$rid"; mkdir -p "$d"'
     echo '  ('
     echo '    export RUN_ID="$rid"'
-    echo '    # eval so values like AGENT_MCP_SERVER=$HOME/gke-mcp expand on the bastion'
+    echo '    # eval so values like AGENT_MCP_SERVER=$HOME/mcp-server expand on the bastion'
     echo '    IFS=";"; for kv in $kvs; do eval "export ${kv}"; done'
     echo '    if [ "$arm" = "legacy" ]; then'
     echo '      python3 pkg/evaluator/evaluate.py "$task"; rc=$?'

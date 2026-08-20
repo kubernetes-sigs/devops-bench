@@ -198,10 +198,10 @@ if [ ! -f "${ENV_FILE}" ]; then
 export PROJECT_ID=""
 export CLUSTER_NAME="bench-cluster"
 export NAMESPACE="bench-run-1"
-# The GCP provider and Vertex model auth resolve these directly; set them only
-# when running against GCP.
-export GCP_PROJECT_ID="$PROJECT_ID"
+# GCP only. GCP_LOCATION is read by the deployer factory; GCP_PROJECT_ID is read
+# by Vertex model auth. Leave both unset when running against another provider.
 export GCP_LOCATION="us-central1-a"
+export GCP_PROJECT_ID="$PROJECT_ID"
 
 # --- Agent (openclaw / oc) ---
 export BENCH_AGENT_TYPE="openclaw"
