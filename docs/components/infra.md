@@ -30,6 +30,7 @@ A cloud provider supplies credentials and Terraform variable defaults for a stac
 | --- | --- | --- |
 | `GcpProvider` | `gcp` | GKE clusters on Google Cloud |
 | `KindProvider` | `kind` | Local KinD clusters (no cloud identity) |
+| `VclusterProvider` | `vcluster` | loft-sh vcluster virtual clusters inside an existing GKE host cluster |
 
 Each implements the `Provider` interface (`devops_bench/providers/base.py`):
 
@@ -50,14 +51,61 @@ The env var outranks the config key so a task can pin a default `provider:` whil
 > [!IMPORTANT]
 > There is no default cloud. Any stack that does not deduce to `kind` — including every absolute or external path — **must** name its provider explicitly via `provider:` or `INFRA_PROVIDER`, or `_select_provider` raises a `ConfigError`. Nothing falls back to `gcp`, so a new provider never silently inherits another's defaults. An unknown provider name is likewise a configuration error.
 
+## vcluster: fast virtual clusters on a GKE host
+
+`vcluster` (loft-sh, Helm chart `0.36.1`) runs a virtual Kubernetes control plane as a
+workload inside an existing GKE Autopilot host cluster, instead of provisioning a new
+GKE cluster per run. Provisioning takes roughly 2-3.5 minutes versus the 10-20 minutes
+a real GKE cluster takes, since the host cluster's nodes and networking already exist.
+
+**When to use it:** tasks that only need workload-, manifest-, or policy-level
+fidelity — deploying Kubernetes objects, evaluating admission policies, exercising
+controllers and operators, or anything that just needs a real API server to talk to.
+
+**When not to use it:** tasks that depend on node-level fidelity that a virtual
+cluster can't provide — real node pools and machine types, GKE Workload Identity,
+DaemonSets that need to run on real nodes, or anything that inspects the underlying
+node OS or GKE-specific node behavior. Use `gcp` for those.
+
+**Required environment:**
+
+| Variable | Effect |
+| --- | --- |
+| `VCLUSTER_HOST_CLUSTER` | Name of the host GKE cluster the vcluster runs inside. If set (with `GCP_PROJECT_ID` resolvable), `ensure_account_credentials()` runs `gcloud container clusters get-credentials` for the host cluster. If unset, the host context is assumed to already be in kubeconfig. |
+| `VCLUSTER_HOST_CONTEXT` | Explicit kube context of the host cluster. Overrides the default `gke_<project>_<location>_<host_cluster_name>` naming. |
+| `GCP_PROJECT_ID` | GCP project of the host cluster. |
+| `GCP_LOCATION` / `VCLUSTER_HOST_LOCATION` | Region of the host cluster. |
+
+A task example:
+
+```yaml
+infrastructure:
+  deployer: "tofu"
+  stack: "prebuilt/vcluster"
+  provider: "vcluster"
+  teardown: true
+```
+
+**Teardown:** the vcluster's Kubernetes namespace is managed directly by OpenTofu
+(not via Helm's `create_namespace`), so `tofu destroy` deletes the namespace and, with
+it, the vcluster StatefulSet's PVC. That means a torn-down run leaves no state behind
+on the host cluster; a plain `helm uninstall` would leave the PVC around and let a
+re-created vcluster resume stale state.
+
 ## What the Terraform provisions
 
 The OpenTofu stacks live under `tf/`:
 
-- `tf/modules/` — reusable building blocks: `cluster/gke`, `cluster/kind`, and `bastion`.
-- `tf/prebuilt/<stack>/` — standard, ready-to-use stacks, currently `kind` (a local
-  cluster for offline / no-cloud runs). Task-specific stacks build on the modules and
-  ship alongside the tasks that provision them.
+- `tf/modules/` — reusable building blocks: `cluster/gke`, `cluster/kind`,
+  `cluster/vcluster`, and `bastion`.
+- `tf/prebuilt/<stack>/` — standard, ready-to-use stacks: `kind` (a local cluster for
+  offline / no-cloud runs), `vcluster` (a virtual cluster on an existing GKE host), and
+  `minimal` (a provider-agnostic stack that dispatches through `tf/modules/cluster` and
+  flips between `gcp`, `kind`, and `vcluster` via the `infra_provider` variable, which
+  the harness sets from `INFRA_PROVIDER` or a task's `provider:` key; it is named
+  `minimal`, not `minimum`, to avoid colliding with downstream stacks that use that
+  name). Task-specific stacks build on the modules and ship alongside the tasks that
+  provision them.
 
 Every stack root that `TFDeployer` drives must output `cluster_name` and `cluster_location` — that's the contract the deployer reads back.
 
@@ -66,6 +114,7 @@ Every stack root that `TFDeployer` drives must output `cluster_name` and `cluste
 - Always: the `tofu` binary on `PATH`.
 - For GCP stacks: `gcloud`, application-default credentials (ADC), and a project with the GKE and Artifact Registry APIs enabled.
 - For KinD stacks: Docker and the `kind` binary.
+- For vcluster stacks: `gcloud`, `kubectl`, and `helm` on `PATH`, plus an existing GKE host cluster reachable via kubeconfig (`VCLUSTER_HOST_CLUSTER` or `VCLUSTER_HOST_CONTEXT`).
 
 ## Configuring infra for an eval
 
@@ -75,7 +124,7 @@ Infrastructure is declared in the `infrastructure:` block of a task's `task.yaml
 | --- | --- |
 | `deployer` | `tofu` or `noop`. |
 | `stack` | Stack name under `tf/` (e.g. `prebuilt/kind`) or an absolute path. |
-| `provider` | Optional. `gcp` or `kind`. Omit to let it be deduced (in-repo stacks only). |
+| `provider` | Optional. `gcp`, `kind`, or `vcluster`. Omit to let it be deduced (in-repo stacks only). |
 | `teardown` | Whether to destroy infra after the run. Defaults to `true`. |
 | `variables` | A map passed straight to `tofu` as `-var key=value` flags. |
 
@@ -99,7 +148,7 @@ infrastructure:
   deployer: "noop"
 ```
 
-The provider fills in sensible defaults for whatever you leave out. For GCP that means `project_id`, `cluster_name`, and `location` (plus `namespace` when `NAMESPACE` is set); for KinD it means `cluster_name`, `location` (`local`), and `kubeconfig_path`. Anything you put in `variables` always wins over the defaults.
+The provider fills in sensible defaults for whatever you leave out. For GCP that means `project_id`, `cluster_name`, and `location` (plus `namespace` when `NAMESPACE` is set); for KinD it means `cluster_name`, `location` (`local`), and `kubeconfig_path`; for vcluster it means `project_id`, `cluster_name`, `location`, `host_cluster_name`, `host_context`, and `kubeconfig_path`. Anything you put in `variables` always wins over the defaults.
 
 **Environment variables that affect infra:**
 
@@ -111,6 +160,9 @@ The provider fills in sensible defaults for whatever you leave out. For GCP that
 | `GCP_LOCATION` | Default region/zone (falls back to `us-central1-a`). |
 | `NAMESPACE` | Passed through to GCP stacks as the `namespace` variable. |
 | `KUBECONFIG` | Kubeconfig path used by KinD and by no-infra runs. |
+| `VCLUSTER_HOST_CLUSTER` | Name of the host GKE cluster a vcluster runs inside; also used to fetch host credentials via `gcloud`. |
+| `VCLUSTER_HOST_CONTEXT` | Explicit kube context of the host GKE cluster, overriding the derived `gke_<project>_<location>_<host_cluster_name>` name. |
+| `VCLUSTER_HOST_LOCATION` | Region of the host GKE cluster (falls back to `GCP_LOCATION`). |
 
 The `--project` and `--cluster` CLI flags supply the project and cluster name for a run, feeding the same defaults the providers resolve from.
 

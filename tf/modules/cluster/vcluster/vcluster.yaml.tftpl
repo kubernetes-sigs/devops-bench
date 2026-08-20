@@ -1,0 +1,17 @@
+controlPlane:
+  proxy:
+    extraSANs:
+      - "${lb_ip}"
+  service:
+    spec:
+      type: LoadBalancer
+      loadBalancerIP: "${lb_ip}"
+  statefulSet:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+
+exportKubeConfig:
+  server: "https://${lb_ip}:443"

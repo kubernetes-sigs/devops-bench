@@ -12,14 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cloud providers selecting credentials and OpenTofu variables per cloud."""
+output "cluster_name" {
+  value       = module.cluster.cluster_name
+  description = "The finalized name of the created cluster"
+}
 
-from __future__ import annotations
+output "cluster_location" {
+  value       = module.cluster.location
+  description = "The region/zone or 'local'"
+}
 
-# Import for their registration side effects so the registry is populated.
-from devops_bench.providers import gcp as _gcp  # noqa: F401
-from devops_bench.providers import kind as _kind  # noqa: F401
-from devops_bench.providers import vcluster as _vcluster  # noqa: F401
-from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
+output "endpoint" {
+  value       = module.cluster.endpoint
+  description = "Cluster control plane endpoint"
+}
 
-__all__ = ["PROVIDERS", "Provider", "ResolveContext"]
+output "kubeconfig_path" {
+  value       = module.cluster.kubeconfig_path
+  description = "Local path to the kubeconfig file"
+}

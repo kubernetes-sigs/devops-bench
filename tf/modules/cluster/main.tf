@@ -13,9 +13,15 @@
 # limitations under the License.
 
 # This dispatch module instantiates only one concrete cluster sub-module and
-# declares no concrete-provider requirements of its own: each sub-module owns
-# its provider (google in ./gke, tehcyx/kind in ./kind), so a KinD-only run does
-# not pull in the GCP provider plugin.
+# declares no concrete-provider requirements or provider blocks of its own:
+# each sub-module only declares required_providers (google in ./gke,
+# tehcyx/kind in ./kind, google/helm/kubernetes in ./vcluster) and inherits
+# the actual provider configuration implicitly from whatever root caller
+# instantiates this module, so a KinD-only run does not pull in the GCP
+# provider plugin. A module invoked with `count`, as these are, cannot itself
+# declare `provider` blocks, so a caller that dispatches to "vcluster" must
+# configure the default helm/kubernetes providers itself, pointed at the host
+# cluster (see tf/prebuilt/vcluster for an example).
 
 module "gke" {
   source                   = "./gke"
@@ -42,5 +48,18 @@ module "kind" {
   project_id      = var.project_id
   location        = var.location != "" ? var.location : "local"
   node_count      = var.node_count
+}
+
+module "vcluster" {
+  source                 = "./vcluster"
+  count                  = var.infra_provider == "vcluster" ? 1 : 0
+  cluster_name           = var.cluster_name
+  location               = var.location != "" ? var.location : "us-central1"
+  project_id             = var.project_id
+  host_context           = var.host_context
+  host_cluster_name      = var.host_cluster_name
+  kubeconfig_path_host   = var.kubeconfig_path_host
+  kubeconfig_path        = var.kubeconfig_path
+  vcluster_chart_version = var.vcluster_chart_version
 }
 

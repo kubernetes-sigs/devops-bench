@@ -12,14 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cloud providers selecting credentials and OpenTofu variables per cloud."""
+output "cluster_name" {
+  value = var.cluster_name
+}
 
-from __future__ import annotations
+output "cluster_location" {
+  value = var.location
+}
 
-# Import for their registration side effects so the registry is populated.
-from devops_bench.providers import gcp as _gcp  # noqa: F401
-from devops_bench.providers import kind as _kind  # noqa: F401
-from devops_bench.providers import vcluster as _vcluster  # noqa: F401
-from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
+output "endpoint" {
+  value = "https://${google_compute_address.vcluster.address}:443"
+}
 
-__all__ = ["PROVIDERS", "Provider", "ResolveContext"]
+output "kubeconfig_path" {
+  value      = pathexpand(var.kubeconfig_path)
+  depends_on = [terraform_data.kubeconfig]
+}

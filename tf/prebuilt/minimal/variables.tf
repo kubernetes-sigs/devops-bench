@@ -124,7 +124,6 @@ variable "vcluster_chart_version" {
 
 variable "kubeconfig_path_host" {
   type        = string
-  description = "Path to the kubeconfig used to reach the host GKE cluster (vcluster-only). The caller must configure its default helm/kubernetes provider against this same path/context, since a count-dispatched module cannot declare its own provider blocks"
+  description = "Path to the kubeconfig used to reach the host GKE cluster (vcluster-only). The provider blocks in this root are configured against this same path/context"
   default     = "~/.kube/config"
 }
-
