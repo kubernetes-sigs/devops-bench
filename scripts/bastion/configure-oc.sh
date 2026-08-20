@@ -38,8 +38,8 @@
 # which is what makes auth portable across parallel runs' isolated state dirs.
 #
 # Env overrides:
-#   MCP_SERVER_BIN path to the MCP server binary  (default: ~/gke-mcp, the
-#                  server this bastion installs)
+#   MCP_SERVER_BIN path to the MCP server binary  (default: the server this
+#                  bastion installs, at /usr/local/bin/gke-mcp)
 #   SECRETS_ENV    file exporting GEMINI_API_KEY  (default: ~/secrets.env)
 #   SKILLS_SRC     dir of skill markdowns         (default: ~/devops-bench/skills)
 #   OC_SKILLS_DIR  staging dir for <name>/SKILL.md (default: ~/oc-skills)
@@ -55,7 +55,7 @@ set -euo pipefail
 WANT_MCP=1
 WANT_SKILLS=1
 WANT_VERTEX=0
-MCP_SERVER_BIN="${MCP_SERVER_BIN:-${HOME}/gke-mcp}"
+MCP_SERVER_BIN="${MCP_SERVER_BIN:-/usr/local/bin/gke-mcp}"
 SECRETS_ENV="${SECRETS_ENV:-${HOME}/secrets.env}"
 SKILLS_SRC="${SKILLS_SRC:-${HOME}/devops-bench/skills}"
 OC_SKILLS_DIR="${OC_SKILLS_DIR:-${HOME}/oc-skills}"
@@ -138,7 +138,7 @@ print(f"==> google (genai) catalog overrides registered: {', '.join(models)}")
 PY
 fi
 
-# --- 2. GKE MCP server ------------------------------------------------------ #
+# --- 2. MCP server ---------------------------------------------------------- #
 oc mcp unset gke-mcp >/dev/null 2>&1 || true   # idempotent: clear any prior entry
 if [ "${WANT_MCP}" = "1" ]; then
   [ -x "${MCP_SERVER_BIN}" ] || { echo "ERROR: MCP server binary not executable at ${MCP_SERVER_BIN}" >&2; exit 1; }

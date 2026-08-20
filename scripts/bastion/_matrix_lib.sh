@@ -62,11 +62,11 @@ MAX_PARALLEL="${MAX_PARALLEL:-3}"
 # infra-bearing tasks (e.g. deploy-hello-app timed out); give matrix runs more
 # headroom. Override by exporting AGENT_TIMEOUT_SEC before launch.
 AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-1200}"
-MCP_SERVER_BIN="${MCP_SERVER_BIN:-\$HOME/gke-mcp}"     # expanded on the bastion
+MCP_SERVER_BIN="${MCP_SERVER_BIN:-/usr/local/bin/gke-mcp}"   # where startup.sh installs it
 # Agent +skills source: the MCP server's operational skills (SKILL.md form), cloned
 # by vm-setup.sh. NOT ~/oc-skills, which holds the judge rubric markdown (the
 # grader's criteria), not operational agent skills. Expanded on the bastion.
-SKILLS_PATHS="${SKILLS_PATHS:-\$HOME/gke-mcp-repo/skills}"
+SKILLS_PATHS="${SKILLS_PATHS:-\$HOME/mcp-skills/skills}"
 DRY_RUN="${DRY_RUN:-}"
 BENCH_REMOTE="${BENCH_REMOTE:-}"  # empty = run locally on this host; set = ssh to the bastion
 

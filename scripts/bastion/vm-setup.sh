@@ -145,12 +145,11 @@ fi
 # bastion installs GoogleCloudPlatform/gke-mcp; point MCP_SKILLS_REPO at another
 # server's checkout to use different skills.
 # (oc/gcli). The refactored matrix points AGENT_SKILLS_PATHS at this repo's
-# skills/ dir (19 SKILL.md skills: gke-compute-class-creator, gke-workload-scaling,
-# gke-networking-edge, gke-productionize, ...). These are operational skills, NOT
-# the judge rubric markdown under ~/oc-skills. Clone to a stable path OUTSIDE the
-# synced ~/devops-bench tree so sync-to-bastion never clobbers it. Idempotent.
+# skills/ dir. These are operational skills, NOT the judge rubric markdown under
+# ~/oc-skills. Clone to a stable path OUTSIDE the synced ~/devops-bench tree so
+# sync-to-bastion never clobbers it. Idempotent.
 echo "==> gke-mcp skills check (agent +skills source)"
-MCP_SKILLS_REPO="${MCP_SKILLS_REPO:-${HOME}/gke-mcp-repo}"
+MCP_SKILLS_REPO="${MCP_SKILLS_REPO:-${HOME}/mcp-skills}"
 if [ -d "${MCP_SKILLS_REPO}/skills" ]; then
   echo "    present: ${MCP_SKILLS_REPO}/skills ($(find "${MCP_SKILLS_REPO}/skills" -name SKILL.md 2>/dev/null | wc -l) skills)"
 else
