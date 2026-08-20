@@ -240,9 +240,7 @@ def test_hold_entry_bypasses_the_total_budget_and_run_entry_entirely(
     monkeypatch.setattr("devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", 0.0)
     obs = HoldObservation(sample_count=3, violated=False)
 
-    with patch(
-        "devops_bench.evalharness.default.VerifierAgent.run_entry"
-    ) as run_entry_mock:
+    with patch("devops_bench.evalharness.default.VerifierAgent.run_entry") as run_entry_mock:
         report = _harness()._run_verification(
             entries, timeout_sec=120, hold_observations={"web-stays-ready": obs}
         )
