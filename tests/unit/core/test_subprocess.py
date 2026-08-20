@@ -19,6 +19,7 @@ These exercise the wrapper against real, portable shell-free commands
 the standard library.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -115,3 +116,33 @@ def test_as_text_handles_bytes_and_none():
     assert bench_subprocess._as_text(None) is None
     assert bench_subprocess._as_text("text") == "text"
     assert isinstance(bench_subprocess._as_text(b"\xff\xfe"), str)
+
+
+def test_child_does_not_inherit_parent_stdin() -> None:
+    """A child reading stdin must see EOF immediately, not block on the terminal.
+
+    Regression guard. With subprocess.run's default of ``stdin=None`` the child
+    inherits the parent's stdin, and a CLI that inspects it can hang until the
+    caller's timeout. ``cat`` blocks until EOF, so this only returns promptly when
+    stdin has been closed for the child.
+
+    The test process's own fd 0 is swapped for a pipe that is kept open (and
+    never fed EOF) for the duration of the call, so the assertion actually
+    depends on ``run`` closing the child's stdin rather than on whatever state
+    the test runner happened to leave fd 0 in. If the child inherited the open
+    pipe, ``cat`` would block and the call would time out instead of returning.
+    """
+    read_fd, write_fd = os.pipe()
+    saved_stdin_fd = os.dup(0)
+    try:
+        os.dup2(read_fd, 0)
+        os.close(read_fd)
+        completed = bench_subprocess.run(
+            ["sh", "-c", "cat > /dev/null; echo reached-eof"], check=False, timeout=10
+        )
+    finally:
+        os.dup2(saved_stdin_fd, 0)
+        os.close(saved_stdin_fd)
+        os.close(write_fd)
+    assert completed.returncode == 0
+    assert "reached-eof" in completed.stdout
