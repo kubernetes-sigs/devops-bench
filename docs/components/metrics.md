@@ -69,7 +69,18 @@ These four are **bare numbers** in `results.json`, not `{"score", …}` objects 
 A few notes that matter when you read these:
 
 - **`OutcomeValidity` softens for generation-only runs.** When there is no live cluster — either the task declares `deployer: noop`, or `BENCH_NO_INFRA` / `--no-infra` skipped provisioning for the whole run — the criteria are adjusted so a missing cluster-apply or execution confirmation is *not* counted against the agent, and a correct, complete manifest is full achievement. Semantic correctness and every expected-output requirement are still graded normally.
-- **`GroundingAccuracy` is on a 0–5 scale, not 0–1.** It resolves in four steps: 5.0 when every constraint was met, 0.0 when none were, a flat 2.5 when **any critical constraint is unmet** — regardless of how many non-critical ones passed — and otherwise 2.5 scaled up toward 5.0 by the fraction of non-critical constraints met. So a score strictly between 2.5 and 5.0 tells you every critical constraint passed and some non-critical ones did not.
+- **`GroundingAccuracy` is on a 0–5 scale, not 0–1**, and its branches are evaluated
+  in order — the first match wins:
+  1. every constraint applied → **5.0**
+  2. none applied → **0.0**. This precedes the critical check, so a run that applied
+     nothing scores 0.0 even when critical constraints are also unmet.
+  3. any critical constraint unmet → a flat **2.5**, regardless of how many
+     non-critical ones passed
+  4. otherwise → **2.5 scaled toward 5.0** by the fraction of non-critical
+     constraints met
+
+  So a score strictly between 2.5 and 5.0 means every critical constraint passed and
+  some non-critical ones did not.
 - **Tokens and latency are not scores.** They are top-level fields on the record (`tokens`, `latency`), not entries in the `scores` map.
 
 > [!NOTE]
@@ -79,7 +90,7 @@ A few notes that matter when you read these:
 
 The formula is **v1**, defined in [`scoring.py`](../../devops_bench/metrics/scoring.py) and stamped onto every score it produces so results stay attributable to a formula version:
 
-```
+```text
 outcome_score = cat_v * sqrt(c * rec_v)
 ```
 
