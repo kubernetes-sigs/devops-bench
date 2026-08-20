@@ -133,6 +133,19 @@ def _object_label(obj: Any, index: int) -> str:
     return f"item[{index}]"
 
 
+_STDERR_LIMIT = 500
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def _sanitize_stderr(text: str) -> str:
+    """Collapse, truncate, and strip account emails from CLI stderr before it lands in a result reason."""
+    text = " ".join((text or "").split())
+    text = _EMAIL_RE.sub("<redacted-email>", text)
+    if len(text) > _STDERR_LIMIT:
+        text = text[:_STDERR_LIMIT] + "...(truncated)"
+    return text
+
+
 @VERIFIERS.register("cloud_resource_property")
 class CloudResourcePropertyVerifier(BaseVerifier):
     """Compare a JSONPath property of objects fetched by a spec-supplied CLI call.
@@ -231,16 +244,17 @@ class CloudResourcePropertyVerifier(BaseVerifier):
         if completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
             lowered = stderr.lower()
+            sanitized_stderr = _sanitize_stderr(stderr)
             if any(marker in lowered for marker in desc.permission_markers):
                 return (
                     "error",
-                    f"{desc.binary} exited {completed.returncode}: {stderr or 'no stderr'}",
+                    f"{desc.binary} exited {completed.returncode}: {sanitized_stderr or 'no stderr'}",
                     None,
                 )
             if not any(marker in lowered for marker in desc.not_found_markers):
                 return (
                     "error",
-                    f"{desc.binary} exited {completed.returncode}: {stderr or 'no stderr'}",
+                    f"{desc.binary} exited {completed.returncode}: {sanitized_stderr or 'no stderr'}",
                     None,
                 )
             objects: list[Any] = []

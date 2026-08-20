@@ -296,3 +296,44 @@ def test_runner_exception_is_error() -> None:
         ).verify(timeout_sec=0)
 
     assert result.status == "error"
+
+
+# --- stderr sanitization in reasons -------------------------------------------
+
+
+def test_stderr_email_is_redacted_in_reason() -> None:
+    with _patched_run(
+        _completed(returncode=1, stderr="ERROR: forbidden for user jane.doe@example.com")
+    ):
+        result = CloudResourcePropertyVerifier(
+            args=["compute", "networks", "subnets", "describe", "s"],
+            op="absent",
+        ).verify(timeout_sec=0)
+
+    assert "jane.doe@example.com" not in result.reason
+    assert "<redacted-email>" in result.reason
+
+
+def test_long_stderr_is_truncated_in_reason() -> None:
+    long_stderr = "ERROR: forbidden. " + ("detail " * 200)
+    with _patched_run(_completed(returncode=1, stderr=long_stderr)):
+        result = CloudResourcePropertyVerifier(
+            args=["compute", "networks", "subnets", "describe", "s"],
+            op="absent",
+        ).verify(timeout_sec=0)
+
+    assert len(result.reason) < len(long_stderr)
+    assert result.reason.endswith("...(truncated)")
+
+
+def test_stderr_whitespace_is_collapsed_in_reason() -> None:
+    with _patched_run(
+        _completed(returncode=1, stderr="ERROR:   forbidden\n\n  for   this   caller")
+    ):
+        result = CloudResourcePropertyVerifier(
+            args=["compute", "networks", "subnets", "describe", "s"],
+            op="absent",
+        ).verify(timeout_sec=0)
+
+    assert "  " not in result.reason
+    assert "\n" not in result.reason
