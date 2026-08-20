@@ -443,21 +443,35 @@ def test_a_single_flat_match_evaluates_normally_without_across_matches() -> None
     assert result.success is True
 
 
-@pytest.mark.parametrize("across_matches", ["every", "none"])
-def test_zero_matched_objects_fails_closed_for_every_across_matches(across_matches: str) -> None:
-    # The zero-object guard runs before flattening, so both reductions fail
-    # closed on zero matches rather than deferring to their own vacuous-match
-    # semantics (e.g. "every" of an empty set).
+def test_zero_matched_objects_fails_closed_for_every_across_matches() -> None:
+    # The zero-object guard runs before flattening, so "every" still fails
+    # closed on zero matches rather than deferring to its own vacuous-match
+    # semantics ("every" of an empty set).
     with patch(_GET, return_value=_items()):
         result = _verifier(
             op="gte",
             value=1,
             path="status.readyReplicas",
             selector="app=web",
-            across_matches=across_matches,
+            across_matches="every",
         ).verify(0.0)
     assert result.success is False
     assert result.reason == "no deployment matched"
+
+
+def test_zero_matched_objects_vacuously_passes_none_across_matches() -> None:
+    # Zero objects matching the selector is exactly the success state for
+    # `across_matches: none` ("no object violates op") -- an emptied-out
+    # backlog satisfies it, it does not fail it.
+    with patch(_GET, return_value=_items()):
+        result = _verifier(
+            op="gte",
+            value=1,
+            path="status.readyReplicas",
+            selector="app=web",
+            across_matches="none",
+        ).verify(0.0)
+    assert result.success is True
 
 
 def test_path_resolves_to_nothing_across_matches_none_passes() -> None:
