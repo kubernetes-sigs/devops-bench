@@ -43,9 +43,11 @@ Match on run-token prefixes so you never sweep shared infra.
 PROJECT="my-sandbox-project"        # verify: gcloud config get-value project
 CLUSTER=""                          # set in step 1 below
 
-# Step 1: pin the aborted run's cluster. RunEnv names it c<blake2s digest of the
-# run id>. Every filter below is anchored to that exact name, so a resource that
-# merely contains the token (shared-$CLUSTER-net) is never matched.
+# Step 1 lists CANDIDATE clusters across all runs — it is not yet scoped to one.
+# RunEnv names a cluster c<blake2s digest of the run id>. Pick the aborted run's
+# from the output; run-scoped filtering begins once CLUSTER is set below, and
+# each later filter is anchored to that exact name so a resource that merely
+# contains the token (shared-$CLUSTER-net) never matches.
 gcloud container clusters list --project "$PROJECT" \
   --filter="name~'^c[0-9a-f]{8}-'" --format="table(name,location,status)"
 CLUSTER="cbd827e1-bench-opa"        # <- copy the aborted run's cluster from that list
@@ -89,35 +91,27 @@ project.
 ### 4. Delete (only after confirmation)
 
 ```bash
-LOCATION="us-central1"              # the cluster's location
-NET=""                              # set only if the run created its own network
+# Substitute the names the listing returned; run them one at a time and confirm
+# each before the next.
 
-# 1. Cluster first — deleting its node SA earlier can wedge the teardown.
-gcloud container clusters delete "$CLUSTER" --location "$LOCATION" --project "$PROJECT" --quiet
-
-# 2. The node SA, using the $SA computed in step 2 rather than a guessed name.
+# clusters — take <loc> from the cluster's own row
+gcloud container clusters delete <name> --location <loc> --project "$PROJECT" --quiet
+# node SA — use the $SA computed during discovery, not a hand-typed name:
+# the account id is gke-nodes-<slug>-<md5(cluster)[:6]>, not gke-nodes-<cluster>
 gcloud iam service-accounts delete "$SA" --project "$PROJECT" --quiet
-
-# 3. Resources named from $CLUSTER. Substitute the names the listing showed.
-gcloud artifacts repositories delete "hello-app-${CLUSTER}" --location "$LOCATION" --project "$PROJECT" --quiet
-gcloud secrets delete       "$SECRET_NAME"   --project "$PROJECT" --quiet
-gcloud sql instances delete "$INSTANCE_NAME" --project "$PROJECT" --quiet
-
-# 4. A VPC last, and only after every dependency: `networks delete` fails while
-#    anything still references it. Enumerate first, delete in this order.
-gcloud compute forwarding-rules list  --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
-gcloud compute routers list           --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
-gcloud compute vpn-gateways list      --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
-gcloud compute networks peerings list --project "$PROJECT" --network="$NET"              --format='value(name)'
-gcloud compute routes list            --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name)'
-gcloud compute networks subnets list  --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name,region)'
-gcloud compute firewall-rules list    --project "$PROJECT" --filter="network~'/${NET}$'" --format='value(name)'
-# delete each of the above, then finally:
-gcloud compute networks delete "$NET" --project "$PROJECT" --quiet
+# secrets
+gcloud secrets delete <name> --project "$PROJECT" --quiet
+# auto-mode VPCs — dependent resources first (firewall rules, subnets, routes,
+# routers, peerings), then the network itself
+gcloud compute firewall-rules delete <rule> --project "$PROJECT" --quiet
+gcloud compute networks delete <network> --project "$PROJECT" --quiet
+# Artifact Registry repos — <loc> may differ from the cluster's location
+gcloud artifacts repositories delete <name> --location <loc> --project "$PROJECT" --quiet
 ```
 
-After deleting, re-run the discovery in step 2 and confirm it returns nothing
-for this run's token.
+Delete in dependency order: the cluster before its node SA, and a VPC's
+dependents before the VPC. After deleting, re-run the discovery in step 2 and
+confirm it returns nothing for this run's token.
 
 ### 5. Report
 
