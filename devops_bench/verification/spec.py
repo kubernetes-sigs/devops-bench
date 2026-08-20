@@ -330,7 +330,9 @@ class VerificationEntry(BaseModel):
             (``VERIFICATION_TOTAL_BUDGET_SEC``) on every task in a suite. Not
             allowed for a ``safeguard`` entry in ``hold`` mode, whose window
             is always the agent's turn; setting it there would be
-            meaningless and silently ignored, which would mislead.
+            meaningless and silently ignored, which would mislead. Setting
+            this on an entry whose mode is not ``hold`` is likewise a
+            validation error rather than a silent no-op.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -357,11 +359,12 @@ class VerificationEntry(BaseModel):
     def _check_role_and_mode(self) -> VerificationEntry:
         """Enforce the role/severity pairing and the hold-field couplings.
 
-        ``hold_poll_interval_sec`` only means something when ``mode`` is
-        explicitly ``"hold"``; setting it on any other entry is rejected by
-        name rather than silently ignored, since a silent no-op is exactly
-        how a misconfigured entry hides. ``hold_window_sec`` is similarly
-        coupled to the entry's role once ``mode`` is ``"hold"``.
+        ``hold_poll_interval_sec`` and ``hold_window_sec`` only mean something
+        when ``mode`` is explicitly ``"hold"``; setting either on any other
+        entry is rejected by name rather than silently ignored, since a
+        silent no-op is exactly how a misconfigured entry hides.
+        ``hold_window_sec`` is further coupled to the entry's role once
+        ``mode`` is ``"hold"``.
         """
         if self.role == "safeguard" and self.severity is None:
             raise ValueError("severity is required when role is 'safeguard'")
@@ -369,6 +372,8 @@ class VerificationEntry(BaseModel):
             raise ValueError("severity is not allowed when role is 'objective'")
         if self.mode != "hold" and self.hold_poll_interval_sec is not None:
             raise ValueError("hold_poll_interval_sec is only valid when mode is 'hold'")
+        if self.mode != "hold" and self.hold_window_sec is not None:
+            raise ValueError("hold_window_sec is only valid when mode is 'hold'")
         if self.resolved_mode == "hold":
             if self.role == "objective" and self.hold_window_sec is None:
                 raise ValueError(

@@ -96,6 +96,14 @@ def test_hold_poll_interval_sec_is_rejected_on_an_assert_entry() -> None:
     assert "hold_poll_interval_sec" in errors[0]["reason"]
 
 
+def test_hold_window_sec_is_rejected_on_an_assert_entry() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="safeguard", severity="recoverable", mode="assert", hold_window_sec=30.0)]
+    )
+    assert entries == []
+    assert "hold_window_sec" in errors[0]["reason"]
+
+
 def test_resolved_mode_never_derives_hold_from_role_defaults() -> None:
     entries, errors = parse_entries([_entry()])
     assert errors == []
