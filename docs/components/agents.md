@@ -95,7 +95,7 @@ each harness maps them onto its target.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `BENCH_USE_MCP` | `true` | Master gate. `false` drops the MCP binding entirely. |
-| `AGENT_MCP_SERVER` | unset | Shell-quoted argv for the MCP server (e.g. `"uv run gke-mcp"`). |
+| `AGENT_MCP_SERVER` | unset | Shell-quoted argv for the MCP server (e.g. `"uv run k8s-mcp"`). |
 | `AGENT_ALLOWED_TOOLS` | unset | CSV of pre-approved tool names. |
 | `AGENT_SKILLS_PATHS` | unset | CSV of directories to discover `SKILL.md` files under. |
 | `AGENT_RULES_TEXT` | unset | Operator-brief text handed to the agent. |
@@ -110,9 +110,9 @@ export AGENT_API_KEY="$GEMINI_API_KEY"
 export AGENT_TARGET=gemini
 
 export BENCH_USE_MCP=true
-export AGENT_MCP_SERVER="uv run gke-mcp"
+export AGENT_MCP_SERVER="uv run k8s-mcp"
 export AGENT_ALLOWED_TOOLS="list_clusters,get_pods"
-export AGENT_SKILLS_PATHS="/opt/skills/gke,/opt/skills/k8s"
+export AGENT_SKILLS_PATHS="/opt/skills/devops,/opt/skills/k8s"
 ```
 
 ### Example: api harness on Claude with MCP off
