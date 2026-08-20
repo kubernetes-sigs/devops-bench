@@ -320,7 +320,9 @@ class VerificationEntry(BaseModel):
         hold_poll_interval_sec: Seconds between samples for a ``hold`` entry.
             Ignored for every other mode. ``None`` defers to the module-level
             default (``BENCH_HOLD_INTERVAL_SEC``, see
-            ``devops_bench.evalharness.hold``).
+            ``devops_bench.evalharness.hold``). Must be positive when set.
+            Setting this on an entry whose mode is not ``hold`` is a
+            validation error, since it would otherwise silently do nothing.
         hold_window_sec: Length, in seconds, of the post-run soak window for
             an ``objective`` entry in ``hold`` mode. Required in that case:
             there is no default, since a silent default would quietly
@@ -353,11 +355,20 @@ class VerificationEntry(BaseModel):
 
     @model_validator(mode="after")
     def _check_role_and_mode(self) -> VerificationEntry:
-        """Enforce the role/severity pairing and the role/hold_window_sec pairing."""
+        """Enforce the role/severity pairing and the hold-field couplings.
+
+        ``hold_poll_interval_sec`` only means something when ``mode`` is
+        explicitly ``"hold"``; setting it on any other entry is rejected by
+        name rather than silently ignored, since a silent no-op is exactly
+        how a misconfigured entry hides. ``hold_window_sec`` is similarly
+        coupled to the entry's role once ``mode`` is ``"hold"``.
+        """
         if self.role == "safeguard" and self.severity is None:
             raise ValueError("severity is required when role is 'safeguard'")
         if self.role == "objective" and self.severity is not None:
             raise ValueError("severity is not allowed when role is 'objective'")
+        if self.mode != "hold" and self.hold_poll_interval_sec is not None:
+            raise ValueError("hold_poll_interval_sec is only valid when mode is 'hold'")
         if self.resolved_mode == "hold":
             if self.role == "objective" and self.hold_window_sec is None:
                 raise ValueError(
@@ -384,6 +395,9 @@ class VerificationEntry(BaseModel):
         heal. A safeguard can opt into ``hold`` explicitly to require the
         condition to have held continuously through the agent's turn instead
         of only at the moment verification runs after the agent finishes.
+        ``hold`` is never derived here, only ever explicit: it is significant
+        enough that an entry must opt into it by name rather than inherit it
+        from a role default.
         """
         if self.mode is not None:
             return self.mode

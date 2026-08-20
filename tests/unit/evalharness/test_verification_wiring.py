@@ -222,6 +222,39 @@ def test_converge_entry_is_recorded_as_budget_exhausted_in_the_sub_second_window
     assert report[1]["reason"] == "verification total budget exhausted before evaluation"
 
 
+def test_hold_entry_bypasses_the_total_budget_and_run_entry_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold entry is scored from the monitor's observations, not budget-gated like converge."""
+    hold_spec = {
+        **_SPEC[0],
+        "name": "web-stays-ready",
+        "role": "safeguard",
+        "severity": "catastrophic",
+        "mode": "hold",
+    }
+    entries, errors = parse_entries([_SPEC[0], hold_spec])
+    assert errors == []
+    # An exhausted total budget still starves the first (converging) entry;
+    # the hold entry must not be affected by it at all.
+    monkeypatch.setattr("devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", 0.0)
+    obs = HoldObservation(sample_count=3, violated=False)
+
+    with patch(
+        "devops_bench.evalharness.default.VerifierAgent.run_entry"
+    ) as run_entry_mock:
+        report = _harness()._run_verification(
+            entries, timeout_sec=120, hold_observations={"web-stays-ready": obs}
+        )
+
+    run_entry_mock.assert_not_called()
+    assert report[0]["success"] is False
+    assert report[0]["status"] == "error"
+    assert report[1]["mode"] == "hold"
+    assert report[1]["success"] is True
+    assert report[1]["status"] == "pass"
+
+
 def test_assert_entry_still_evaluates_after_the_total_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

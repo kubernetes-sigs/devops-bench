@@ -88,6 +88,23 @@ def test_hold_poll_interval_must_be_positive() -> None:
     assert errors[0]["name"] == "e1"
 
 
+def test_hold_poll_interval_sec_is_rejected_on_an_assert_entry() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="safeguard", severity="recoverable", mode="assert", hold_poll_interval_sec=5)]
+    )
+    assert entries == []
+    assert "hold_poll_interval_sec" in errors[0]["reason"]
+
+
+def test_resolved_mode_never_derives_hold_from_role_defaults() -> None:
+    entries, errors = parse_entries([_entry()])
+    assert errors == []
+    assert entries[0].resolved_mode != "hold"
+    entries, errors = parse_entries([_entry(role="safeguard", severity="recoverable")])
+    assert errors == []
+    assert entries[0].resolved_mode != "hold"
+
+
 def test_objective_hold_without_window_is_an_error() -> None:
     entries, errors = parse_entries([_entry(mode="hold")])
     assert entries == []
