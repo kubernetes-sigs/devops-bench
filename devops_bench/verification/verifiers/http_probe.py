@@ -69,6 +69,14 @@ _POD_TERMINATED_ERROR_MARKER = "terminated (Error)"
 # reported ``body_length`` is still the full observed length.
 _BODY_MATCH_LIMIT_CHARS = 64 * 1024
 
+# Unique marker curl's ``-w`` write-out prefixes the HTTP status with, so the
+# status can be found by searching for the marker rather than trusting that
+# the final line of output is the status. ``kubectl run --rm`` sometimes
+# appends its own pod-deletion notice after curl's output, which would
+# otherwise be mistaken for the status line.
+_HTTP_STATUS_MARKER = "__HTTP_STATUS__:"
+_STATUS_MARKER_RE = re.compile(re.escape(_HTTP_STATUS_MARKER) + r"(\d{3})")
+
 
 @VERIFIERS.register("http_probe")
 class HttpProbeVerifier(BaseVerifier):
@@ -219,7 +227,7 @@ class HttpProbeVerifier(BaseVerifier):
             "curl",
             "-s",
             "-w",
-            r"\n%{http_code}",
+            "\n" + _HTTP_STATUS_MARKER + "%{http_code}",
             f"--max-time={self.probe_timeout}",
         ]
         if self.host is not None:
@@ -243,15 +251,14 @@ class HttpProbeVerifier(BaseVerifier):
             timeout=pod_timeout,
         ).rstrip()
 
-        lines = output.rsplit("\n", 1)
-        if len(lines) < 2:
-            return "error", f"unexpected curl output: {output!r}", None
-
-        body, status_line = lines
-        match = re.match(r"\s*(\d{3})", status_line)
+        match = _STATUS_MARKER_RE.search(output)
         if not match:
-            return "error", f"could not parse HTTP status from {status_line!r}", None
+            return "error", f"unexpected curl output: {output!r}", None
         status_code = int(match.group(1))
+
+        body = output[: match.start()]
+        if body.endswith("\n"):
+            body = body[:-1]
 
         raw: dict[str, Any] = {"status_code": status_code, "body_length": len(body)}
 
