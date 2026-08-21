@@ -144,9 +144,10 @@ state that should be an enum, and parallel lists that should be one list of reco
 ### Vendor neutrality
 
 **Run this lens on every change touching `devops_bench/` or `docs/`.** A
-`.coderabbit.yaml` rule covers the same ground, but in practice it catches
-literal "GKE"/"GCP" strings and little else, so the structural violations below
-are the ones a review has to find. Authors: run this before opening the PR.
+`.coderabbit.yaml` rule covers the same ground and lists the same generic
+layers, but it keys on terminology and env-var reads, so the structural
+violations below are the ones a human review still has to find. Authors: run
+this before opening the PR.
 
 The rule from [AGENTS.md](../../../AGENTS.md): user-facing text and the generic
 framework layers stay vendor-neutral. Provider specifics belong in

@@ -113,9 +113,12 @@ Flag any task/stack/prompt that pins one of these to a fixed value.
 6. **Name-length budget.** Check the *resolved* name that `RunEnv.cluster_name()`
    produces, not the raw base-plus-token sum: it already clamps to
    `_MAX_CLUSTER_NAME` and the run token is the prefix, so a long base name does
-   not by itself drop the discriminator. What to verify is that any *stack-side* truncation
-   preserves that prefix — a suffix the module truncates off collapses two runs
-   to one name.
+   not by itself drop the discriminator. What to verify is that any *stack-side*
+   truncation preserves that prefix. Removing or rewriting the run-token prefix
+   collapses two runs to one name; truncating only the base suffix does not. The
+   gke module's node-SA slug is the pattern to copy — it slices from position 0
+   and appends an md5 of the full name, so neither the prefix nor uniqueness is
+   lost.
 
 For each parallel finding, **state which axis triggers it** (Task / Model /
 AgentConfig) and whether `RunEnv` already covers it — that's what the maintainer
