@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from typing import Any, Literal
 
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.k8s import run_pod
 from devops_bench.verification.base import (
+    MIN_LEAF_BUDGET_SECONDS,
     VERIFIERS,
     BaseVerifier,
     VerificationResult,
@@ -91,7 +93,8 @@ class HttpProbeVerifier(BaseVerifier):
             against, since the body is untrusted input.
         namespace: Namespace the ephemeral pod runs in; active context when None.
         probe_timeout: Seconds the curl command may run. The ``kubectl run``
-            call is bounded by this value plus :data:`_KUBECTL_OVERHEAD_SEC`.
+            call is bounded by this value plus :data:`_KUBECTL_OVERHEAD_SEC`,
+            clamped further to whatever remains on the converge deadline.
         host: Optional ``Host`` header value. Set this to probe a host-routed
             ingress path: ``url`` targets the edge/controller address while
             this header selects the virtual host. ``None`` (default) omits
@@ -120,12 +123,39 @@ class HttpProbeVerifier(BaseVerifier):
         Returns:
             The verification result carrying the last observed outcome.
         """
-        return self._poll_to_result(self._probe_check, timeout_sec)
+        # Below the runner's real-budget floor, timeout_sec is the assert/hold
+        # sentinel (always exactly 0.0), not a shrinking converge deadline: the
+        # single attempt below keeps its full probe_timeout + overhead budget,
+        # unclamped, exactly as before this fix.
+        bounded = timeout_sec >= MIN_LEAF_BUDGET_SECONDS
+        start = time.monotonic()
 
-    def _probe_check(self) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
-        """Run one probe attempt, folding kubectl/unexpected errors into an error status."""
+        def check() -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+            if not bounded:
+                return self._probe_check(None)
+            remaining = timeout_sec - (time.monotonic() - start)
+            if remaining <= 0:
+                return (
+                    "error",
+                    "no time remaining for probe attempt before converge deadline",
+                    None,
+                )
+            return self._probe_check(remaining)
+
+        return self._poll_to_result(check, timeout_sec)
+
+    def _probe_check(
+        self, remaining: float | None
+    ) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        """Run one probe attempt, folding kubectl/unexpected errors into an error status.
+
+        Args:
+            remaining: Seconds left on the converge deadline, used to clamp
+                this attempt's pod timeout; ``None`` in assert/hold mode,
+                where the attempt keeps its full unclamped budget.
+        """
         try:
-            return self._run_probe()
+            return self._run_probe(remaining)
         except SubprocessError as exc:
             stderr = (exc.stderr or "").strip()
             unreachable = self._classify_unreachable(exc)
@@ -173,8 +203,17 @@ class HttpProbeVerifier(BaseVerifier):
             return None
         return exc.returncode, description
 
-    def _run_probe(self) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
-        """Launch an ephemeral curl pod and evaluate its output."""
+    def _run_probe(
+        self, remaining: float | None
+    ) -> tuple[VerificationStatus, str, dict[str, Any] | None]:
+        """Launch an ephemeral curl pod and evaluate its output.
+
+        Args:
+            remaining: Seconds left on the converge deadline; the pod's
+                timeout is clamped to this when it is smaller than
+                ``probe_timeout + _KUBECTL_OVERHEAD_SEC``. ``None`` leaves the
+                pod timeout unclamped (assert/hold mode).
+        """
         pod_name = f"http-probe-{uuid.uuid4().hex[:8]}"
         curl_cmd = [
             "curl",
@@ -189,14 +228,19 @@ class HttpProbeVerifier(BaseVerifier):
         # Bounded by probe_timeout plus overhead rather than single_call_timeout:
         # a converge-mode retry needs a bound tight to this one attempt so the
         # next attempt fires promptly, not single_call_timeout's near-zero floor
-        # meant only to protect an assert-mode call with no real budget.
+        # meant only to protect an assert-mode call with no real budget. Also
+        # clamped to whatever remains on the converge deadline, so this one
+        # attempt cannot itself run past the deadline the caller budgeted.
+        pod_timeout = self.probe_timeout + _KUBECTL_OVERHEAD_SEC
+        if remaining is not None:
+            pod_timeout = min(pod_timeout, remaining)
         output = run_pod(
             pod_name,
             "curlimages/curl",
             curl_cmd,
             namespace=self.namespace,
             kubeconfig=self.kubeconfig,
-            timeout=self.probe_timeout + _KUBECTL_OVERHEAD_SEC,
+            timeout=pod_timeout,
         ).rstrip()
 
         lines = output.rsplit("\n", 1)

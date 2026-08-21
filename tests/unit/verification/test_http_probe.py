@@ -25,6 +25,7 @@ from devops_bench.k8s.conditions import poll_until as _real_poll_until
 from devops_bench.verification import VerificationSpec
 from devops_bench.verification.verifiers.http_probe import (
     _BODY_MATCH_LIMIT_CHARS,
+    _KUBECTL_OVERHEAD_SEC,
     HttpProbeVerifier,
 )
 
@@ -229,6 +230,72 @@ def test_probe_assert_mode_is_single_shot(mocker: MockerFixture) -> None:
     result = v.verify(0.0)
     assert result.success is False
     assert run_pod.call_count == 1
+
+
+def test_run_probe_clamps_pod_timeout_to_remaining_deadline(mocker: MockerFixture) -> None:
+    """One probe attempt must not use more of the pod timeout than remains on the deadline."""
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    status, reason, raw = v._run_probe(3.0)
+    assert status == "pass"
+    assert run_pod.call_args.kwargs["timeout"] == 3.0
+
+
+def test_run_probe_unclamped_when_remaining_is_none(mocker: MockerFixture) -> None:
+    """``remaining=None`` (assert/hold mode) keeps the full probe_timeout + overhead budget."""
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    status, reason, raw = v._run_probe(None)
+    assert status == "pass"
+    assert run_pod.call_args.kwargs["timeout"] == v.probe_timeout + _KUBECTL_OVERHEAD_SEC
+
+
+def test_probe_converge_check_clamps_pod_timeout_to_remaining_deadline(
+    mocker: MockerFixture,
+) -> None:
+    """A converge attempt with little deadline left gets a clamped run_pod timeout."""
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    mocker.patch(
+        "devops_bench.verification.verifiers.http_probe.time.monotonic",
+        side_effect=[100.0, 100.0, 103.0, 103.0],
+    )
+    mocker.patch(
+        "devops_bench.verification.base.poll_until",
+        side_effect=lambda predicate, *, timeout_sec, **_: predicate(),
+    )
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(5.0)
+    assert result.success is True
+    assert run_pod.call_args.kwargs["timeout"] == 2.0
+
+
+def test_probe_converge_check_skips_pod_when_deadline_exhausted(
+    mocker: MockerFixture,
+) -> None:
+    """No pod is launched once the converge deadline has nothing left before an attempt."""
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    mocker.patch(
+        "devops_bench.verification.verifiers.http_probe.time.monotonic",
+        side_effect=[100.0, 100.0, 106.0, 106.0],
+    )
+    mocker.patch(
+        "devops_bench.verification.base.poll_until",
+        side_effect=lambda predicate, *, timeout_sec, **_: predicate(),
+    )
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(5.0)
+    assert result.status == "error"
+    assert "no time remaining" in result.reason
+    run_pod.assert_not_called()
+
+
+def test_probe_assert_mode_pod_timeout_stays_unclamped(mocker: MockerFixture) -> None:
+    """Assert/hold mode keeps the full probe_timeout + overhead budget, unclamped."""
+    run_pod = _patch_run_pod(mocker, "hello world\n200")
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0.0)
+    assert result.success is True
+    assert run_pod.call_args.kwargs["timeout"] == v.probe_timeout + _KUBECTL_OVERHEAD_SEC
 
 
 def test_probe_host_header_added_when_set(mocker: MockerFixture) -> None:
