@@ -774,3 +774,136 @@ def test_agy_cli_agent_execute_emits_none_tokens_when_no_source(mock_run, mock_h
 
     assert result.tokens == parsing.empty_tokens()
     assert result.metadata["token_source"] == "unavailable"
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_forwards_extra_flags(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+) -> None:
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(
+        args=["agy"],
+        returncode=0,
+        stdout="Success",
+        stderr="",
+    )
+
+    def side_effect(*args: object, **kwargs: object) -> SimpleNamespace:
+        cwd = kwargs.get("cwd") or tmp_path
+        _write_sample_transcript(cwd)  # type: ignore[arg-type]
+        return mock_run.return_value
+
+    mock_run.side_effect = side_effect
+
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=capabilities.AllCapabilities(),
+        extra_flags=("--is_google_internal", "--use_stubby_auth", "--custom-opt=123"),
+    )
+    result = agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert result.errors == []
+    assert mock_run.called
+    args = mock_run.call_args[0][0]
+    assert "--is_google_internal" in args
+    assert "--use_stubby_auth" in args
+    assert "--custom-opt=123" in args
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_discovers_gemini_dir_conversations_fallback(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+) -> None:
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(
+        args=["agy"],
+        returncode=0,
+        stdout="Success",
+        stderr="",
+    )
+
+    # Simulate conversations and brain logs placed directly under <gemini_dir>/ instead of <gemini_dir>/antigravity-cli/
+    def side_effect(*args: object, **kwargs: object) -> SimpleNamespace:
+        cwd = kwargs.get("cwd") or tmp_path
+        root_dir = cwd / ".gemini"  # type: ignore[operator]
+        conv_dir = root_dir / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        uuid = "test-uuid-fallback"
+        (conv_dir / f"{uuid}.db").write_text("", encoding="utf-8")
+
+        transcript_dir = root_dir / "brain" / uuid / ".system_generated" / "logs"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        (transcript_dir / "transcript.jsonl").write_text(SAMPLE_SESSION, encoding="utf-8")
+        return mock_run.return_value
+
+    mock_run.side_effect = side_effect
+
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=capabilities.AllCapabilities(),
+    )
+    result = agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert (
+        result.output
+        == "I found cluster-a. Let me get its details.Done. Cluster-a is running v1.30."
+    )
+    assert len(result.trajectory) == 2
+    assert result.errors == []
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_discovers_parent_conversations_when_nested_is_empty(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+) -> None:
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(
+        args=["agy"],
+        returncode=0,
+        stdout="Success",
+        stderr="",
+    )
+
+    # Nested conversations directory exists but is empty; real DB is in parent <gemini_dir>/conversations/
+    def side_effect(*args: object, **kwargs: object) -> SimpleNamespace:
+        cwd = kwargs.get("cwd") or tmp_path
+        gemini_dir = cwd / ".gemini"  # type: ignore[operator]
+        nested_conv_dir = gemini_dir / "antigravity-cli" / "conversations"
+        nested_conv_dir.mkdir(parents=True, exist_ok=True)
+
+        parent_conv_dir = gemini_dir / "conversations"
+        parent_conv_dir.mkdir(parents=True, exist_ok=True)
+        uuid = "test-uuid-parent"
+        (parent_conv_dir / f"{uuid}.db").write_text("", encoding="utf-8")
+
+        transcript_dir = gemini_dir / "brain" / uuid / ".system_generated" / "logs"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        (transcript_dir / "transcript.jsonl").write_text(SAMPLE_SESSION, encoding="utf-8")
+        return mock_run.return_value
+
+    mock_run.side_effect = side_effect
+
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=capabilities.AllCapabilities(),
+    )
+    result = agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert (
+        result.output
+        == "I found cluster-a. Let me get its details.Done. Cluster-a is running v1.30."
+    )
+    assert len(result.trajectory) == 2
+    assert result.errors == []

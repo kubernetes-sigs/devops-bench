@@ -248,6 +248,8 @@ class AgyCliAgent(base.AgentHarness):
                 argv.append(f"--project={project}")
             if self.config.model:
                 argv.append(f"--model={_resolve_model_name(self.config.model)}")
+            if self.config.extra_flags:
+                argv.extend(self.config.extra_flags)
             argv.append(f"--prompt={prompt}")
 
             # Write to both GEMINI.md (legacy) and .agents/AGENTS.md (modern)
@@ -271,9 +273,9 @@ class AgyCliAgent(base.AgentHarness):
                 skills_enabled=bool(skill_names),
             )
             if settings:
-                (agy_config_dir / "settings.json").write_text(
-                    json.dumps(settings, indent=2), encoding="utf-8"
-                )
+                settings_text = json.dumps(settings, indent=2)
+                (agy_config_dir / "settings.json").write_text(settings_text, encoding="utf-8")
+                (gemini_dir / "settings.json").write_text(settings_text, encoding="utf-8")
 
             # Copy (not symlink) the OAuth token into the workspace: agy may
             # refresh it in place during a run, and a symlink shared across
@@ -319,9 +321,13 @@ class AgyCliAgent(base.AgentHarness):
                 if copied_token is not None:
                     copied_token.unlink(missing_ok=True)
 
-            # All logs and conversations land under agy_config_dir since we
-            # passed --gemini_dir.
+            # Look for conversations under <gemini_dir>/antigravity-cli/ or <gemini_dir>/
             conv_dir = agy_config_dir / "conversations"
+            brain_base_dir = agy_config_dir
+            has_nested_db = conv_dir.exists() and any(conv_dir.glob("*.db"))
+            if not has_nested_db and (gemini_dir / "conversations").exists():
+                conv_dir = gemini_dir / "conversations"
+                brain_base_dir = gemini_dir
 
             session_text = ""
             # Tokens live in the conversation DB, not the transcript; read them
@@ -334,13 +340,22 @@ class AgyCliAgent(base.AgentHarness):
                     db_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                     latest_uuid = db_files[0].stem
                     transcript_path = (
-                        agy_config_dir
+                        brain_base_dir
                         / "brain"
                         / latest_uuid
                         / ".system_generated"
                         / "logs"
                         / "transcript.jsonl"
                     )
+                    if not transcript_path.exists() and (gemini_dir / "brain").exists():
+                        transcript_path = (
+                            gemini_dir
+                            / "brain"
+                            / latest_uuid
+                            / ".system_generated"
+                            / "logs"
+                            / "transcript.jsonl"
+                        )
                     if transcript_path.exists():
                         session_text = transcript_path.read_text(encoding="utf-8")
                     else:

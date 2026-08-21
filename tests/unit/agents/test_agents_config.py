@@ -138,3 +138,14 @@ def test_capabilities_constructor_is_harness_friendly() -> None:
     assert cfg.capabilities.allowed_tools == ("list",)
     assert cfg.capabilities.skills.paths == ("/opt/skills",)
     assert cfg.capabilities.rules.text == "you are a sre"
+
+
+def test_from_env_extra_flags() -> None:
+    cfg = AgentConfig.from_env({"AGENT_EXTRA_FLAGS": "--flag1 --opt=value --quoted='hello world'"})
+    assert cfg.extra_flags == ("--flag1", "--opt=value", "--quoted=hello world")
+
+
+def test_from_env_extra_flags_unset_or_empty() -> None:
+    assert AgentConfig.from_env({}).extra_flags == ()
+    assert AgentConfig.from_env({"AGENT_EXTRA_FLAGS": ""}).extra_flags == ()
+    assert AgentConfig.from_env({"AGENT_EXTRA_FLAGS": "   "}).extra_flags == ()

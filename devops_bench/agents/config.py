@@ -103,6 +103,8 @@ class AgentConfig:
             catalog (no GKE-specific strings live in agent code).
         extra_env: Provider-agnostic env overlay forwarded to subprocess calls.
             Concrete agents may add their own provider-specific keys on top.
+        extra_flags: Optional CLI argument flags forwarded to the spawned agent
+            subprocess; flows from ``AGENT_EXTRA_FLAGS``.
     """
 
     model: str | None = None
@@ -113,17 +115,19 @@ class AgentConfig:
     max_turns: int | None = None
     capabilities: AllCapabilities = field(default_factory=AllCapabilities)
     extra_env: Mapping[str, str] = field(default_factory=dict)
+    extra_flags: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> AgentConfig:
         """Build a config from the ``AGENT_*`` environment variables.
 
         Reads ``AGENT_MODEL`` / ``AGENT_PROVIDER`` / ``AGENT_API_KEY`` /
-        ``AGENT_TARGET`` / ``AGENT_TIMEOUT_SEC`` / ``AGENT_MAX_TURNS`` and
-        delegates capability construction (``AGENT_MCP_SERVER`` /
-        ``AGENT_ALLOWED_TOOLS`` / ``AGENT_SKILLS_PATHS`` / ``AGENT_RULES_TEXT``)
-        to :func:`_build_capabilities_from_env`. A missing variable yields the
-        dataclass default — this method never raises on unset variables.
+        ``AGENT_TARGET`` / ``AGENT_TIMEOUT_SEC`` / ``AGENT_MAX_TURNS`` /
+        ``AGENT_EXTRA_FLAGS`` and delegates capability construction
+        (``AGENT_MCP_SERVER`` / ``AGENT_ALLOWED_TOOLS`` / ``AGENT_SKILLS_PATHS`` /
+        ``AGENT_RULES_TEXT``) to :func:`_build_capabilities_from_env`. A missing
+        variable yields the dataclass default — this method never raises on unset
+        variables.
 
         Args:
             env: Optional mapping to read from (defaults to ``os.environ``).
@@ -134,6 +138,8 @@ class AgentConfig:
         """
         timeout = get_int("AGENT_TIMEOUT_SEC", env=env)
         max_turns = get_int("AGENT_MAX_TURNS", env=env)
+        extra_flags_raw = get_env("AGENT_EXTRA_FLAGS", env=env) or ""
+        extra_flags = tuple(shlex.split(extra_flags_raw)) if extra_flags_raw else ()
         return cls(
             model=get_env("AGENT_MODEL", env=env),
             provider=get_env("AGENT_PROVIDER", env=env),
@@ -142,4 +148,5 @@ class AgentConfig:
             timeout_sec=float(timeout) if timeout is not None else 600.0,
             max_turns=max_turns,
             capabilities=_build_capabilities_from_env(env),
+            extra_flags=extra_flags,
         )
