@@ -24,7 +24,6 @@ from typing import Any, Literal
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.k8s import run_pod
 from devops_bench.verification.base import (
-    MIN_LEAF_BUDGET_SECONDS,
     VERIFIERS,
     BaseVerifier,
     VerificationResult,
@@ -131,11 +130,11 @@ class HttpProbeVerifier(BaseVerifier):
         Returns:
             The verification result carrying the last observed outcome.
         """
-        # Below the runner's real-budget floor, timeout_sec is the assert/hold
-        # sentinel (always exactly 0.0), not a shrinking converge deadline: the
-        # single attempt below keeps its full probe_timeout + overhead budget,
-        # unclamped, exactly as before this fix.
-        bounded = timeout_sec >= MIN_LEAF_BUDGET_SECONDS
+        # A positive timeout_sec, however small, is a shrinking converge
+        # deadline; only the assert/hold sentinel (always exactly 0.0) keeps
+        # the single attempt below at its full probe_timeout + overhead
+        # budget, unclamped.
+        bounded = timeout_sec > 0
         start = time.monotonic()
 
         def check() -> tuple[VerificationStatus, str, dict[str, Any] | None]:
@@ -251,9 +250,10 @@ class HttpProbeVerifier(BaseVerifier):
             timeout=pod_timeout,
         ).rstrip()
 
-        match = _STATUS_MARKER_RE.search(output)
-        if not match:
+        matches = list(_STATUS_MARKER_RE.finditer(output))
+        if not matches:
             return "error", f"unexpected curl output: {output!r}", None
+        match = matches[-1]
         status_code = int(match.group(1))
 
         body = output[: match.start()]

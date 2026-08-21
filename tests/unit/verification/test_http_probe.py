@@ -206,6 +206,24 @@ def test_probe_parses_status_with_trailing_kubectl_noise_on_its_own_line(
     assert result.raw["body_length"] == len("hello world")
 
 
+def test_probe_marker_like_text_in_body_does_not_shadow_real_status(
+    mocker: MockerFixture,
+) -> None:
+    """A response body containing marker-like text must not shadow the real status.
+
+    curl's ``-w`` write-out always appends the real status last; a body that
+    happens to contain text shaped like the marker must not be mistaken for
+    it.
+    """
+    body = f"unexpected body content {_HTTP_STATUS_MARKER}200 embedded"
+    _patch_run_pod(mocker, _curl_output(body, 503))
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0)
+    assert result.success is False
+    assert result.status == "fail"
+    assert result.raw["status_code"] == 503
+
+
 def test_probe_missing_marker_is_an_error(mocker: MockerFixture) -> None:
     """Output with no status marker at all is an error, not a misread status."""
     _patch_run_pod(mocker, "no-status-marker")
@@ -285,7 +303,7 @@ def test_run_probe_clamps_pod_timeout_to_remaining_deadline(mocker: MockerFixtur
     """One probe attempt must not use more of the pod timeout than remains on the deadline."""
     run_pod = _patch_run_pod(mocker, _curl_output("hello world", 200))
     v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
-    status, reason, raw = v._run_probe(3.0)
+    status, _, _ = v._run_probe(3.0)
     assert status == "pass"
     assert run_pod.call_args.kwargs["timeout"] == 3.0
 
@@ -294,7 +312,7 @@ def test_run_probe_unclamped_when_remaining_is_none(mocker: MockerFixture) -> No
     """``remaining=None`` (assert/hold mode) keeps the full probe_timeout + overhead budget."""
     run_pod = _patch_run_pod(mocker, _curl_output("hello world", 200))
     v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
-    status, reason, raw = v._run_probe(None)
+    status, _, _ = v._run_probe(None)
     assert status == "pass"
     assert run_pod.call_args.kwargs["timeout"] == v.probe_timeout + _KUBECTL_OVERHEAD_SEC
 
@@ -316,6 +334,30 @@ def test_probe_converge_check_clamps_pod_timeout_to_remaining_deadline(
     result = v.verify(5.0)
     assert result.success is True
     assert run_pod.call_args.kwargs["timeout"] == 2.0
+
+
+def test_probe_converge_check_with_small_timeout_below_floor_still_clamps(
+    mocker: MockerFixture,
+) -> None:
+    """A small positive converge timeout, below any leaf-budget floor, is still bounded.
+
+    A positive timeout_sec must not be mistaken for the assert/hold sentinel
+    (always exactly 0.0) just because it is small; the pod timeout must still
+    clamp to the remaining deadline.
+    """
+    run_pod = _patch_run_pod(mocker, _curl_output("hello world", 200))
+    mocker.patch(
+        "devops_bench.verification.verifiers.http_probe.time.monotonic",
+        side_effect=[100.0, 100.0, 100.25, 100.25],
+    )
+    mocker.patch(
+        "devops_bench.verification.base.poll_until",
+        side_effect=lambda predicate, *, timeout_sec, **_: predicate(),
+    )
+    v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
+    result = v.verify(0.5)
+    assert result.success is True
+    assert run_pod.call_args.kwargs["timeout"] == 0.25
 
 
 def test_probe_converge_check_skips_pod_when_deadline_exhausted(
