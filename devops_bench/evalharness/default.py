@@ -84,6 +84,17 @@ _AGENT_TYPE_ALIASES: dict[str, str] = {
 # Default agent type when neither --agent-type nor BENCH_AGENT_TYPE is set.
 _DEFAULT_AGENT_TYPE = "gemini-cli"
 
+# Record-level ``status`` values for a run whose agent process itself never
+# completed cleanly (crashed, exited non-zero, or timed out). Distinct from
+# "success" so a degraded run cannot be mistaken for a genuine one, and
+# distinct from "failed" (reserved for a harness-side exception aborting the
+# task before/around the agent step, e.g. infra provisioning). Both are
+# excluded from scoring in :meth:`DefaultEvalHarness._score`, the same way
+# "failed" already is: a run with no reliable agent output must not receive a
+# composite OutcomeScore that reads as if the agent had a fair turn.
+_STATUS_AGENT_ERROR = "agent_error"
+_STATUS_AGENT_TIMEOUT = "agent_timeout"
+
 # Default target deployment + namespace used both for placeholder
 # substitution in the agent prompt and as the chaos port-forward target, so the
 # operator agent and the chaos injector address the same workload when env is
@@ -622,6 +633,7 @@ class DefaultEvalHarness(Harness):
             The detailed per-task result dicts, scored in place, in the
             ``results.json`` schema.
         """
+        self._sweep_stray_sandbox_containers()
         run_dir = self.reporter.new_run_dir()
         detailed_results: list[dict[str, Any]] = [self._run_one(task, run_dir) for task in tasks]
 
@@ -650,6 +662,26 @@ class DefaultEvalHarness(Harness):
         except Exception:  # noqa: BLE001 - rows/manifest are derived, never load-bearing
             _log.exception("failed to write rows.json/manifest.json for %s", run_dir)
         return detailed_results
+
+    def _sweep_stray_sandbox_containers(self) -> None:
+        """Reap any sandboxed agent container left running from a prior run.
+
+        Best-effort and a no-op unless ``BENCH_AGENT_SANDBOX`` is set: a
+        container the harness starts is normally cleaned up by
+        ``sandbox.container_guard`` around its own run, but a harness process
+        killed outright (Ctrl-C, OOM, a host reboot) never gets the chance to
+        run that guard's ``finally``. Sweeping once here, before this batch's
+        own containers exist, catches exactly that leak without risking a
+        live container from the run in progress.
+        """
+        from devops_bench.agents import sandbox
+
+        if not sandbox.sandbox_enabled():
+            return
+        try:
+            sandbox.sweep_stray_containers()
+        except Exception:  # noqa: BLE001 - a sweep failure must not block the run
+            _log.exception("stray sandbox container sweep failed; continuing")
 
     def _write_run_artifacts(self, run_dir: Path, detailed_results: list[dict[str, Any]]) -> None:
         """Flatten ``detailed_results`` into ``rows.json`` + ``manifest.json``.
@@ -916,6 +948,20 @@ class DefaultEvalHarness(Harness):
         """
         dumped = agent_res.to_dict()
         agent_errors = list(dumped.get("errors") or [])
+        agent_metadata = dumped.get("metadata") or {}
+        # A populated ``errors`` list means the agent process itself never
+        # completed cleanly (``AgentResult.errored()`` covers 429 / SDK fault /
+        # missing binary / an unexpected exception in ``_execute``, and a CLI
+        # agent that recovered a partial trajectory after a timeout or a
+        # non-zero exit still appends its own error). ``metadata["timed_out"]``
+        # (set by a CLI agent's own timeout handling) distinguishes the two
+        # degraded statuses; anything else with an error is the general case.
+        if not agent_errors:
+            status = "success"
+        elif agent_metadata.get("timed_out"):
+            status = _STATUS_AGENT_TIMEOUT
+        else:
+            status = _STATUS_AGENT_ERROR
         record = self._empty_record(task)
         record.update(
             {
@@ -930,14 +976,12 @@ class DefaultEvalHarness(Harness):
                     entry.get("name") for entry in dumped.get("trajectory", []) if entry.get("name")
                 ],
                 "trajectory": dumped.get("trajectory", []),
-                "status": "success",
+                "status": status,
                 # Run-level validity gate: a vetted task only promotes to the
                 # leaderboard when this run actually produced a usable result.
-                # ``AgentResult.errored()`` (429 / SDK fault / agent timeout)
-                # yields populated ``errors`` + an empty trajectory while the
-                # record still reads ``status:"success"``, so gating on the task
-                # flag alone would let an empty/errored run pass as a genuine low
-                # score. Require no agent error *and* a non-empty trajectory.
+                # Require no agent error *and* a non-empty trajectory (stricter
+                # than ``status`` alone: a clean-exit run with a stray parse
+                # warning is still "success" but not "validated").
                 "validated": (
                     task.validated and not agent_errors and bool(dumped.get("trajectory"))
                 ),
@@ -1147,10 +1191,14 @@ class DefaultEvalHarness(Harness):
 
         Args:
             detailed_results: Execution results to score; ``scores`` is written
-                into each in place. Records marked ``status: "failed"`` are
-                skipped, since there is no agent output to judge.
+                into each in place. Records marked ``status: "failed"``,
+                ``"agent_error"``, or ``"agent_timeout"`` are skipped: none of
+                the three has a reliable agent output to judge, and scoring
+                one anyway would compute a normal-looking composite
+                OutcomeScore for a run whose agent process never completed.
         """
-        scorable = [r for r in detailed_results if r.get("status") != "failed"]
+        _unscored_statuses = ("failed", _STATUS_AGENT_ERROR, _STATUS_AGENT_TIMEOUT)
+        scorable = [r for r in detailed_results if r.get("status") not in _unscored_statuses]
         if not scorable:
             return
         # Lazy import keeps ``deepeval`` / provider SDKs out of harness import.

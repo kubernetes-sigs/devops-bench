@@ -33,11 +33,13 @@ mechanisms, written into the per-run working directory before invocation:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from devops_bench.agents import sandbox
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.cli.gemini_cli.parsing import parse_stream_json
 from devops_bench.agents.config import AgentConfig
@@ -49,7 +51,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 )
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.model_providers import resolve_provider
-from devops_bench.core.subprocess import run
+from devops_bench.core.subprocess import CompletedProcess, run
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from devops_bench.agents.capabilities import McpBinding
@@ -240,30 +242,85 @@ class GeminiCliAgent(AgentHarness):
                 (gemini_dir / _GEMINI_SETTINGS_FILE).write_text(
                     json.dumps(settings, indent=2), encoding="utf-8"
                 )
-            try:
-                completed = run(
+            # Containerised execution, opt-in via BENCH_AGENT_SANDBOX=docker.
+            #
+            # Everything above still runs on the host: GEMINI.md, settings.json and the
+            # skills tree are written into `workdir`, which is then mounted into the
+            # container as /workspace. Only the agent process itself moves.
+            #
+            # env_overlay is handed to wrap_argv rather than to run(). It is the
+            # RESOLVED configuration (provider-routed api key, GEMINI_MODEL, the OTLP
+            # disables), so it is exactly what should cross the boundary, and it crosses
+            # by value as explicit -e flags rather than as inherited process env.
+            run_argv = argv
+            sandboxed = False
+            container_name: str | None = None
+            if sandbox.sandbox_enabled():
+                cluster = sandbox.current_cluster_name()
+                kubeconfig = sandbox.build_agent_kubeconfig(cluster, workdir) if cluster else None
+                if kubeconfig is None:
+                    # Refuse rather than silently running unsandboxed on the host: a
+                    # containment control that quietly degrades is worse than none.
+                    return AgentResult.errored(
+                        "BENCH_AGENT_SANDBOX is set but no sandbox kubeconfig could be "
+                        "built; refusing to fall back to an unsandboxed run"
+                    )
+                container_name = sandbox.container_name_for_workspace(workdir)
+                run_argv = sandbox.wrap_argv(
                     argv,
+                    workspace=workdir,
+                    kubeconfig=kubeconfig,
                     extra_env=env_overlay,
-                    cwd=workdir,
-                    check=False,
-                    timeout=self.config.timeout_sec,
+                    container_name=container_name,
                 )
-            except SubprocessError as exc:
-                return AgentResult.errored(f"gemini subprocess error: {exc}")
-            except OSError as exc:
-                # Missing / non-executable binary; core.subprocess.run does not wrap.
-                return AgentResult.errored(f"gemini binary unavailable: {exc}")
+                sandboxed = True
 
-        output, trajectory, tokens, parse_errors = parse_stream_json(completed.stdout or "")
+            completed: CompletedProcess | None = None
+            timeout_exc: SubprocessError | None = None
+            # container_guard reaps the sandbox container by name on every exit
+            # from this block, normal or not: `--rm` alone only cleans up when
+            # the container's own process exits, not when the timeout below
+            # kills the local `docker run` client out from under it.
+            guard = (
+                sandbox.container_guard(container_name)
+                if container_name is not None
+                else contextlib.nullcontext()
+            )
+            with guard:
+                try:
+                    completed = run(
+                        run_argv,
+                        extra_env=None if sandboxed else env_overlay,
+                        cwd=workdir,
+                        check=False,
+                        timeout=self.config.timeout_sec,
+                    )
+                except SubprocessError as exc:
+                    # check=False means this can only be a timeout. The stream-json
+                    # events already flushed to stdout before the process was
+                    # killed still describe real tool calls the agent made: fall
+                    # through to recover them below instead of discarding the
+                    # captured output and returning an empty trajectory.
+                    timeout_exc = exc
+                except OSError as exc:
+                    # Missing / non-executable binary; core.subprocess.run does not wrap.
+                    return AgentResult.errored(f"gemini binary unavailable: {exc}")
+
+        stdout = (timeout_exc.stdout if timeout_exc is not None else completed.stdout) or ""
+        output, trajectory, tokens, parse_errors = parse_stream_json(stdout)
         errors: list[str] = list(parse_errors)
-        if completed.returncode != 0:
+        metadata: dict = {"trajectory_captured": bool(trajectory)}
+        if timeout_exc is not None:
+            metadata["timed_out"] = True
+            errors.append(f"gemini subprocess error: {timeout_exc}")
+            if not output:
+                output = f"Error: gemini subprocess error: {timeout_exc}"
+        elif completed.returncode != 0:
             stderr = (completed.stderr or "").strip()
             errors.append(f"gemini exited {completed.returncode}: {stderr or '<no stderr>'}")
+            metadata["returncode"] = completed.returncode
             if not output:
                 output = f"Error: gemini exited {completed.returncode}"
-        metadata: dict = {}
-        if completed.returncode != 0:
-            metadata["returncode"] = completed.returncode
         return AgentResult(
             output=output,
             trajectory=trajectory,
