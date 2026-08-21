@@ -29,10 +29,10 @@ Read these as the source of truth; don't reconstruct them from memory:
 - `devops_bench/core/run_env.py` (`RunEnv`) — **the isolation source of truth.**
   Confirm what a run gets for free before asserting a collision is or isn't covered.
 
-Review-only: you **may** run schema/spec-parse checks and `uv run pytest`; you must
-**not** run `tofu`/`gcloud`/`kind`/`kubectl` or launch an eval. Assess solvability,
-teardown, and parallel-safety by **reading** the stack and scripts — never by
-provisioning. If a capability is needed, consult
+Review-only: you **may** run schema/spec-parse checks and `uv run pytest`, from
+the project root; you must **not** run `tofu`/`gcloud`/`kind`/`kubectl` or
+launch an eval. Assess solvability, teardown, and parallel-safety by **reading**
+the stack and scripts — never by provisioning. If a capability is needed, consult
 [harness-capabilities](../../references/harness-capabilities.md) and degrade to
 doing it inline.
 
@@ -70,10 +70,14 @@ to the judge.
 
 The matrix runs **Task × Model × AgentConfig** concurrently on one host. `RunEnv`
 isolates each run; a task is unsafe when it names state shared *outside* that
-isolation. **What `RunEnv` gives for free — do NOT hardcode these:** `KUBECONFIG`,
-`CLOUDSDK_CONFIG`, `TF_DATA_DIR` (+ tofu state beside it), `OPENCLAW_STATE_DIR`,
-ports, and the **cluster name** (run-token-prefixed, clamped to the framework's
-`_MAX_CLUSTER_NAME` — 40 chars, set by the tightest provider limit).
+isolation. **What `RunEnv` sets directly — do NOT hardcode these:** `KUBECONFIG`,
+`CLOUDSDK_CONFIG`, `TF_DATA_DIR` (+ tofu state beside it), and the **cluster
+name** (run-token-prefixed, clamped to the framework's `_MAX_CLUSTER_NAME` — 40
+chars, set by the tightest provider limit). It also publishes `BENCH_RUN_DIR`
+and `BENCH_PARALLEL`, which downstream components read to derive their own
+isolation: the openclaw agent's `OPENCLAW_STATE_DIR` and the harness's chaos
+port-forward port. Those two are just as unsafe to pin, but you verify them at
+the consumer, not in `run_env.py`.
 Flag any task/stack/prompt that pins one of these to a fixed value.
 
 **What the author MUST guarantee** (none of this is isolated for you):
@@ -130,8 +134,11 @@ The stack has `main.tf`, `variables.tf`, `outputs.tf`. It returns what the deplo
 expects (`cluster_name` / `cluster_location`; kind stacks emit
 `cluster_location = "local"`). For **every project-global resource it creates** (AR
 repos, Cloud SQL, external IPs, auto-mode VPCs), there is destroy-time cleanup so a
-re-apply after a failed run isn't blocked by orphans. New stack variables the
-provider resolver won't populate are a red flag — the harness can't set them.
+re-apply after a failed run isn't blocked by orphans. Every stack variable must
+be supplied by one of two paths — `provider.resolve_variables()`, or the task's
+own `infrastructure.variables`, which `TFDeployer._var_flags` forwards for any
+key the stack declares. Flag a variable only when *neither* path supplies it; a
+task-config key the stack never declares raises `ConfigError` at deploy time.
 
 ### Placeholders
 
