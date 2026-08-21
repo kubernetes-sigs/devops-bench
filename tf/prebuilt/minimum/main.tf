@@ -46,7 +46,14 @@ provider "google" {
 # listing the project's repos and delete it at its own location. The name match
 # is an exact suffix on the run-unique cluster, so a sibling run's repo is never
 # touched.
+#
+# GCP-only: the sweep shells out to `gcloud`, and on KinD there is no Artifact
+# Registry to sweep. Without the guard a local KinD run still makes a cloud call,
+# against whichever project the developer's `gcloud` is pointed at. Same
+# count-guard idiom as modules/cluster/main.tf.
 resource "null_resource" "ar_cleanup" {
+  count = var.infra_provider == "gcp" ? 1 : 0
+
   triggers = {
     project = var.project_id
     repo    = "hello-app-${var.cluster_name}"
