@@ -67,8 +67,11 @@ reviews:
         Focus on technical accuracy, clarity, and markdown formatting.
 
   auto_review:
+    auto_pause_after_reviewed_commits: 1
     base_branches:
       - ".*"
     labels:
       - "!do-not-merge/work-in-progress"
       - "!cncf-cla: no"
+      - "!do-not-merge/hold"
+      - "!needs-rebase"
