@@ -45,11 +45,16 @@ context clean.
    short foreground check each tick.
 3. Each supervisor tick:
    - Read the monitor digest; emit a one-line status (heartbeat).
-   - Newly finished combos (`exit=0`) → dispatch an **analyzer**.
+   - Every newly **terminal** combo → dispatch an **analyzer**. A combo that
+     stays failed past the retry cap is terminal too — close it out with a
+     root-cause digest (or record it as a non-graded failure); never leave a
+     failed combo unanalyzed.
    - **Flaked** combos → the retry procedure in the eval skill (cap 2 per combo);
      classify infra-flake vs real failure against
      [`../../docs/appendix/known_issues.md`](../../docs/appendix/known_issues.md).
-   - `.done` present **and** every combo analyzed → summarize and finish.
+   - `.done` present — or every expected combo has a `status` file, which the
+     wrapper itself treats as finished (see below) — **and** every combo
+     analyzed or recorded → summarize and finish.
    - Otherwise **schedule the next wakeup** (~3–5 min while active; 20–30 min if
      genuinely idle) and end the turn. No scheduler? `sleep` between checks. Poll
      every ~3–5 min for infra-bearing tasks — **don't busy-poll.**

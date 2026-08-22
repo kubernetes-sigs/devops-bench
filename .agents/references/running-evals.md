@@ -151,7 +151,10 @@ Under `--parallel` (the matrix always sets it via `BENCH_PARALLEL=true`), each
 run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 
 - **Run id** — `RUN_ID` env if set (the matrix sets it to the combo's `rid`),
-  else `<YYYYmmdd-HHMMSS>-<pid>`.
+  else `<YYYYmmdd-HHMMSS>-<pid>`. The matrix derives `rid` from the task's
+  **directory basename**, so never select two tasks whose directories share a
+  basename in one matrix — they would collide on run id, cluster name, and
+  output dir.
 - **Per-run state** — `/tmp/devops-bench-runs/<RUN_ID>/` (override the root with
   `BENCH_RUN_STATE_ROOT`): kubeconfig, gcloud config, tofu data dir.
 - **Cluster name** — `<token>-<CLUSTER_NAME>`, where the token is `c` + 7 hex

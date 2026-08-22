@@ -111,5 +111,6 @@ rationale · the verdict (capability gap vs. rubric problem) · and the next act
 - Always check `status` first — never read a `failed` record as a model miss.
 - An absent score means the metric didn't run, not a zero.
 - Explain only; this skill does not fix the model or edit the task.
-- Quote the judge's `reason` verbatim where it's load-bearing; don't paraphrase
-  away the signal.
+- Quote the judge's `reason` where it's load-bearing — don't paraphrase away
+  the signal — but **redact secrets and personal data first**: a reason can
+  reproduce credentials or PII from the trajectory or tool output it judged.

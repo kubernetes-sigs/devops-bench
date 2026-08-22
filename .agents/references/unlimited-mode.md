@@ -27,7 +27,11 @@ unsure, prefer recording over fixing.
   clean-environment pre-flight. No code change.
 - **Fix + retry** (config / auth / host setup — e.g. a missing API enablement,
   the Vertex ADC marker, the inotify limit, folder-trust): apply the router's
-  documented fix, then retry. These are environment fixes, not eval-logic edits.
+  documented fix, then retry. These are environment fixes, not eval-logic edits
+  — but most of them mutate **shared** host/project/global state that a
+  worktree does not isolate, so get operator approval (or pause sibling combos)
+  before applying one mid-matrix; apply unattended only when the fix is scoped
+  to this worktree/run.
 - **Escalate / stop** (a real **model-capability** low score — the agent ran a
   clean trajectory and just did the task badly — or a **task-logic / rubric bug**
   the loop can't safely edit): surface it as a distinct outcome. Do **not**
@@ -49,6 +53,11 @@ unsure, prefer recording over fixing.
 5. **Re-sync** (remote only) and **restart only the failed combo(s)** as fresh
    single-combo runs (new stamp), after cleaning their leaked cloud resources.
 6. **Continue** the monitoring loop over the remaining + restarted combos.
+   Restarted combos run on a changed revision/config — record the revision and
+   environment on every combo's attempts, and report post-fix attempts as a
+   **separate batch** from the original matrix (or rerun all affected combos);
+   never silently combine them, or the comparison misattributes the fix to the
+   model.
 
 Keep commits local and scoped; do not push or merge shared branches unless the
 operator said so — surface the branch/diff for review instead.

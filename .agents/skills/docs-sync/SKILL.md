@@ -50,7 +50,7 @@ and often need the same edit as the docs.
 | Chaos / verification (`devops_bench/chaos/`, `devops_bench/verification/`) | [`architecture.md`](../../../docs/components/architecture.md) + [`glossary.md`](../../../docs/components/glossary.md) |
 | Task schema / placeholders (`devops_bench/tasks/`, `tasks/`) | [`add-a-task.md`](../../../docs/how-to/add-a-task.md) + [`glossary.md`](../../../docs/components/glossary.md) + [`tasks/AGENTS.md`](../../../tasks/AGENTS.md) |
 | Bastion / matrix scripts (`scripts/bastion/`) | [`running-evals.md`](../../references/running-evals.md) + [`monitoring-and-recovery.md`](../../references/monitoring-and-recovery.md) |
-| Directory move / rename | the tree in [`glossary.md`](../../../docs/components/glossary.md) Part B + the relevant `AGENTS.md` |
+| Directory move / rename | the tree in [`glossary.md`](../../../docs/components/glossary.md) Part B + the relevant `AGENTS.md` + a repo-wide search for the old path (`rg '<old-path>'`) — a move leaves stale paths in any doc, reference, or example that mentioned it |
 
 A change can touch more than one row (e.g. a new CLI flag that exposes a new
 metric). Update every doc the change actually affects, and only those.
@@ -86,7 +86,9 @@ change set addresses:
 ### 6. Verify links + report
 
 Confirm every relative link you touched still resolves (open the target, or check
-the path exists). Then report: the change-set → doc map you applied, each file
+the path exists), and when a link carries a `#fragment`, confirm the target
+heading still exists — a path check alone won't catch a renamed heading. Then
+report: the change-set → doc map you applied, each file
 edited, and each known-issues row resolved **with the file/line that proves the
 fix**.
 
