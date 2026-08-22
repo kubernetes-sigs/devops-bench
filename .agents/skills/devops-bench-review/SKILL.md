@@ -90,6 +90,7 @@ or fails to fix it).
 
 Apply the lenses that fit the change. Most code wants Correctness, Testability, and
 Conventions; library/registry surfaces add API hygiene and Domain modeling.
+Changes under `.agents/` add Agent-facing docs.
 
 ### Correctness
 
@@ -198,6 +199,34 @@ interpolated into a shell string — validation does not make interpolation safe
 so an allowlist is an extra check rather than a substitute, and `shell=True`
 with untrusted input is always a finding; no path traversal from un-sanitized names. Flag a
 secret echoed into logs.
+
+### Agent-facing docs (skills, AGENTS.md, references)
+
+Apply when the diff touches `.agents/**` or any `AGENTS.md`. These files are
+instructions an agent executes — review them as interfaces, not prose:
+
+- **Audience.** Every sentence tells the executing agent what to do, how to do
+  it, or the context needed to do it. Flag design rationale, maintainer or
+  author asides, and a document narrating its own structure or history.
+- **Frontmatter is a pointer, paid on every load.** The description carries
+  invocation triggers, a one-line identity, and handoffs to sibling skills.
+  Flag body content restated there — rule lists, key names, counts that can
+  desync from the body. `name:` matches the directory.
+- **Single source of truth.** Flag restated config, code, or command output
+  the agent could read live or reach by pointer. A copy is justified only when
+  the lookup is expensive or the convention is unwritten — the gotcha, the why.
+- **Right-sized loading.** Material every run needs is inline; material only
+  some paths need sits behind a link. Flag sprawl: a long flat section thins
+  attention across the excess.
+- **Checkable completion.** Steps end on a bound the agent can test ("every
+  touched function's callers checked"). Flag vague bounds ("ensure quality") —
+  they invite stopping early.
+- **Positive instructions.** State the target behavior. Keep a prohibition
+  only as a hard guardrail, paired with what to do instead.
+- **No-ops.** Flag instructions the agent already follows by default ("be
+  careful", "be thorough") — they spend load and change nothing.
+- **Co-location.** One concept's definition, rules, and caveats live under one
+  heading. Flag a meaning fragmented across sections.
 
 ## Verify, then present
 
