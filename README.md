@@ -54,7 +54,7 @@ You need Python 3.12 or newer. The project uses [`uv`](https://docs.astral.sh/uv
 uv sync
 ```
 
-The default `dev` group includes the test/lint toolchain and every optional provider SDK (`anthropic`, `openai`). For a runtime-only install, pick just the extras you use, e.g. `uv sync --no-dev --extra anthropic`.
+The default `dev` group includes the test/lint toolchain and every optional provider SDK (`anthropic`, `openai`).
 
 ## Run your first eval
 
@@ -72,20 +72,7 @@ The results path is printed at the end of the run. The full walkthrough — prer
 
 ## Adding a benchmark task
 
-New tasks live under `tasks/<provider>/<name>/task.yaml`, each pairing a `chaos_spec` (what breaks) with a `verification_spec`/`expected_output` (how it's graded). The `tests/` directory is reserved for the Python codebase's own unit tests — it is not where benchmark task definitions go. The full schema, placeholders, and worked examples are in [docs/how-to/add-a-task.md](docs/how-to/add-a-task.md) — read that before you start.
-
-### Best practices for new tasks
-
-1. **Design realistic, focused failure modes in `chaos_spec`.**
-   - *Single root cause:* unless you're deliberately building an advanced multi-stage cascading scenario, each `chaos_spec` should model exactly one realistic failure or stress mechanism (a traffic spike, a pod kill, injected latency).
-   - *Clear parameters:* `qps`, `duration`, and disruption targets should reflect realistic production conditions without overwhelming the host running the eval.
-2. **Balance deterministic and LLM-as-judge evaluation.** Put every objective, concrete assertion — HTTP status, latency thresholds, error-rate ceilings, `kubectl get` readiness — in `verification_spec`. Use LLM-as-judge grading (via `expected_output` and the judge metrics) for things that need reasoning, like an agent's diagnostic summary or incident-triage notes. Combining hard state checks with judged reasoning gives a more reliable score than either alone.
-3. **Ensure cleanup.** Deployer and validation logic must leave the cluster/project clean so the next run starts fresh — see [Key considerations](docs/how-to/add-a-task.md#key-considerations) in the task how-to for why Terraform-native resources beat ad-hoc shell scripts here.
-4. **Use lightweight, fast-pulling manifests.** Use small base images (`alpine`, `busybox`, `nginx:alpine`) in your task manifests, and avoid depending on the open internet or third-party APIs during validation — stub or seed what you need inside the cluster instead.
-5. **Keep tasks organized and discoverable.** File each task under the provider directory that matches its deployer (`gcp`, `kind`, `noop`, or `common`), give it a globally unique `task_id`, and use a descriptive `name` — there's no formal difficulty/category field today, so naming and placement are how reviewers and other contributors scope a task at a glance.
-6. **Adhere to code quality and licensing standards.** Any Python helper or deployer module you add needs the Apache 2.0 header and explicit type hints on every function. Run `uv run ruff check --fix && uv run ruff format` before opening a PR.
-
-Before submitting, run the `task-review` skill over your task — see [the skills overview](docs/getting-started.md#skills-in-this-repo).
+New tasks live under `tasks/<provider>/<name>/task.yaml`, each pairing a `chaos_spec` (what breaks) with a `verification_spec`/`expected_output` (how it's graded). The full schema, placeholders, worked examples, and authoring best practices are in [docs/how-to/add-a-task.md](docs/how-to/add-a-task.md) — read that before you start. Before submitting, run the `task-review` skill over your task — see [the skills overview](docs/getting-started.md#skills-in-this-repo).
 
 ## Documentation
 
