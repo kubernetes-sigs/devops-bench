@@ -273,11 +273,9 @@ class AgyCliAgent(base.AgentHarness):
                 skills_enabled=bool(skill_names),
             )
             if settings:
-                settings_text = json.dumps(settings, indent=2)
-                # Write to both the dedicated antigravity-cli subfolder and the
-                # root gemini_dir so MCP servers/skills load across CLI version variants.
-                (agy_config_dir / "settings.json").write_text(settings_text, encoding="utf-8")
-                (gemini_dir / "settings.json").write_text(settings_text, encoding="utf-8")
+                (agy_config_dir / "settings.json").write_text(
+                    json.dumps(settings, indent=2), encoding="utf-8"
+                )
 
             # Copy (not symlink) the OAuth token into the workspace: agy may
             # refresh it in place during a run, and a symlink shared across
