@@ -4,6 +4,11 @@ A standardized benchmarking suite to evaluate how well different agents or model
 
 See the [project roadmap](roadmap.md) for current initiatives and how to get involved.
 
+## Documentation
+
+- [Getting started](docs/getting-started.md) — install, configure an agent and judge, and run a first task on a local kind cluster.
+- [Documentation index](docs/README.md) — how-to guides, component docs, known issues, and agent skills.
+
 ## Community, discussion, contribution, and support
 
 Learn how to engage with the Kubernetes community on the [community page](http://kubernetes.io/community/).
