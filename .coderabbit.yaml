@@ -39,6 +39,7 @@ reviews:
     - path: "tasks/**"
       instructions: |
         Focus on benchmarking task definition schema validity, clarity of task descriptions, reproducible setup/teardown steps, and evaluation completeness.
+        Task directory basenames must be globally unique across tasks/** (e.g. tasks/gcp/foo and tasks/kind/foo collide). The matrix runner derives run IDs, cluster names, and output directories from the task directory's basename — not from task_id — so duplicate basenames make distinct tasks share infrastructure identity. Flag any added or renamed task directory whose basename duplicates an existing task directory's.
 
     # TODO: Update paths to devops_bench/skills/** and .agents/skills/** when top-level skills are refactored
     - path: "skills/**"
