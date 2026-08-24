@@ -91,7 +91,12 @@ def _build_settings(mcp_servers: tuple[McpBinding, ...], *, skills_enabled: bool
     return settings
 
 
-def _build_argv(target: str, prompt: str, allowed_tools: tuple[str, ...]) -> list[str]:
+def _build_argv(
+    target: str,
+    prompt: str,
+    allowed_tools: tuple[str, ...],
+    extra_flags: tuple[str, ...] = (),
+) -> list[str]:
     """Build the ``gemini`` invocation for ``prompt``.
 
     ``--approval-mode yolo`` is always passed so the CLI auto-approves every tool
@@ -116,6 +121,7 @@ def _build_argv(target: str, prompt: str, allowed_tools: tuple[str, ...]) -> lis
         prompt: Task prompt.
         allowed_tools: Pre-approved tool names; each yields a separate
             ``--allowed-tools <name>`` pair (redundant under yolo).
+        extra_flags: Optional extra CLI flags to forward to the binary.
 
     Returns:
         The argv list ready to hand to ``core.subprocess.run``.
@@ -129,6 +135,8 @@ def _build_argv(target: str, prompt: str, allowed_tools: tuple[str, ...]) -> lis
         # `--extensions=` disables extensions; `-e=`/`-e=""` print help + exit 1
         # on gemini >= 0.47, and `-e none` loads an extension named "none".
         argv.append("--extensions=")
+    if extra_flags:
+        argv.extend(extra_flags)
     argv.extend(["-p", prompt])
     return argv
 
@@ -224,7 +232,7 @@ class GeminiCliAgent(AgentHarness):
         """
         caps = self.config.capabilities
         target = os.path.expanduser(self.config.target or "gemini")
-        argv = _build_argv(target, prompt, caps.allowed_tools)
+        argv = _build_argv(target, prompt, caps.allowed_tools, self.config.extra_flags)
         env_overlay = _build_env(self.config)
         rules_text = caps.rules.text
 

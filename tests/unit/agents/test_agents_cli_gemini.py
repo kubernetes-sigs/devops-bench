@@ -157,6 +157,19 @@ def test_build_argv_emits_one_allowed_tools_pair_per_tool() -> None:
     assert argv[argv.index("--approval-mode") + 1] == "yolo"
 
 
+def test_build_argv_forwards_extra_flags() -> None:
+    argv = _build_argv(
+        "/bin/gemini",
+        "hi",
+        (),
+        extra_flags=("--flag1", "--opt=val", "--custom"),
+    )
+    assert "--flag1" in argv
+    assert "--opt=val" in argv
+    assert "--custom" in argv
+    assert argv[-2:] == ["-p", "hi"]
+
+
 def test_build_env_threads_api_key_and_model_into_gemini_vars() -> None:
     cfg = AgentConfig(model="gemini-2.5-pro", api_key="abc", extra_env={"X": "y"})
     env = _build_env(cfg)
@@ -711,3 +724,17 @@ def test_execute_uses_distinct_cwd_per_run(monkeypatch: pytest.MonkeyPatch) -> N
     assert len(cwds) == 3
     assert all(c is not None for c in cwds)
     assert len(set(cwds)) == 3, f"cwds must be unique per run, got {cwds}"
+
+
+def test_execute_forwards_extra_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    cfg = AgentConfig(target="gemini", extra_flags=("--flag1", "--opt=val"))
+    GeminiCliAgent(cfg).run("p")
+    assert "--flag1" in captured["argv"]
+    assert "--opt=val" in captured["argv"]

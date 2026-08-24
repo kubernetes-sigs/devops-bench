@@ -274,6 +274,8 @@ class AgyCliAgent(base.AgentHarness):
             )
             if settings:
                 settings_text = json.dumps(settings, indent=2)
+                # Write to both the dedicated antigravity-cli subfolder and the
+                # root gemini_dir so MCP servers/skills load across CLI version variants.
                 (agy_config_dir / "settings.json").write_text(settings_text, encoding="utf-8")
                 (gemini_dir / "settings.json").write_text(settings_text, encoding="utf-8")
 

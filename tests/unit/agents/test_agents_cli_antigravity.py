@@ -802,15 +802,15 @@ def test_agy_cli_agent_forwards_extra_flags(
         target="/bin/agy",
         model="gemini-3.5-flash",
         capabilities=capabilities.AllCapabilities(),
-        extra_flags=("--is_google_internal", "--use_stubby_auth", "--custom-opt=123"),
+        extra_flags=("--flag1", "--opt=value", "--custom-opt=123"),
     )
     result = agy_mod.AgyCliAgent(config)._execute("run task")
 
     assert result.errors == []
     assert mock_run.called
     args = mock_run.call_args[0][0]
-    assert "--is_google_internal" in args
-    assert "--use_stubby_auth" in args
+    assert "--flag1" in args
+    assert "--opt=value" in args
     assert "--custom-opt=123" in args
 
 

@@ -251,6 +251,14 @@ def test_build_local_command_omits_model_flag_when_no_model_configured() -> None
     assert "models set" not in cmd
 
 
+def test_build_local_command_forwards_extra_flags() -> None:
+    cfg = AgentConfig(extra_flags=("--flag1", "--opt=val", "--quoted=hello world"))
+    cmd = _build_local_command(cfg, "prompt", "main", "/usr/local/bin/oc")
+    assert "--flag1" in cmd
+    assert "--opt=val" in cmd
+    assert "'--quoted=hello world'" in cmd
+
+
 def test_pick_session_key_handles_top_level_list() -> None:
     payload = json.dumps([{"key": "agent:operator:abc", "model": "x"}])
     assert _pick_session_key(payload) == "agent:operator:abc"

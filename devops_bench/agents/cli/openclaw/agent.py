@@ -367,13 +367,17 @@ def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_b
         ``core.subprocess.run``.
     """
     quoted_oc = shlex.quote(oc_bin)
+    extra_flags_str = (
+        " ".join(shlex.quote(f) for f in config.extra_flags) + " " if config.extra_flags else ""
+    )
     return (
         # Source nvm so the Node-based oc binary's runtime is available. An
         # inherited NVM_DIR (custom install path) wins over the default.
         'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; '
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
         f"{quoted_oc} --log-level debug agent --local "
-        f"--agent {shlex.quote(agent_name)} {_oc_model_flag(config)}-m {shlex.quote(prompt)}"
+        f"--agent {shlex.quote(agent_name)} {_oc_model_flag(config)}"
+        f"{extra_flags_str}-m {shlex.quote(prompt)}"
     )
 
 
