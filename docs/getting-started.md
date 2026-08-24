@@ -129,6 +129,11 @@ The repo ships **skills for coding agents** in `.agents/skills/` — you invoke 
 | `devops-bench-review` | Review a code change across correctness, testability, maintainability, API hygiene, domain modeling, conventions, and security. | Reviewing a code diff or PR. |
 | `task-review` | Review a benchmark task — schema, rubric quality, parallel-safety, infra config, leaks. | Vetting a new or changed task. |
 | `cleanup-orphaned-resources` | Find and remove cloud or local resources leaked by aborted runs. | Cleaning up after failures. |
+| `run-eval` | Run one Task × Model × AgentConfig eval end to end, local or on the bastion. | Kicking off a single eval run. |
+| `run-parallel-evals` | Run a Task × Model × AgentConfig matrix in parallel, with monitoring and retries. | Comparing models or configs, or running many evals at once. |
+| `validate-eval` | Run a newly authored eval in a fix-and-retry loop until it's green. | Vetting a new task before setting `validated: true`. |
+| `diagnose-eval-failure` | Explain why a model scored low — the judge's reasons and the agent's trajectory, lined up against the rubric. | Understanding a low score on a completed run. |
+| `docs-sync` | Map a code change to the docs that describe it and update them in place. | After changing code the docs describe. |
 
 ## Where to go next
 

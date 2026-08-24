@@ -37,7 +37,7 @@ A single run, end to end:
 | `claude` | Anthropic API, Vertex AI, or Bedrock. |
 | `ollama` | Local models. |
 
-**Infrastructure** — the OpenTofu deployer targets these cloud providers (set `INFRA_PROVIDER`, or the task's `provider:` key):
+**Infrastructure targets** — the OpenTofu deployer supports these targets (set `INFRA_PROVIDER`, or the task's `provider:` key):
 
 | Key | Target |
 | :-- | :-- |
