@@ -184,7 +184,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | `REMOTE_DIR` | Checkout dir on the VM (default `devops-bench`). Set a per-run value to avoid clobbering another session's checkout. |
 | `RESULTS_DIR` | Where pulled results land in remote mode (default `results/matrix`). |
 | `MCP_SERVER_BIN` | MCP server binary for `+mcp` combos (default `/usr/local/bin/gke-mcp`, where the bastion startup script installs it). |
-| `SKILLS_PATHS` | Skills source for `+skills` combos (default `$HOME/mcp-skills/skills`, cloned by `vm-setup.sh`). |
+| `SKILLS_PATHS` | Skills source for `+skills` combos (default `$HOME/mcp-skills/skills`, cloned by `vm-setup.sh`). Currently empty on a fresh bastion: upstream gke-mcp removed its `skills/` directory, so the clone yields no skills ([#117](https://github.com/kubernetes-sigs/devops-bench/issues/117)). |
 | `DRY_RUN` | Print the expanded matrix + per-combo env without provisioning. |
 | `RESUME_STAMP` | Skip launching; re-poll + pull an existing run by its stamp. |
 | `MATRIX_POLL_TIMEOUT_SEC` | Give up polling after this long (default `86400`); the detached run itself is unaffected. |
