@@ -42,7 +42,11 @@ doing it inline.
 
 Loads against the `Task` schema (validate by parsing, not by eye — typo'd keys are
 silently dropped). `task_id` is **globally unique** (`grep -rn '^task_id\|^id:'
-tasks/`). Required fields present: `task_id`, `name`, `prompt`, `expected_output`,
+tasks/`). The task's **directory basename is globally unique** across `tasks/**`
+(compare parent dir names of every `tasks/**/task.yaml`) — the matrix runner keys
+run IDs, cluster names, and output dirs on the folder name, not `task_id`, so
+`tasks/gcp/foo` and `tasks/kind/foo` collide even with distinct ids. Required
+fields present: `task_id`, `name`, `prompt`, `expected_output`,
 `infrastructure`. `infrastructure.deployer` is `tofu` or `noop` — **`noop` only for
 manifest-generation tasks** (no cluster). For `tofu`, `infrastructure.stack`
 resolves to an existing `tf/prebuilt/<dir>` (confirm the directory exists).
