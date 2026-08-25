@@ -36,7 +36,10 @@ dependencies = [
     "deepeval>=4.0.3",
     "google-genai>=2.8.0",
     "jsonpath-ng>=1.6",
-    "mcp>=1.27.1",
+    # Capped below 2: the MCP client surface the api harness imports
+    # (``mcp.client.session`` / ``mcp.client.stdio``) is free to change across a
+    # major, and an unpinned floor lets a routine ``uv sync`` pull one mid-run.
+    "mcp>=1.27.1,<2",
     "pydantic>=2.0",
     "ruamel.yaml>=0.18.0",
 ]
