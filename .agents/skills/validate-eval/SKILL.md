@@ -51,7 +51,7 @@ loop all live in shared references — read them, don't restate them:
 |---|---|---|
 | **Standard** | default | You drive the loop directly, one attempt at a time. |
 | **Hands-off** | "watch it", "don't stop", long runs | Resilient monitoring + keepalive — [monitoring-and-recovery.md](../../references/monitoring-and-recovery.md). |
-| **Unlimited / self-healing** | "keep going until green", "auto-fix and restart" | Diagnose → fix in a worktree → re-sync → restart, capped — [unlimited-mode.md](../../references/unlimited-mode.md). |
+| **Unlimited / self-healing** | "keep going until green", "auto-fix and restart" | Diagnose → fix in a worktree → re-sync → restart, bounded by the same attempt cap below — [unlimited-mode.md](../../references/unlimited-mode.md). |
 
 Resolve the mode up front; hands-off and unlimited are **explicit opt-in**.
 
@@ -98,11 +98,15 @@ action (the same decision tree as
   do **not** edit the task to inflate the score.
 
 Honor the **STOP conditions** from
-[unlimited-mode.md](../../references/unlimited-mode.md): goal met, attempt cap
-(≤2–3 fix/retry attempts), no-progress (same failure signature twice), or budget
-exhausted — each full-infra restart provisions and tears down a real cluster.
-Hands-off and unlimited behaviors are opt-in; without them, surface a persistent
-failure rather than looping.
+[unlimited-mode.md](../../references/unlimited-mode.md): goal met, the attempt
+cap, no-progress (same failure signature twice), or budget exhausted — each
+full-infra restart provisions and tears down a real cluster.
+
+**The attempt cap: at most 3 full-infra runs per combo, the initial run
+included** — so after the initial run, at most 2 fix/retry attempts. It applies
+in every mode, including unlimited/self-healing, which is unlimited in
+persistence, not in cluster spend. Hands-off and unlimited behaviors are
+opt-in; without them, surface a persistent failure rather than looping.
 
 ### 4. Confirm green + recommend `validated: true`
 
@@ -131,8 +135,9 @@ validation, not optional.
 - **Validate the task, not the model.** Never edit a task to make a weak model
   pass — a genuine miss is a valid result.
 - Each full-infra attempt provisions a real cluster (kind locally, a GKE
-  cluster for `tasks/gcp/*`) — `DRY_RUN=1` first, cap attempts (≤2–3), and
-  track budget. `deployer: noop` tasks skip infra entirely.
+  cluster for `tasks/gcp/*`) — `DRY_RUN=1` first, honor the attempt cap (3
+  full-infra runs per combo, initial included), and track budget.
+  `deployer: noop` tasks skip infra entirely.
 - Make all fixes in an **isolated worktree/branch**; keep commits scoped and
   local — surface the diff for review, don't push shared branches unless asked.
 - Never print or commit API keys; redact secrets in summaries.
