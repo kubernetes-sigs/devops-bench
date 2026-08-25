@@ -134,8 +134,8 @@ validation, not optional.
 
 - **Validate the task, not the model.** Never edit a task to make a weak model
   pass — a genuine miss is a valid result.
-- Each full-infra attempt provisions a real cluster (kind locally, a GKE
-  cluster for `tasks/gcp/*`) — `DRY_RUN=1` first, honor the attempt cap (3
+- Each full-infra attempt provisions a real cluster (locally with kind, or on
+  the task's cloud provider) — `DRY_RUN=1` first, honor the attempt cap (3
   full-infra runs per combo, initial included), and track budget.
   `deployer: noop` tasks skip infra entirely.
 - Make all fixes in an **isolated worktree/branch**; keep commits scoped and
