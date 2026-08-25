@@ -100,10 +100,13 @@ action (the same decision tree as
 Honor the **STOP conditions** from
 [unlimited-mode.md](../../references/unlimited-mode.md): goal met, the attempt
 cap, no-progress (same failure signature twice), or budget exhausted — each
-full-infra restart provisions and tears down a real cluster.
+full-infra restart provisions and tears down a real cluster, though a run can
+also fail before provisioning (e.g. at `tofu plan` from stale state); such a
+run still needs the clean pre-flight before the next attempt.
 
-**The attempt cap: at most 3 full-infra runs per combo, the initial run
-included** — so after the initial run, at most 2 fix/retry attempts. It applies
+**The attempt cap: at most 3 launched runs per combo, the initial run
+included** — so after the initial run, at most 2 fix/retry attempts. Every
+launched run counts, even one that failed before a cluster existed. It applies
 in every mode, including unlimited/self-healing, which is unlimited in
 persistence, not in cluster spend. Hands-off and unlimited behaviors are
 opt-in; without them, surface a persistent failure rather than looping.
@@ -136,7 +139,7 @@ validation, not optional.
   pass — a genuine miss is a valid result.
 - Each full-infra attempt provisions a real cluster (locally with kind, or on
   the task's cloud provider) — `DRY_RUN=1` first, honor the attempt cap (3
-  full-infra runs per combo, initial included), and track budget.
+  launched runs per combo, initial included), and track budget.
   `deployer: noop` tasks skip infra entirely.
 - Make all fixes in an **isolated worktree/branch**; keep commits scoped and
   local — surface the diff for review, don't push shared branches unless asked.
