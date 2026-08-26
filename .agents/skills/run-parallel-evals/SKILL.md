@@ -192,8 +192,8 @@ part of the run, not optional.
 - **Cluster-mutation blast radius (with-mcp + a broadly privileged SA).** When
   the runner's service account has broad rights, a cluster-aware MCP server
   (e.g. `gke-mcp` on the bastion) exposes every real cluster in the project as
-  a writable target — an agent can run `gcloud container clusters
-  update/upgrade` against a cluster the eval never provisioned, a long-running
+  a writable target — an agent can start a cluster update/upgrade through the
+  provider CLI against a cluster the eval never provisioned, a long-running
   op with no agent timeout, so the run **hangs** (no score) and may mutate an
   unrelated cluster. Mitigate: run in a project with **no other clusters**, or
   watch the logs for `clusters update|upgrade|delete` and kill the offending

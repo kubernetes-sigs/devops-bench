@@ -33,9 +33,8 @@ transports:
 - **Plain `ssh`/`scp`** — any VM you can reach directly. Set
   `BASTION_SSH_HOST` (and optionally `BASTION_SSH_USER`).
 - **Cloud tunnel CLI** — when `BASTION_SSH_HOST` is unset, the wrapper falls
-  back to the provider tunnel matching a VM provisioned by the repo's
-  `tf/modules/bastion` (that module targets GCP, so the tunnel is
-  `gcloud compute ssh --tunnel-through-iap`):
+  back to the tunneling CLI of the provider that the repo's
+  `tf/modules/bastion` module targets, matching the VM it provisions:
 
   ```bash
   export BASTION_VM=<your-vm> BASTION_ZONE=us-central1-a BASTION_PROJECT=<proj>
@@ -46,8 +45,8 @@ transports:
 > assume the defaults** (`bench-bastion` / `us-central1-a` / the CLI's active
 > project). The bastion is provisioned from `tf/modules/bastion`, which exports
 > an `iap_ssh_command` output — `tofu output iap_ssh_command` in the root
-> module where you instantiated it prints the exact
-> `gcloud compute ssh <name> --zone <zone> --project <project>` form. Set
+> module where you instantiated it prints the exact connect command with the
+> real name, zone, and project. Set
 > `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` from that, and verify the
 > host is up before blaming credentials for a connection failure. Use
 > `REMOTE_DIR=devops-bench-<label>` to avoid clobbering another session's
@@ -61,19 +60,16 @@ Pick one mode:
 
 - **Cloud IAM / instance-role credentials** — the runner host's ambient
   credentials; no key handling, and the only mode that stays portable across
-  the isolated per-run state dirs parallel runs create. The wrapper currently
-  implements this mode for Vertex via application-default credentials (ADC):
-  set `BENCH_VERTEX=1` and **no API keys**. The runner unsets
-  every API key `~/secrets.env` exported (`AGENT_API_KEY`, `GEMINI_API_KEY`,
-  `GOOGLE_API_KEY`, `JUDGE_API_KEY`, `GOOGLE_GENAI_API_KEY`) so agents and
-  judges fall back to the runner host's ADC (on the bastion, the VM service
-  account), then points everything at Vertex: `GOOGLE_GENAI_USE_VERTEXAI=true`,
-  `GOOGLE_CLOUD_PROJECT` / `GCP_PROJECT_ID`, and location **`global`** via
-  `GOOGLE_CLOUD_LOCATION` / `GCP_VERTEX_LOCATION`. It also exports the portable
-  OpenClaw ADC marker `GOOGLE_CLOUD_API_KEY=gcp-vertex-credentials` (see the
-  router in [known_issues.md](../../docs/appendix/known_issues.md)). For the
-  legacy oc arm additionally set `AGENT_PROVIDER=google-vertex` so the model id
-  becomes `google-vertex/<model>`.
+  the isolated per-run state dirs parallel runs create. Set `BENCH_VERTEX=1`
+  and **no API keys**: the runner unsets every API key `~/secrets.env`
+  exported so agents and judges fall back to the runner host's ambient
+  credentials (on the bastion, the VM's service account), then exports the
+  provider env the model backend needs — project, location (**`global`**), and
+  the portable ADC marker (see the router in
+  [known_issues.md](../../docs/appendix/known_issues.md)); the exact variable
+  names live in the wrapper. For the legacy oc arm additionally set
+  `AGENT_PROVIDER=google-vertex` so the model id becomes
+  `google-vertex/<model>`.
 - **API keys** — the runner sources `~/secrets.env` on the runner host when
   present (`set -a`, so plain assignments export). Put the keys your providers
   need there — `AGENT_API_KEY` for the agent contract, `GEMINI_API_KEY` /
@@ -85,10 +81,10 @@ Pick one mode:
 `JUDGE_MODEL=gemini-3.1-pro`. On Vertex, keep the location `global` and use a
 `-preview` model id — set `JUDGE_MODEL=gemini-3.1-pro-preview` — because
 `gemini-3.x` previews 404 on regional endpoints (see the `404 Publisher model`
-row in [known_issues.md](../../docs/appendix/known_issues.md)). Note the two
-location variables are read by different layers: `GCP_VERTEX_LOCATION` by the
-models layer (`devops_bench/models/gemini.py`, `models/claude.py`),
-`GOOGLE_CLOUD_LOCATION` by the antigravity agent.
+row in [known_issues.md](../../docs/appendix/known_issues.md)). Note the
+wrapper exports the location under two variables read by different layers:
+`GCP_VERTEX_LOCATION` by the models layer (`devops_bench/models/gemini.py`,
+`models/claude.py`), `GOOGLE_CLOUD_LOCATION` by the antigravity agent.
 
 ---
 
@@ -133,8 +129,8 @@ once with `scripts/bastion/configure-oc.sh`.
 without provisioning (and without requiring `PROJECT_ID`), so a typo in
 `MATRIX_MODELS` costs nothing instead of clusters.
 
-Example (Vertex, refactored arm; prefix `BENCH_REMOTE=1` + the `BASTION_*` env
-for remote):
+Example (ambient credentials, refactored arm; prefix `BENCH_REMOTE=1` + the
+`BASTION_*` env for remote):
 
 ```bash
 PROJECT_ID=<proj> BENCH_VERTEX=1 \
@@ -163,12 +159,12 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
   basename in one matrix — they would collide on run id, cluster name, and
   output dir.
 - **Per-run state** — `/tmp/devops-bench-runs/<RUN_ID>/` (override the root with
-  `BENCH_RUN_STATE_ROOT`): kubeconfig, gcloud config, tofu data dir.
+  `BENCH_RUN_STATE_ROOT`): kubeconfig, cloud CLI config, tofu data dir.
 - **Cluster name** — `<token>-<CLUSTER_NAME>`, where the token is `c` + 7 hex
   chars derived from the run id. Deterministic: **the same combo always maps to
   the same cluster name**, which is why two runs of the *same* combo must never
-  overlap. The GKE node SA is `gke-nodes-<slug:9>-<md5(cluster_name):6>`
-  (`tf/modules/cluster/gke/main.tf`).
+  overlap. The cluster module's node SA is
+  `gke-nodes-<slug:9>-<md5(cluster_name):6>` (`tf/modules/cluster/gke/main.tf`).
 
 ---
 
@@ -186,7 +182,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | `BENCH_VERTEX` | Run agents + judges on the runner host's ambient cloud credentials instead of API keys (currently implemented for Vertex/ADC). |
 | `BENCH_REMOTE` | Run on the bastion over ssh; unset runs every combo locally. |
 | `SKIP_SYNC` | Skip the working-tree sync to the bastion (after one real sync). |
-| `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` | Bastion identity for the cloud tunnel transport (GCP IAP; defaults: `bench-bastion` / `us-central1-a` / the CLI's active project). |
+| `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` | Bastion identity for the cloud tunnel transport (defaults: `bench-bastion` / `us-central1-a` / the CLI's active project). |
 | `BASTION_SSH_HOST` / `BASTION_SSH_USER` | Plain-ssh transport for any directly reachable VM (bypasses the cloud tunnel). |
 | `REMOTE_DIR` | Checkout dir on the VM (default `devops-bench`). Set a per-run value to avoid clobbering another session's checkout. |
 | `RESULTS_DIR` | Where pulled results land in remote mode (default `results/matrix`). |

@@ -61,7 +61,7 @@ clusters / `gke-nodes-*` SAs / secrets, use the
 
 Drive the wrapper with single-value `MATRIX_*`. It runs detached under `nohup`
 and prints a `STAMP` — record `RESUME_STAMP=<stamp>` in durable state; it is your
-handle for monitoring, retry, and re-attach. Example (Vertex; prefix
+handle for monitoring, retry, and re-attach. Example (ambient credentials; prefix
 `BENCH_REMOTE=1` + `BASTION_*` for remote):
 
 ```bash
@@ -120,7 +120,7 @@ the concrete fix — the
 
 ## Guardrails
 
-- One run still costs a real cluster (GKE, or kind on the runner host) plus tens
+- One run still costs a real cluster (cloud, or kind on the runner host) plus tens
   of minutes — confirm scale and `DRY_RUN=1` first.
 - Never print or commit API keys; redact secrets in summaries.
 - Never launch a second run of the **same** task+model+config concurrently —
