@@ -82,14 +82,18 @@ Monitor per [monitoring-and-recovery.md](../../references/monitoring-and-recover
 On each finished or flaked attempt, **classify the failure against the router** in
 [known_issues.md](../../../docs/appendix/known_issues.md) and take exactly one
 action (the same decision tree as
-[unlimited-mode.md](../../references/unlimited-mode.md)):
+[unlimited-mode.md](../../references/unlimited-mode.md)). **Every retry branch
+below starts with the clean pre-flight** (the "Before any retry" checklist in
+[known_issues.md](../../../docs/appendix/known_issues.md)) — whatever the
+failure class, a failed attempt can leave stale
+`/tmp/devops-bench-runs/<RUN_ID>` state or orphaned cloud resources behind:
 
-- **Retry** — infra flake or stale state (a Vertex `429` mid-trajectory, a
-  ~2-min failure at `tofu plan` from a prior run's leftover state): clean per
-  the checklist, re-run. No edit.
-- **Fix + retry** — config / auth / host setup (missing API enablement, Vertex
-  ADC marker, inotify limit, folder-trust): apply the router's documented fix,
-  then retry. Environment fix, not eval-logic.
+- **Retry** — infra flake or stale state (a model-provider `429`
+  mid-trajectory, a ~2-min failure at `tofu plan` from a prior run's leftover
+  state): re-run. No edit.
+- **Fix + retry** — config / auth / host setup (missing API enablement, the
+  ADC marker, the inotify limit, folder-trust): apply the router's documented
+  fix, then retry. Environment fix, not eval-logic.
 - **Fix the task + retry** — a real **task/stack/rubric bug** the validation
   surfaced (the thing you're here to catch): fix it in an **isolated worktree**
   scoped to that bug, then retry. Log the cycle in durable state.
@@ -147,7 +151,7 @@ validation, not optional.
 - Always confirm clean teardown — stale per-run state under
   `/tmp/devops-bench-runs/<RUN_ID>` makes the next "fresh" run fail instantly at
   `tofu plan`, and a failed teardown strands cloud resources (clusters,
-  `gke-nodes-*` SAs, Artifact Registry repos). The
+  per-run service accounts, container-registry repositories). The
   [`cleanup-orphaned-resources`](../cleanup-orphaned-resources/SKILL.md) skill
   walks the sweep.
 - **Hands-off run:** never emit a completion signal until the eval is terminal
