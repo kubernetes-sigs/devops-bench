@@ -67,9 +67,7 @@ Pick one mode:
   provider env the model backend needs — project, location (**`global`**), and
   the portable ADC marker (see the router in
   [known_issues.md](../../docs/appendix/known_issues.md)); the exact variable
-  names live in the wrapper. For the legacy oc arm additionally set
-  `AGENT_PROVIDER=google-vertex` so the model id becomes
-  `google-vertex/<model>`.
+  names live in the wrapper.
 - **API keys** — the runner sources `~/secrets.env` on the runner host when
   present (`set -a`, so plain assignments export). Put the keys your providers
   need there — `AGENT_API_KEY` for the agent contract, `GEMINI_API_KEY` /
@@ -108,7 +106,7 @@ skill rather than re-listing them inline.
 
 ## Launching (detached)
 
-`scripts/bastion/run_matrix.sh` (refactored arm: Task × Model × AgentConfig)
+`scripts/bastion/run_matrix.sh` (Task × Model × AgentConfig)
 runs the matrix **detached under `nohup`** (staged as
 `~/.matrix-runner-<stamp>.sh`, log at `~/matrix-runs/<stamp>.out`), polls for
 the `~/matrix-runs/<stamp>/.done` marker, and pulls results in remote mode. It
@@ -117,20 +115,12 @@ prints a `STAMP` (`<YYYYmmdd_HHMMSS>-<pid>`) on launch — record
 retry, and re-attach. If your poller dies the detached run keeps going —
 re-attach with `RESUME_STAMP=<stamp>` and the same command.
 
-`run_matrix_legacy.sh` (legacy arm: Task × Model, oc-only) shares the same
-wrapper mechanics, but drives the legacy evaluator entrypoint
-(`pkg/evaluator/evaluate.py`), which is **not part of this repository** — it
-only works if you place a legacy evaluator checkout at `pkg/` yourself
-(`sync-to-bastion.sh` ships that path when present and silently skips it
-otherwise). Its MCP/skills capabilities come from the global oc config, set
-once with `scripts/bastion/configure-oc.sh`.
-
 **Always `DRY_RUN=1` first** — it prints the expanded matrix + per-combo env
 without provisioning (and without requiring `PROJECT_ID`), so a typo in
 `MATRIX_MODELS` costs nothing instead of clusters.
 
-Example (ambient credentials, refactored arm; prefix `BENCH_REMOTE=1` + the
-`BASTION_*` env for remote):
+Example (ambient credentials; prefix `BENCH_REMOTE=1` + the `BASTION_*` env
+for remote):
 
 ```bash
 PROJECT_ID=<proj> BENCH_VERTEX=1 \
@@ -141,10 +131,6 @@ MATRIX_AGENT_CONFIGS="gcli+mcp+skills oc+mcp+skills" \
 RESULTS_DIR="results/<label>" \
   scripts/bastion/run_matrix.sh
 ```
-
-To run **both arms in parallel** (when you have the legacy evaluator on hand):
-sync once, then start each wrapper with `SKIP_SYNC=1` — the stamps carry the
-wrapper's PID, so parallel launches can't collide on state.
 
 ---
 
@@ -174,7 +160,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 |---|---|
 | `MATRIX_TASKS` | Space-separated `task.yaml` paths, or `ALL` to enumerate every task. Default `tasks/common/opa-remediation/task.yaml`. |
 | `MATRIX_MODELS` | Space-separated model ids. Default `gemini-3.1-pro`. |
-| `MATRIX_AGENT_CONFIGS` | Refactored arm only. Each `oc\|gcli` `[+mcp][+skills]` (e.g. `gcli+mcp+skills`). Default `oc+mcp+skills`. |
+| `MATRIX_AGENT_CONFIGS` | Each `oc\|gcli` `[+mcp][+skills]` (e.g. `gcli+mcp+skills`). Default `oc+mcp+skills`. |
 | `MAX_PARALLEL` | Max combos running at once (default `3`). Each combo is its own cluster — mind quota. |
 | `PROJECT_ID` | Cloud project for the run. **Required** unless `DRY_RUN=1`. |
 | `CLUSTER_NAME` | Base cluster name (default `eval`); per-run names are derived from it (see *Run identity*). |

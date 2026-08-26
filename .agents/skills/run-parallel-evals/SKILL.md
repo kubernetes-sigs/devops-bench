@@ -55,10 +55,6 @@ then pin the matrix axes — ask the operator for anything not given:
 (tens of minutes per infra-bearing combo) so the operator can confirm scale
 before you spend clusters. Then `DRY_RUN=1` to print the expanded matrix.
 
-(The legacy Task × Model arm, `run_matrix_legacy.sh`, requires a legacy
-evaluator checkout at `pkg/` that is not part of this repo — see
-[running-evals.md](../../references/running-evals.md).)
-
 ---
 
 ## Phase 2 — Cross-combo parallel-safety pre-flight
@@ -71,10 +67,6 @@ only as long as that isolation holds.
 - **Never run two of the *same* combo at once** — the run-id-derived cluster
   name is deterministic in the combo, so two identical runs would target the
   same cluster. Distinct combos are fine alongside each other.
-- **The legacy arm is oc-only by design** — its Gemini runner read trajectory
-  state from a shared per-user dir, which is not safe under concurrent runs
-  (see the header of `scripts/bastion/run_matrix_legacy.sh`). For parallel
-  gemini, use `run_matrix.sh`.
 - Pre-flight each selected task for per-run isolation gaps — parallel-safety is
   mandatory for tasks (`tasks/AGENTS.md`), and the
   [`task-review`](../task-review/SKILL.md) skill runs a thorough pass. The gaps

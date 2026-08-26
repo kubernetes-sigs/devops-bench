@@ -30,9 +30,7 @@ re-derive them here:**
   [running-evals.md](../../references/running-evals.md).
 - Pin exactly one **Task** (`task.yaml` path), one **Model**, and one
   **AgentConfig** (`oc|gcli` `[+mcp][+skills]`), driven through
-  `scripts/bastion/run_matrix.sh`. (The legacy arm, `run_matrix_legacy.sh`,
-  needs a legacy evaluator checkout that is not part of this repo — see
-  [running-evals.md](../../references/running-evals.md).)
+  `scripts/bastion/run_matrix.sh`.
 - Ask the operator for anything not given — don't guess on the dimensions that
   cost a cluster + time (budget roughly half an hour for an infra-bearing task).
 
