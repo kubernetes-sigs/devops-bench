@@ -160,7 +160,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 |---|---|
 | `MATRIX_TASKS` | Space-separated `task.yaml` paths, or `ALL` to enumerate every task. Default `tasks/common/opa-remediation/task.yaml`. |
 | `MATRIX_MODELS` | Space-separated model ids. Default `gemini-3.1-pro`. |
-| `MATRIX_AGENT_CONFIGS` | Each `oc\|gcli` `[+mcp][+skills]` (e.g. `gcli+mcp+skills`). Default `oc+mcp+skills`. |
+| `MATRIX_AGENT_CONFIGS` | Each `oc\|gcli` `[+mcp][+skills]`, where `oc` is the config token for the OpenClaw agent and `gcli` for the Gemini CLI agent (e.g. `gcli+mcp+skills`). Default `oc+mcp+skills`. |
 | `MAX_PARALLEL` | Max combos running at once (default `3`). Each combo is its own cluster — mind quota. |
 | `PROJECT_ID` | Cloud project for the run. **Required** unless `DRY_RUN=1`. |
 | `CLUSTER_NAME` | Base cluster name (default `eval`); per-run names are derived from it (see *Run identity*). |

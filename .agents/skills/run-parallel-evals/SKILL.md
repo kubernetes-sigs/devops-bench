@@ -48,7 +48,8 @@ then pin the matrix axes — ask the operator for anything not given:
 
 1. **`MATRIX_TASKS`** — space-separated `task.yaml` paths, or `ALL`.
 2. **`MATRIX_MODELS`** — space-separated model ids.
-3. **`MATRIX_AGENT_CONFIGS`** — each `oc|gcli` `[+mcp][+skills]`.
+3. **`MATRIX_AGENT_CONFIGS`** — each `oc|gcli` `[+mcp][+skills]` (`oc` =
+   OpenClaw, `gcli` = Gemini CLI).
 4. **`MAX_PARALLEL`** — combos running at once (default 3).
 
 **Combo count = tasks × models × configs.** State it plus the rough wall-clock

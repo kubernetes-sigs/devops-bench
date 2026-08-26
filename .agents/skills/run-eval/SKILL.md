@@ -29,8 +29,8 @@ re-derive them here:**
   (`BENCH_VERTEX=1`, no keys) or API keys — pick one. Both covered in
   [running-evals.md](../../references/running-evals.md).
 - Pin exactly one **Task** (`task.yaml` path), one **Model**, and one
-  **AgentConfig** (`oc|gcli` `[+mcp][+skills]`), driven through
-  `scripts/bastion/run_matrix.sh`.
+  **AgentConfig** (`oc|gcli` `[+mcp][+skills]`; `oc` = OpenClaw, `gcli` =
+  Gemini CLI), driven through `scripts/bastion/run_matrix.sh`.
 - Ask the operator for anything not given — don't guess on the dimensions that
   cost a cluster + time (budget roughly half an hour for an infra-bearing task).
 
