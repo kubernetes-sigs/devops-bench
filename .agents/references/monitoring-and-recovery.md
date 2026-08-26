@@ -29,7 +29,7 @@ Spend the cheapest tier that can do each job:
 | **Supervisor** | your main model | every ~3–5 min while active; longer when idle | Read the monitor digest, dispatch analyzers, decide retries, re-spawn dead watchers, keep the session alive. |
 
 Run the monitor/analyzer as **sub-agents that can shell out on the runner host**
-(local shell, or ssh/gcloud to the bastion in remote mode) when your harness has
+(local shell, or ssh/cloud tunnel CLI to the bastion in remote mode) when your harness has
 sub-agents; if it doesn't, do those checks inline yourself — the loop still works
 on one model. Give each watcher the connection env and the `RESUME_STAMP`, and
 have it **return a compact digest, not raw logs**, to keep the supervisor's

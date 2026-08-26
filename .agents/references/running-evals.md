@@ -21,27 +21,32 @@ file does not duplicate either.
 The matrix runs on the **runner host** — the machine where you invoke the
 wrapper. **Local is the default** (`nohup` on this host, no ssh/sync, outputs in
 `~/matrix-runs/<stamp>`). Set **`BENCH_REMOTE=1`** to sync the working tree to
-the **bastion** (a GCP VM, `tf/modules/bastion`) and run there over ssh, pulling
-results back. The snippets below show the bare command; in remote mode they run
-under the wrapper's ssh transport, so the same paths (`~/secrets.env`,
+the **bastion** — a remote runner VM, reachable over standard SSH or a cloud
+provider's tunneling CLI — and run there over ssh, pulling results back. The
+snippets below show the bare command; in remote mode they run under the
+wrapper's ssh transport, so the same paths (`~/secrets.env`,
 `~/matrix-runs/<stamp>`) live on the VM.
 
-**Bastion connection env (remote mode only).** By default the wrapper connects
-with `gcloud compute ssh --tunnel-through-iap`:
+**Bastion connection env (remote mode only).** The wrapper supports two
+transports:
 
-```bash
-export BASTION_VM=<your-vm> BASTION_ZONE=us-central1-a BASTION_PROJECT=<proj>
-```
+- **Plain `ssh`/`scp`** — any VM you can reach directly. Set
+  `BASTION_SSH_HOST` (and optionally `BASTION_SSH_USER`).
+- **Cloud tunnel CLI** — when `BASTION_SSH_HOST` is unset, the wrapper falls
+  back to the provider tunnel matching a VM provisioned by the repo's
+  `tf/modules/bastion` (that module targets GCP, so the tunnel is
+  `gcloud compute ssh --tunnel-through-iap`):
 
-Set `BASTION_SSH_HOST` (and optionally `BASTION_SSH_USER`) instead to use a
-plain `ssh`/`scp` transport, bypassing the IAP tunnel.
+  ```bash
+  export BASTION_VM=<your-vm> BASTION_ZONE=us-central1-a BASTION_PROJECT=<proj>
+  ```
 
 > [!IMPORTANT]
-> **Get the bastion's identity from Terraform — don't assume the defaults**
-> (`bench-bastion` / `us-central1-a` / gcloud's active project). The bastion is
-> provisioned from `tf/modules/bastion`, which exports an `iap_ssh_command`
-> output — `tofu output iap_ssh_command` in the root module where you
-> instantiated it prints the exact
+> **On the tunnel transport, get the bastion's identity from Terraform — don't
+> assume the defaults** (`bench-bastion` / `us-central1-a` / the CLI's active
+> project). The bastion is provisioned from `tf/modules/bastion`, which exports
+> an `iap_ssh_command` output — `tofu output iap_ssh_command` in the root
+> module where you instantiated it prints the exact
 > `gcloud compute ssh <name> --zone <zone> --project <project>` form. Set
 > `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` from that, and verify the
 > host is up before blaming credentials for a connection failure. Use
@@ -52,11 +57,13 @@ plain `ssh`/`scp` transport, bypassing the IAP tunnel.
 
 ## Authentication
 
-Pick one mode (recommend **Vertex/ADC** — no key handling, and the only mode
-that stays portable across the isolated per-run state dirs parallel runs
-create):
+Pick one mode:
 
-- **Vertex / ADC** — set `BENCH_VERTEX=1` and **no API keys**. The runner unsets
+- **Cloud IAM / instance-role credentials** — the runner host's ambient
+  credentials; no key handling, and the only mode that stays portable across
+  the isolated per-run state dirs parallel runs create. The wrapper currently
+  implements this mode for Vertex via application-default credentials (ADC):
+  set `BENCH_VERTEX=1` and **no API keys**. The runner unsets
   every API key `~/secrets.env` exported (`AGENT_API_KEY`, `GEMINI_API_KEY`,
   `GOOGLE_API_KEY`, `JUDGE_API_KEY`, `GOOGLE_GENAI_API_KEY`) so agents and
   judges fall back to the runner host's ADC (on the bastion, the VM service
@@ -176,11 +183,11 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | `PROJECT_ID` | Cloud project for the run. **Required** unless `DRY_RUN=1`. |
 | `CLUSTER_NAME` | Base cluster name (default `eval`); per-run names are derived from it (see *Run identity*). |
 | `AGENT_TIMEOUT_SEC` | Per-agent timeout (default `1200` in the matrix; the harness's own default of 600s is too low for infra-bearing tasks). |
-| `BENCH_VERTEX` | Run agents + judges on Vertex via the runner host's ADC (no API keys). |
+| `BENCH_VERTEX` | Run agents + judges on the runner host's ambient cloud credentials instead of API keys (currently implemented for Vertex/ADC). |
 | `BENCH_REMOTE` | Run on the bastion over ssh; unset runs every combo locally. |
 | `SKIP_SYNC` | Skip the working-tree sync to the bastion (after one real sync). |
-| `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` | Bastion identity for the IAP transport (defaults: `bench-bastion` / `us-central1-a` / gcloud's active project). |
-| `BASTION_SSH_HOST` / `BASTION_SSH_USER` | Direct-ssh transport, bypassing the IAP tunnel. |
+| `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` | Bastion identity for the cloud tunnel transport (GCP IAP; defaults: `bench-bastion` / `us-central1-a` / the CLI's active project). |
+| `BASTION_SSH_HOST` / `BASTION_SSH_USER` | Plain-ssh transport for any directly reachable VM (bypasses the cloud tunnel). |
 | `REMOTE_DIR` | Checkout dir on the VM (default `devops-bench`). Set a per-run value to avoid clobbering another session's checkout. |
 | `RESULTS_DIR` | Where pulled results land in remote mode (default `results/matrix`). |
 | `MCP_SERVER_BIN` | MCP server binary for `+mcp` combos (default `/usr/local/bin/gke-mcp`, where the bastion startup script installs it). |

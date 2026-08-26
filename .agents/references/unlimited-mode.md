@@ -22,11 +22,11 @@ Match the failure against the router in
 then take exactly one action. Fixing the wrong class corrupts the eval, so when
 unsure, prefer recording over fixing.
 
-- **Retry** (infra flake — e.g. Vertex `429 RESOURCE_EXHAUSTED`, a transient ssh
+- **Retry** (infra flake — e.g. a model-provider `429 RESOURCE_EXHAUSTED`, a transient ssh
   drop, a transient API/quota error): re-run the combo after the
   clean-environment pre-flight. No code change.
 - **Fix + retry** (config / auth / host setup — e.g. a missing API enablement,
-  the Vertex ADC marker, the inotify limit, folder-trust): apply the router's
+  the ADC marker, the inotify limit, folder-trust): apply the router's
   documented fix, then retry. These are environment fixes, not eval-logic edits
   — but most of them mutate **shared** host/project/global state that a
   worktree does not isolate, so get operator approval (or pause sibling combos)

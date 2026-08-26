@@ -25,8 +25,9 @@ re-derive them here:**
 ### 1. Choose where + how, then pin the one combo
 
 - **Local or bastion?** Local is the default; remote sets `BENCH_REMOTE=1` + the
-  `BASTION_*` connection env. **Auth:** prefer Vertex/ADC (`BENCH_VERTEX=1`, no
-  keys). Both covered in [running-evals.md](../../references/running-evals.md).
+  `BASTION_*` connection env. **Auth:** ambient cloud credentials
+  (`BENCH_VERTEX=1`, no keys) or API keys — pick one. Both covered in
+  [running-evals.md](../../references/running-evals.md).
 - Pin exactly one **Task** (`task.yaml` path), one **Model**, and one
   **AgentConfig** (`oc|gcli` `[+mcp][+skills]`), driven through
   `scripts/bastion/run_matrix.sh`. (The legacy arm, `run_matrix_legacy.sh`,
