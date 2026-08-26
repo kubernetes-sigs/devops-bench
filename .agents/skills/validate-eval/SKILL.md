@@ -100,7 +100,7 @@ action (the same decision tree as
 Honor the **STOP conditions** from
 [unlimited-mode.md](../../references/unlimited-mode.md): goal met, the attempt
 cap, no-progress (same failure signature twice), or budget exhausted — each
-full-infra restart provisions and tears down a real cluster, though a run can
+full-infra restart may provision and tear down a real cluster; a run can
 also fail before provisioning (e.g. at `tofu plan` from stale state); such a
 run still needs the clean pre-flight before the next attempt.
 
@@ -137,7 +137,7 @@ validation, not optional.
 
 - **Validate the task, not the model.** Never edit a task to make a weak model
   pass — a genuine miss is a valid result.
-- Each full-infra attempt provisions a real cluster (locally with kind, or on
+- Each full-infra attempt may provision a real cluster (locally with kind, or on
   the task's cloud provider) — `DRY_RUN=1` first, honor the attempt cap (3
   launched runs per combo, initial included), and track budget.
   `deployer: noop` tasks skip infra entirely.
