@@ -31,6 +31,7 @@ __all__ = [
     "get_resource",
     "port_forward",
     "rollout_status",
+    "run_pod",
     "wait",
 ]
 
@@ -75,12 +76,52 @@ def _selector_args(selector: str | None) -> list[str]:
     return ["-l", selector] if selector else []
 
 
-def _run_kubectl(argv: list[str], kubeconfig: KubeconfigSource, **kwargs: Any) -> CompletedProcess:
+def _context_args(context: str | None) -> list[str]:
+    return ["--context", context] if context else []
+
+
+def _insert_context_args(argv: list[str], context: str | None) -> list[str]:
+    """Return argv with context flags placed before any ``--`` separator.
+
+    Everything after a bare ``--`` belongs to the container command, not to
+    kubectl, so appending there would hand the flag to the workload instead of
+    configuring the target cluster.
+
+    Args:
+        argv: Full kubectl command and arguments.
+        context: Optional kubeconfig context to pin the call to.
+
+    Returns:
+        A new argv list with the context flags inserted before the first
+        bare ``--`` element, or appended to the end when there is none.
+    """
+    context_args = _context_args(context)
+    if not context_args:
+        return list(argv)
+    try:
+        split = argv.index("--")
+    except ValueError:
+        return [*argv, *context_args]
+    return [*argv[:split], *context_args, *argv[split:]]
+
+
+def _run_kubectl(
+    argv: list[str],
+    kubeconfig: KubeconfigSource,
+    *,
+    context: str | None = None,
+    **kwargs: Any,
+) -> CompletedProcess:
     """Run ``kubectl`` with the resolved kubeconfig overlaid on the environment.
 
     Args:
         argv: Full kubectl command and arguments, never a shell string.
         kubeconfig: Explicit path, a ``KubeconfigProvider``, or None.
+        context: Optional kubeconfig context to pin the call to (``--context``).
+            Pinning the file alone is not enough: a kubeconfig can carry
+            several contexts, or none selected as current, and an unpinned
+            context means the call silently reads whichever cluster the
+            ambient current-context happens to point at.
         **kwargs: Extra keyword arguments forwarded to ``core.subprocess.run``
             (e.g. ``timeout``).
 
@@ -92,7 +133,7 @@ def _run_kubectl(argv: list[str], kubeconfig: KubeconfigSource, **kwargs: Any) -
     """
     path = _resolve_kubeconfig(kubeconfig)
     extra_env = {"KUBECONFIG": path} if path else None
-    return run(argv, extra_env=extra_env, **kwargs)
+    return run(_insert_context_args(argv, context), extra_env=extra_env, **kwargs)
 
 
 def wait(
@@ -227,6 +268,69 @@ def rollout_status(
         *_namespace_args(namespace),
     ]
     return _run_kubectl(argv, kubeconfig)
+
+
+def run_pod(
+    name: str,
+    image: str,
+    command: list[str],
+    *,
+    namespace: str | None = None,
+    kubeconfig: KubeconfigSource = None,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
+    context: str | None = None,
+) -> str:
+    """Run a one-shot ephemeral pod and return its captured stdout.
+
+    Launches the pod with ``--rm -i --restart=Never`` so the pod is auto-deleted
+    after completion and ``kubectl`` attaches stdin, which is required to capture
+    the container's output. Cleanup depends on that ``kubectl`` process running
+    to completion, so a caller whose ``timeout`` kills it before the pod exits
+    should not assume the pod is gone. ``--command`` is required before the
+    ``--`` separator: without it, ``kubectl run`` treats the trailing argv as
+    args appended to the image's entrypoint rather than the container command,
+    so an image with its own entrypoint (e.g. ``curlimages/curl``, entrypoint
+    ``curl``) would run ``curl curl -s <url>`` instead of ``curl -s <url>``.
+
+    Args:
+        name: Pod name.
+        image: Container image to run.
+        command: Command and arguments passed after ``--`` to the container.
+        namespace: Optional namespace (``-n``).
+        kubeconfig: Kubeconfig path or context-like object.
+        timeout: Optional timeout in seconds forwarded to ``core.subprocess.run``.
+        env: Optional env vars injected into the container via ``--env=K=V``.
+        context: Optional kubeconfig context to pin the call to. A probe pod
+            has to run against the cluster under test, not whichever cluster
+            the ambient current-context happens to point at.
+
+    Returns:
+        The pod's captured stdout.
+
+    Raises:
+        SubprocessError: If kubectl exits non-zero or times out.
+    """
+    env_args = [f"--env={k}={v}" for k, v in (env or {}).items()]
+    argv = [
+        "kubectl",
+        "run",
+        name,
+        "--rm",
+        "-i",
+        "--restart=Never",
+        f"--image={image}",
+        *env_args,
+        *_namespace_args(namespace),
+        "--command",
+        "--",
+        *command,
+    ]
+    extra_kwargs: dict[str, Any] = {}
+    if timeout is not None:
+        extra_kwargs["timeout"] = timeout
+    completed = _run_kubectl(argv, kubeconfig, context=context, **extra_kwargs)
+    return completed.stdout
 
 
 @contextlib.contextmanager

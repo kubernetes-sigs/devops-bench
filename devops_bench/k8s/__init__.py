@@ -20,6 +20,7 @@ from devops_bench.k8s.kubectl import (
     get_resource,
     port_forward,
     rollout_status,
+    run_pod,
     wait,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "poll_until",
     "port_forward",
     "rollout_status",
+    "run_pod",
     "wait",
 ]
