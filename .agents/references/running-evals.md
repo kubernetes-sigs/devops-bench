@@ -37,13 +37,13 @@ transports:
   `tf/modules/bastion` module targets, matching the VM it provisions:
 
   ```bash
-  export BASTION_VM=<your-vm> BASTION_ZONE=us-central1-a BASTION_PROJECT=<proj>
+  export BASTION_VM=<your-vm> BASTION_ZONE=<zone> BASTION_PROJECT=<proj>
   ```
 
 > [!IMPORTANT]
 > **On the tunnel transport, get the bastion's identity from Terraform — don't
-> assume the defaults** (`bench-bastion` / `us-central1-a` / the CLI's active
-> project). The bastion is provisioned from `tf/modules/bastion`, which exports
+> assume the wrapper's built-in defaults.** The bastion is provisioned from
+> `tf/modules/bastion`, which exports
 > an `iap_ssh_command` output — `tofu output iap_ssh_command` in the root
 > module where you instantiated it prints the exact connect command with the
 > real name, zone, and project. Set
@@ -168,7 +168,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | `BENCH_VERTEX` | Run agents + judges on the runner host's ambient cloud credentials instead of API keys (currently implemented for Vertex/ADC). |
 | `BENCH_REMOTE` | Run on the bastion over ssh; unset runs every combo locally. |
 | `SKIP_SYNC` | Skip the working-tree sync to the bastion (after one real sync). |
-| `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` | Bastion identity for the cloud tunnel transport (defaults: `bench-bastion` / `us-central1-a` / the CLI's active project). |
+| `BASTION_VM` / `BASTION_ZONE` / `BASTION_PROJECT` | Bastion identity for the cloud tunnel transport. Don't rely on the wrapper's built-in defaults — set all three from the Terraform output (see *Choosing where to run*). |
 | `BASTION_SSH_HOST` / `BASTION_SSH_USER` | Plain-ssh transport for any directly reachable VM (bypasses the cloud tunnel). |
 | `REMOTE_DIR` | Checkout dir on the VM (default `devops-bench`). Set a per-run value to avoid clobbering another session's checkout. |
 | `RESULTS_DIR` | Where pulled results land in remote mode (default `results/matrix`). |
