@@ -76,13 +76,10 @@ Pick one mode:
   key rather than guessing.
 
 **Judge.** The wrapper defaults `JUDGE_PROVIDER=google` and
-`JUDGE_MODEL=gemini-3.1-pro`. On Vertex, keep the location `global` and use a
-`-preview` model id — set `JUDGE_MODEL=gemini-3.1-pro-preview` — because
-`gemini-3.x` previews 404 on regional endpoints (see the `404 Publisher model`
-row in [known_issues.md](../../docs/appendix/known_issues.md)). Note the
-wrapper exports the location under two variables read by different layers:
-`GCP_VERTEX_LOCATION` by the models layer (`devops_bench/models/gemini.py`,
-`models/claude.py`), `GOOGLE_CLOUD_LOCATION` by the antigravity agent.
+`JUDGE_MODEL=gemini-3.1-pro`. If judge calls return 404 or silently fail, work the
+`404 Publisher model` row in
+[known_issues.md](../../docs/appendix/known_issues.md) — it carries the full
+fix (the location and model-id requirements).
 
 ---
 
@@ -111,9 +108,11 @@ runs the matrix **detached under `nohup`** (staged as
 `~/.matrix-runner-<stamp>.sh`, log at `~/matrix-runs/<stamp>.out`), polls for
 the `~/matrix-runs/<stamp>/.done` marker, and pulls results in remote mode. It
 prints a `STAMP` (`<YYYYmmdd_HHMMSS>-<pid>`) on launch — record
-`RESUME_STAMP=<stamp>` in durable state; it is your handle for monitoring,
-retry, and re-attach. If your poller dies the detached run keeps going —
-re-attach with `RESUME_STAMP=<stamp>` and the same command.
+`RESUME_STAMP=<stamp>` in durable state; it is your handle for monitoring and
+re-attach. If your poller dies the detached run keeps going — re-attach with
+`RESUME_STAMP=<stamp>` and the same command. A **retry is a new launch**: run
+it *without* `RESUME_STAMP` (set, the wrapper attaches to the old run instead
+of launching), then record the new `STAMP` as the active attempt.
 
 **Always `DRY_RUN=1` first** — it prints the expanded matrix + per-combo env
 without provisioning (and without requiring `PROJECT_ID`), so a typo in

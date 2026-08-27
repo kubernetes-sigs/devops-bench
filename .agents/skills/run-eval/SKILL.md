@@ -59,7 +59,7 @@ clusters / `gke-nodes-*` SAs / secrets, use the
 
 Drive the wrapper with single-value `MATRIX_*`. It runs detached under `nohup`
 and prints a `STAMP` — record `RESUME_STAMP=<stamp>` in durable state; it is your
-handle for monitoring, retry, and re-attach. Example (ambient credentials; prefix
+handle for monitoring and re-attach. Example (ambient credentials; prefix
 `BENCH_REMOTE=1` + `BASTION_*` for remote):
 
 ```bash
@@ -88,8 +88,10 @@ watchers, follow
 
 Classify a flake vs a real failure against the router in
 [known_issues.md](../../../docs/appendix/known_issues.md): infra flake → clean +
-retry (cap 2); real failure (auth/config, low score, task-logic) → do not retry,
-analyze.
+retry (cap 2) — a retry is a **new launch**, so run it *without* `RESUME_STAMP`
+(set, the wrapper attaches to the failed run instead of launching) and record
+the new `STAMP` as the active attempt; real failure (auth/config, low score,
+task-logic) → do not retry, analyze.
 
 ### 6. Summarize + where to read scores
 
