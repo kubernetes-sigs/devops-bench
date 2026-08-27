@@ -30,7 +30,7 @@ Read these as the source of truth; don't reconstruct them from memory:
   Confirm what a run gets for free before asserting a collision is or isn't covered.
 
 Review-only: you **may** run schema/spec-parse checks and `uv run pytest`, from
-the project root; you must **not** run `tofu`/`gcloud`/`kind`/`kubectl` or
+the project root; you must **not** run `tofu`, cloud provider CLIs, `kind`, or `kubectl`, or
 launch an eval. Assess solvability, teardown, and parallel-safety by **reading**
 the stack and scripts — never by provisioning. If a capability is needed, consult
 [harness-capabilities](../../references/harness-capabilities.md) and degrade to
@@ -110,8 +110,8 @@ Flag any task/stack/prompt that pins one of these to a fixed value.
 4. **Node-SA names carry their own discriminator.** `tf/modules/cluster/gke`
    builds `account_id = "gke-nodes-<slug>-<md5(cluster_name)[:6]>"`, so two
    clusters whose names collide after slug truncation still get distinct service
-   accounts. This used to be a parallel-safety blocker for multi-cluster GKE
-   tasks and no longer is — do not flag it. A stack that names its own service
+   accounts. This used to be a parallel-safety blocker for multi-cluster
+   tasks on this deployer and no longer is — do not flag it. A stack that names its own service
    account without such a discriminator still should be flagged. The
    `409 gke-nodes-*` router row.
 5. **No per-task mutation of the shared VM service-account IAM.** A stack that
