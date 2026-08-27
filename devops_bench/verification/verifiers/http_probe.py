@@ -180,7 +180,11 @@ class HttpProbeVerifier(BaseVerifier):
                     {"curl_exit": curl_exit},
                 )
             _log.warning("http_probe kubectl run failed for %s: %s", self.url, stderr)
-            return "error", f"kubectl run failed: {stderr}", None
+            return (
+                "error",
+                f"kubectl run failed (exit {exc.returncode}): {stderr}",
+                {"kubectl_returncode": exc.returncode, "kubectl_stdout": exc.stdout},
+            )
         except Exception as exc:  # noqa: BLE001 - surface unexpected errors as check errors
             _log.warning("http_probe unexpected error for %s: %s", self.url, exc)
             return "error", f"unexpected error: {exc}", None
@@ -241,12 +245,17 @@ class HttpProbeVerifier(BaseVerifier):
         pod_timeout = self.probe_timeout + _KUBECTL_OVERHEAD_SEC
         if remaining is not None:
             pod_timeout = min(pod_timeout, remaining)
+        # kubeconfig and context are both pinned to the run's cluster: the
+        # ambient current-context is a mutable global any run can rewrite, and
+        # an in-cluster probe pod has to launch against the cluster under
+        # test, not whichever one happens to be ambient.
         output = run_pod(
             pod_name,
             "curlimages/curl",
             curl_cmd,
             namespace=self.namespace,
             kubeconfig=self.kubeconfig,
+            context=self.context,
             timeout=pod_timeout,
         ).rstrip()
 

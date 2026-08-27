@@ -76,12 +76,27 @@ def _selector_args(selector: str | None) -> list[str]:
     return ["-l", selector] if selector else []
 
 
-def _run_kubectl(argv: list[str], kubeconfig: KubeconfigSource, **kwargs: Any) -> CompletedProcess:
+def _context_args(context: str | None) -> list[str]:
+    return ["--context", context] if context else []
+
+
+def _run_kubectl(
+    argv: list[str],
+    kubeconfig: KubeconfigSource,
+    *,
+    context: str | None = None,
+    **kwargs: Any,
+) -> CompletedProcess:
     """Run ``kubectl`` with the resolved kubeconfig overlaid on the environment.
 
     Args:
         argv: Full kubectl command and arguments, never a shell string.
         kubeconfig: Explicit path, a ``KubeconfigProvider``, or None.
+        context: Optional kubeconfig context to pin the call to (``--context``).
+            Pinning the file alone is not enough: a kubeconfig can carry
+            several contexts, or none selected as current, and an unpinned
+            context means the call silently reads whichever cluster the
+            ambient current-context happens to point at.
         **kwargs: Extra keyword arguments forwarded to ``core.subprocess.run``
             (e.g. ``timeout``).
 
@@ -93,7 +108,7 @@ def _run_kubectl(argv: list[str], kubeconfig: KubeconfigSource, **kwargs: Any) -
     """
     path = _resolve_kubeconfig(kubeconfig)
     extra_env = {"KUBECONFIG": path} if path else None
-    return run(argv, extra_env=extra_env, **kwargs)
+    return run([*argv, *_context_args(context)], extra_env=extra_env, **kwargs)
 
 
 def wait(
@@ -239,6 +254,7 @@ def run_pod(
     kubeconfig: KubeconfigSource = None,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
+    context: str | None = None,
 ) -> str:
     """Run a one-shot ephemeral pod and return its captured stdout.
 
@@ -260,6 +276,9 @@ def run_pod(
         kubeconfig: Kubeconfig path or context-like object.
         timeout: Optional timeout in seconds forwarded to ``core.subprocess.run``.
         env: Optional env vars injected into the container via ``--env=K=V``.
+        context: Optional kubeconfig context to pin the call to. A probe pod
+            has to run against the cluster under test, not whichever cluster
+            the ambient current-context happens to point at.
 
     Returns:
         The pod's captured stdout.
@@ -285,7 +304,7 @@ def run_pod(
     extra_kwargs: dict[str, Any] = {}
     if timeout is not None:
         extra_kwargs["timeout"] = timeout
-    completed = _run_kubectl(argv, kubeconfig, **extra_kwargs)
+    completed = _run_kubectl(argv, kubeconfig, context=context, **extra_kwargs)
     return completed.stdout
 
 
