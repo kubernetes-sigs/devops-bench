@@ -239,6 +239,37 @@ def test_run_pod_builds_argv_and_returns_stdout(mocker: MockerFixture) -> None:
     assert mock_run.call_args.kwargs["timeout"] == 40
 
 
+def test_run_pod_threads_context_into_argv(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed(stdout=""))
+
+    kubectl.run_pod("p", "busybox", ["true"], context="kind-devops-bench-kind")
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "run",
+        "p",
+        "--rm",
+        "-i",
+        "--restart=Never",
+        "--image=busybox",
+        "--command",
+        "--",
+        "true",
+        "--context",
+        "kind-devops-bench-kind",
+    ]
+
+
+def test_run_pod_without_context_omits_context_flag(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed(stdout=""))
+
+    kubectl.run_pod("p", "busybox", ["true"])
+
+    argv = mock_run.call_args.args[0]
+    assert "--context" not in argv
+
+
 def test_run_pod_injects_env_args(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed(stdout=""))
 
