@@ -80,6 +80,31 @@ def _context_args(context: str | None) -> list[str]:
     return ["--context", context] if context else []
 
 
+def _insert_context_args(argv: list[str], context: str | None) -> list[str]:
+    """Return argv with context flags placed before any ``--`` separator.
+
+    Everything after a bare ``--`` belongs to the container command, not to
+    kubectl, so appending there would hand the flag to the workload instead of
+    configuring the target cluster.
+
+    Args:
+        argv: Full kubectl command and arguments.
+        context: Optional kubeconfig context to pin the call to.
+
+    Returns:
+        A new argv list with the context flags inserted before the first
+        bare ``--`` element, or appended to the end when there is none.
+    """
+    context_args = _context_args(context)
+    if not context_args:
+        return list(argv)
+    try:
+        split = argv.index("--")
+    except ValueError:
+        return [*argv, *context_args]
+    return [*argv[:split], *context_args, *argv[split:]]
+
+
 def _run_kubectl(
     argv: list[str],
     kubeconfig: KubeconfigSource,
@@ -108,7 +133,7 @@ def _run_kubectl(
     """
     path = _resolve_kubeconfig(kubeconfig)
     extra_env = {"KUBECONFIG": path} if path else None
-    return run([*argv, *_context_args(context)], extra_env=extra_env, **kwargs)
+    return run(_insert_context_args(argv, context), extra_env=extra_env, **kwargs)
 
 
 def wait(

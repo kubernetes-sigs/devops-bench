@@ -254,11 +254,20 @@ def test_run_pod_threads_context_into_argv(mocker: MockerFixture) -> None:
         "--restart=Never",
         "--image=busybox",
         "--command",
-        "--",
-        "true",
         "--context",
         "kind-devops-bench-kind",
+        "--",
+        "true",
     ]
+
+
+def test_run_pod_places_context_before_the_separator(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed(stdout=""))
+
+    kubectl.run_pod("p", "busybox", ["true"], context="kind-devops-bench-kind")
+
+    argv = mock_run.call_args.args[0]
+    assert argv.index("--context") < argv.index("--")
 
 
 def test_run_pod_without_context_omits_context_flag(mocker: MockerFixture) -> None:
