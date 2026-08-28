@@ -52,22 +52,23 @@ Work the **"Before any retry" checklist** in
 [`../../../docs/appendix/known_issues.md`](../../../docs/appendix/known_issues.md)
 before launching — stale per-run state and orphaned cloud resources are the top
 cause of a "fresh" run failing instantly. Keep it scoped to your run; for leaked
-clusters / `gke-nodes-*` SAs / secrets, use the
+clusters / node service accounts (e.g. `gke-nodes-*`) / secrets, use the
 [`cleanup-orphaned-resources`](../cleanup-orphaned-resources/SKILL.md) skill.
 
 ### 4. Launch the one combo (detached)
 
 Drive the wrapper with single-value `MATRIX_*`. It runs detached under `nohup`
 and prints a `STAMP` — record `RESUME_STAMP=<stamp>` in durable state; it is your
-handle for monitoring and re-attach. Example (ambient credentials; prefix
-`BENCH_REMOTE=1` + `BASTION_*` for remote):
+handle for monitoring and re-attach. Example (API keys from `~/secrets.env`,
+local runner; for ambient credentials add `BENCH_VERTEX=1`, and prefix
+`BENCH_REMOTE=1` + `BASTION_*` for remote — see
+[running-evals.md](../../references/running-evals.md) for both variants):
 
 ```bash
-PROJECT_ID=<proj> BENCH_VERTEX=1 \
-JUDGE_MODEL=gemini-3.1-pro-preview \
+PROJECT_ID=<proj> \
 MATRIX_TASKS="tasks/common/opa-remediation/task.yaml" \
-MATRIX_MODELS="gemini-3.1-pro-preview" \
-MATRIX_AGENT_CONFIGS="gcli+mcp+skills" \
+MATRIX_MODELS="<model-id>" \
+MATRIX_AGENT_CONFIGS="oc+mcp+skills" \
 RESULTS_DIR="results/<label>" \
   scripts/bastion/run_matrix.sh
 ```
@@ -126,7 +127,7 @@ the concrete fix — the
 - Never launch a second run of the **same** task+model+config concurrently —
   the run-id-derived cluster name is deterministic in the combo, so both runs
   would target the same cluster.
-- Always confirm clean teardown — a leftover cluster or `gke-nodes-*` SA from a
+- Always confirm clean teardown — a leftover cluster or node service account (e.g. `gke-nodes-*`) from a
   failed teardown makes a retry of the same combo fail with `409 already
   exists`.
 - Prefer leaving the run detached + re-attaching via `RESUME_STAMP` over a

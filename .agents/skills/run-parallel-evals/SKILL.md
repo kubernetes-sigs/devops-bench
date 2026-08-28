@@ -92,7 +92,7 @@ Work the **"Before any retry" checklist** in
 [known_issues.md](../../../docs/appendix/known_issues.md) before **every** launch —
 stale per-run state and orphaned cloud resources are the top cause of a "fresh"
 matrix failing instantly. Keep it scoped per run. For leaked clusters /
-`gke-nodes-*` SAs / secrets, use the
+node service accounts (e.g. `gke-nodes-*`) / secrets, use the
 [`cleanup-orphaned-resources`](../cleanup-orphaned-resources/SKILL.md) skill.
 
 **Smoke-gate before the full matrix.** Launch **one cheap combo first**
@@ -123,7 +123,9 @@ watcher and per-finish analysis to a mid tier.
 
 Classify each combo against the router in
 [known_issues.md](../../../docs/appendix/known_issues.md): **infra flake** → clean
-+ retry that one combo (cap 2 per combo; log every retry — never silently drop a
++ retry that one combo without `RESUME_STAMP` — set, the wrapper attaches to the
+failed run instead of launching — and record the new `STAMP` (cap 2 per combo;
+log every retry — never silently drop a
 combo); **real failure** (auth/config, low score, task-logic) → do not retry,
 analyze in Phase 5. If the whole runner died, re-attach with `RESUME_STAMP` then
 relaunch only the unfinished combos. For unlimited mode, a real task/code bug is
@@ -175,7 +177,7 @@ part of the run, not optional.
   the combo count and `DRY_RUN=1` first; mind project quota across
   `MAX_PARALLEL`.
 - Never print or commit API keys; redact secrets in summaries.
-- Always confirm clean teardown — leftover clusters / `gke-nodes-*` SAs make a
+- Always confirm clean teardown — leftover clusters / node service accounts (e.g. `gke-nodes-*`) make a
   retry of the same combo fail with `409 already exists`.
 - Cap retries (≤2/combo) and surface anything still failing rather than looping.
 - Prefer leaving the run detached + re-attaching via `RESUME_STAMP` over a fragile
@@ -184,10 +186,10 @@ part of the run, not optional.
   terminal **and** summarized; emit a periodic heartbeat instead.
 - **Cluster-mutation blast radius (with-mcp + a broadly privileged SA).** When
   the runner's service account has broad rights, a cluster-aware MCP server
-  (e.g. `gke-mcp` on the bastion) exposes every real cluster in the project as
+  (e.g. `k8s-mcp` or `gke-mcp` on the bastion) exposes every real cluster in the project as
   a writable target — an agent can start a cluster update/upgrade through the
   provider CLI against a cluster the eval never provisioned, a long-running
   op with no agent timeout, so the run **hangs** (no score) and may mutate an
   unrelated cluster. Mitigate: run in a project with **no other clusters**, or
-  watch the logs for `clusters update|upgrade|delete` and kill the offending
+  watch the logs for cluster mutation commands (e.g. `clusters update|upgrade|delete`) and kill the offending
   process. Don't auto-revert a change to a cluster you don't own.

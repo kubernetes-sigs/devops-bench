@@ -65,7 +65,7 @@ Pick one mode:
   exported so agents and judges fall back to the runner host's ambient
   credentials (on the bastion, the VM's service account), then exports the
   provider env the model backend needs — project, location (**`global`**), and
-  the portable ADC marker (see the router in
+  the portable ambient-credential marker (see the router in
   [known_issues.md](../../docs/appendix/known_issues.md)); the exact variable
   names live in the wrapper.
 - **API keys** — the runner sources `~/secrets.env` on the runner host when
@@ -76,8 +76,10 @@ Pick one mode:
   key rather than guessing.
 
 **Judge.** The wrapper defaults `JUDGE_PROVIDER=google` and
-`JUDGE_MODEL=gemini-3.1-pro`. If judge calls return 404 or silently fail, work the
-`404 Publisher model` row in
+`JUDGE_MODEL=gemini-3.1-pro`; on the ambient-credentials backend the default id
+must be overridden to its `-preview` variant
+(`JUDGE_MODEL=gemini-3.1-pro-preview`). If judge calls return 404 or silently
+fail, work the `404 Publisher model` row in
 [known_issues.md](../../docs/appendix/known_issues.md) — it carries the full
 fix (the location and model-id requirements).
 
@@ -94,8 +96,8 @@ concurrently on a shared host, so unscoped wipes (`rm -rf
 /tmp/devops-bench-runs/*`, deleting every kind cluster, a bare `pkill`) take out
 sibling runs.
 
-For orphaned **cloud** resources (clusters, `gke-nodes-*` service accounts,
-leaked secrets), use the
+For orphaned **cloud** resources (clusters, node service accounts (e.g.
+`gke-nodes-*`), leaked secrets), use the
 [`cleanup-orphaned-resources`](../skills/cleanup-orphaned-resources/SKILL.md)
 skill rather than re-listing them inline.
 
@@ -118,8 +120,21 @@ of launching), then record the new `STAMP` as the active attempt.
 without provisioning (and without requiring `PROJECT_ID`), so a typo in
 `MATRIX_MODELS` costs nothing instead of clusters.
 
-Example (ambient credentials; prefix `BENCH_REMOTE=1` + the `BASTION_*` env
-for remote):
+Example (vendor-neutral: API keys from `~/secrets.env`, local runner; the
+default task provisions on kind, so no cloud cluster is spent):
+
+```bash
+PROJECT_ID=<proj> \
+MAX_PARALLEL=3 MATRIX_TASKS="tasks/common/opa-remediation/task.yaml" \
+MATRIX_MODELS="<model-id> <model-id-2>" \
+MATRIX_AGENT_CONFIGS="oc+mcp+skills" \
+RESULTS_DIR="results/<label>" \
+  scripts/bastion/run_matrix.sh
+```
+
+Provider-specific example (ambient credentials on the Vertex model backend;
+other backends can be added analogously; prefix `BENCH_REMOTE=1` + the
+`BASTION_*` env for remote):
 
 ```bash
 PROJECT_ID=<proj> BENCH_VERTEX=1 \
@@ -148,7 +163,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 - **Cluster name** — `<token>-<CLUSTER_NAME>`, where the token is `c` + 7 hex
   chars derived from the run id. Deterministic: **the same combo always maps to
   the same cluster name**, which is why two runs of the *same* combo must never
-  overlap. The cluster module's node SA is
+  overlap. The cluster module names its node service account
   `gke-nodes-<slug:9>-<md5(cluster_name):6>` (`tf/modules/cluster/gke/main.tf`).
 
 ---
@@ -171,7 +186,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | `BASTION_SSH_HOST` / `BASTION_SSH_USER` | Plain-ssh transport for any directly reachable VM (bypasses the cloud tunnel). |
 | `REMOTE_DIR` | Checkout dir on the VM (default `devops-bench`). Set a per-run value to avoid clobbering another session's checkout. |
 | `RESULTS_DIR` | Where pulled results land in remote mode (default `results/matrix`). |
-| `MCP_SERVER_BIN` | MCP server binary for `+mcp` combos (default `/usr/local/bin/gke-mcp`, where the bastion startup script installs it). |
+| `MCP_SERVER_BIN` | Cluster-aware MCP server binary (e.g. `k8s-mcp`) for `+mcp` combos. Default `/usr/local/bin/gke-mcp` — the specific binary the bastion setup script installs. |
 | `SKILLS_PATHS` | Skills source for `+skills` combos (default `$HOME/mcp-skills/skills`, cloned by `vm-setup.sh`). Currently empty on a fresh bastion: upstream gke-mcp removed its `skills/` directory, so the clone yields no skills ([#117](https://github.com/kubernetes-sigs/devops-bench/issues/117)). |
 | `DRY_RUN` | Print the expanded matrix + per-combo env without provisioning. |
 | `RESUME_STAMP` | Skip launching; re-poll + pull an existing run by its stamp. |
