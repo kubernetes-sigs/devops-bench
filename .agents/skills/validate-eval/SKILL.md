@@ -23,7 +23,7 @@ clean. The loop fixes the *eval*, not the model.
 > score.** Before reading a low score as a model miss, assert the run's
 > `trajectory` is **non-empty** (and `tools` populated for tool-using tasks). An
 > empty trajectory on a task the agent clearly acted on is **INVALID** — a harness
-> capture failure (e.g. `oc sessions` exiting 127 because Node isn't on PATH), not
+> capture failure (e.g. the trajectory exporter exiting 127 because Node isn't on PATH), not
 > a model miss — and must be fixed and re-run, not recorded. See the empty-traj /
 > `exit 127` row in [`known_issues.md`](../../../docs/appendix/known_issues.md).
 
@@ -91,9 +91,9 @@ failure class, a failed attempt can leave stale
 - **Retry** — infra flake or stale state (a model-provider `429`
   mid-trajectory, a ~2-min failure at `tofu plan` from a prior run's leftover
   state): re-run. No edit.
-- **Fix + retry** — config / auth / host setup (missing API enablement, the
-  ADC marker, the inotify limit, folder-trust): apply the router's documented
-  fix, then retry. Environment fix, not eval-logic.
+- **Fix + retry** — config / auth / host setup (missing API enablement, auth
+  credential markers, inotify limits, workspace trust settings): apply the
+  router's documented fix, then retry. Environment fix, not eval-logic.
 - **Fix the task + retry** — a real **task/stack/rubric bug** the validation
   surfaced (the thing you're here to catch): fix it in an **isolated worktree**
   scoped to that bug, then retry. Log the cycle in durable state.
