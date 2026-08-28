@@ -134,7 +134,7 @@ Flags override the environment; anything you don't pass falls back to its env va
 | `--judge-model` | Override `JUDGE_MODEL`. |
 | `--no-infra` / `--infra` | Skip / force infrastructure provisioning. |
 | `--no-teardown` / `--teardown` | Skip / force teardown of provisioned infra. |
-| `--parallel` | Isolate this run (own kubeconfig / gcloud config / tofu data dir + run-unique cluster name) so it can run concurrently with others. |
+| `--parallel` | Isolate this run (own kubeconfig / cloud CLI config / tofu data dir + run-unique cluster name) so it can run concurrently with others. |
 | `--run-id` | Explicit run id for artifact naming (default: `RUN_ID` env or a generated id). Isolation comes from `--parallel`, not from setting a run id. |
 
 **Exit codes:**
@@ -247,8 +247,8 @@ Defaults live in `scripts/bastion/_matrix_lib.sh` and `run_matrix.sh`.
 | `DRY_RUN` | Print the expanded matrix + per-combo env without provisioning anything. |
 | `RESUME_STAMP` | Skip launching; re-poll and pull an existing run by its stamp. |
 | `RESULTS_DIR` | Where pulled results land on a remote run (default `results/matrix`). |
-| `MCP_SERVER_BIN` | MCP server command handed to `+mcp` combos as `AGENT_MCP_SERVER`. |
-| `SKILLS_PATHS` | Skills directories handed to `+skills` combos as `AGENT_SKILLS_PATHS`. |
+| `MCP_SERVER_BIN` | MCP server command handed to `+mcp` combos as `AGENT_MCP_SERVER` (e.g. `k8s-mcp`, or a provider-specific server such as `gke-mcp` when the cluster provider is GKE). |
+| `SKILLS_PATHS` | Skills directories handed to `+skills` combos as `AGENT_SKILLS_PATHS` (default: none — no skills are loaded unless set). |
 
 > [!TIP]
 > Always `DRY_RUN=1` first. It prints every combo and its per-combo env without
