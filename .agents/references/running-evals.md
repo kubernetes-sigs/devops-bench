@@ -186,8 +186,8 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | `BASTION_SSH_HOST` / `BASTION_SSH_USER` | Plain-ssh transport for any directly reachable VM (bypasses the cloud tunnel). |
 | `REMOTE_DIR` | Checkout dir on the VM (default `devops-bench`). Set a per-run value to avoid clobbering another session's checkout. |
 | `RESULTS_DIR` | Where pulled results land in remote mode (default `results/matrix`). |
-| `MCP_SERVER_BIN` | Cluster-aware MCP server binary (e.g. `k8s-mcp`) for `+mcp` combos. Default `/usr/local/bin/gke-mcp` — the specific binary the bastion setup script installs. |
-| `SKILLS_PATHS` | Skills source for `+skills` combos (default `$HOME/mcp-skills/skills`, cloned by `vm-setup.sh`). Currently empty on a fresh bastion: upstream gke-mcp removed its `skills/` directory, so the clone yields no skills ([#117](https://github.com/kubernetes-sigs/devops-bench/issues/117)). |
+| `MCP_SERVER_BIN` | Cluster-aware MCP server binary for `+mcp` combos (default: none — `+mcp` combos need it set; e.g. a provider-specific server such as `gke-mcp` when the cluster provider is GKE). |
+| `SKILLS_PATHS` | Skills directories for `+skills` combos (default: none — no skills are loaded unless set). |
 | `DRY_RUN` | Print the expanded matrix + per-combo env without provisioning. |
 | `RESUME_STAMP` | Skip launching; re-poll + pull an existing run by its stamp. |
 | `MATRIX_POLL_TIMEOUT_SEC` | Give up polling after this long (default `86400`); the detached run itself is unaffected. |

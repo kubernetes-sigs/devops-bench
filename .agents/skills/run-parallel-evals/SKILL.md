@@ -186,7 +186,7 @@ part of the run, not optional.
   terminal **and** summarized; emit a periodic heartbeat instead.
 - **Cluster-mutation blast radius (with-mcp + a broadly privileged SA).** When
   the runner's service account has broad rights, a cluster-aware MCP server
-  (e.g. `k8s-mcp` or `gke-mcp` on the bastion) exposes every real cluster in the project as
+  (e.g. `gke-mcp` when the cluster provider is GKE) exposes every real cluster in the project as
   a writable target — an agent can start a cluster update/upgrade through the
   provider CLI against a cluster the eval never provisioned, a long-running
   op with no agent timeout, so the run **hangs** (no score) and may mutate an
