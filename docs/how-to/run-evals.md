@@ -247,7 +247,7 @@ Defaults live in `scripts/bastion/_matrix_lib.sh` and `run_matrix.sh`.
 | `DRY_RUN` | Print the expanded matrix + per-combo env without provisioning anything. |
 | `RESUME_STAMP` | Skip launching; re-poll and pull an existing run by its stamp. |
 | `RESULTS_DIR` | Where pulled results land on a remote run (default `results/matrix`). |
-| `MCP_SERVER_BIN` | MCP server command handed to `+mcp` combos as `AGENT_MCP_SERVER` (e.g. `k8s-mcp`, or a provider-specific server such as `gke-mcp` when the cluster provider is GKE). |
+| `MCP_SERVER_BIN` | MCP server command handed to `+mcp` combos as `AGENT_MCP_SERVER` (default: none — `+mcp` combos need it set; e.g. a provider-specific server such as `gke-mcp` when the cluster provider is GKE). |
 | `SKILLS_PATHS` | Skills directories handed to `+skills` combos as `AGENT_SKILLS_PATHS` (default: none — no skills are loaded unless set). |
 
 > [!TIP]
