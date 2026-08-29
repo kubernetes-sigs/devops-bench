@@ -129,13 +129,51 @@ def test_client_selection_api_key(mocker: MockerFixture) -> None:
 
 def test_client_selection_vertex(mocker: MockerFixture) -> None:
     client_cls = mocker.patch.object(gemini.genai, "Client")
+    fake_creds = object()
+    mocker.patch.object(gemini.google_auth, "default", return_value=(fake_creds, "proj"))
     mocker.patch.dict(
         os.environ, {"GCP_PROJECT_ID": "proj", "GCP_VERTEX_LOCATION": "europe-west1"}, clear=True
     )
 
     GeminiClientAdapter()
 
-    client_cls.assert_called_once_with(vertexai=True, project="proj", location="europe-west1")
+    client_cls.assert_called_once_with(
+        vertexai=True, project="proj", location="europe-west1", credentials=fake_creds
+    )
+
+
+def test_vertex_client_resolves_adc_even_when_an_agent_api_key_is_in_the_environment(
+    mocker: MockerFixture,
+) -> None:
+    """Regression: the judge's Vertex client must never authenticate with the
+    agent's own API key.
+
+    google-genai's Vertex mode silently prefers API-key/express auth over ADC
+    whenever GOOGLE_API_KEY (or GEMINI_API_KEY) is present in the
+    environment. Those are exactly the variables exported for the sandboxed
+    coding agent this judge scores, so without explicit credentials the
+    judge's own Vertex calls would authenticate as the agent instead of
+    itself. Resolving ADC explicitly and handing it to the client closes
+    that path regardless of what the SDK would have inferred from the
+    environment on its own.
+    """
+    client_cls = mocker.patch.object(gemini.genai, "Client")
+    fake_creds = object()
+    mock_default = mocker.patch.object(
+        gemini.google_auth, "default", return_value=(fake_creds, "proj")
+    )
+    mocker.patch.dict(
+        os.environ,
+        {"GCP_PROJECT_ID": "proj", "GOOGLE_API_KEY": "agent-key-must-not-be-used"},
+        clear=True,
+    )
+
+    GeminiClientAdapter()
+
+    mock_default.assert_called_once()
+    client_cls.assert_called_once_with(
+        vertexai=True, project="proj", location="global", credentials=fake_creds
+    )
 
 
 def test_client_selection_default(mocker: MockerFixture) -> None:
@@ -150,13 +188,17 @@ def test_client_selection_default(mocker: MockerFixture) -> None:
 
 def test_backend_vertex_forces_vertex_even_with_api_key(mocker: MockerFixture) -> None:
     client_cls = mocker.patch.object(gemini.genai, "Client")
+    fake_creds = object()
+    mocker.patch.object(gemini.google_auth, "default", return_value=(fake_creds, "proj"))
     # An API key is present, but backend="vertex" (the google-vertex provider)
     # must still build the Vertex client — provider decides, not key presence.
     mocker.patch.dict(os.environ, {"AGENT_API_KEY": "k", "GCP_PROJECT_ID": "proj"}, clear=True)
 
     GeminiClientAdapter(backend="vertex")
 
-    client_cls.assert_called_once_with(vertexai=True, project="proj", location="global")
+    client_cls.assert_called_once_with(
+        vertexai=True, project="proj", location="global", credentials=fake_creds
+    )
 
 
 def test_backend_none_keeps_inference(mocker: MockerFixture) -> None:
@@ -386,6 +428,10 @@ def test_registered_in_models_registry() -> None:
 @pytest.mark.parametrize("provider", ["gemini", "google", "google-vertex", "google_vertex"])
 def test_get_model_resolves_gemini_aliases(mocker: MockerFixture, provider: str) -> None:
     mocker.patch.object(gemini.genai, "Client")
+    # The google-vertex/google_vertex aliases route through _vertex_client,
+    # which resolves ADC; mocked unconditionally here since it is a no-op for
+    # the other aliases, which never call it.
+    mocker.patch.object(gemini.google_auth, "default", return_value=(object(), "proj"))
     mocker.patch.dict(os.environ, {}, clear=True)
 
     client = get_model(provider=provider)
