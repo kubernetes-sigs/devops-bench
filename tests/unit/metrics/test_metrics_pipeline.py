@@ -677,6 +677,45 @@ def test_finalize_correctness_falls_back_to_outcome_validity() -> None:
     assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == 0.7
 
 
+def test_finalize_withholds_composite_when_verification_declared_but_errored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: an all-errored verification pass must not fall back to the judge.
+
+    ``VerificationCoverage`` is present (deterministic verification was
+    declared and attempted) but ``VerificationCorrectness`` never got emitted
+    (every entry errored). Previously this fell through to
+    ``OutcomeValidity``, letting a judge's 1.0 stand in for a totally broken
+    check; now no composite is written at all.
+    """
+    scores = {
+        "VerificationCoverage": {"score": 0.0, "success": False},
+        "OutcomeValidity": {"score": 1.0, "success": True},
+    }
+    with caplog.at_level("WARNING"):
+        pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert pipeline.OUTCOME_SCORE_KEY not in scores
+    assert "VerificationCoverage" in caplog.text
+
+
+def test_finalize_no_verification_declared_still_falls_back_to_judge() -> None:
+    """A task with no deterministic verification keeps the legitimate judged fallback."""
+    scores = {"OutcomeValidity": {"score": 0.9, "success": True}}
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == pytest.approx(0.9)
+
+
+def test_finalize_coverage_and_correctness_present_ignores_judge() -> None:
+    """Coverage plus a real correctness score composes from the deterministic value."""
+    scores = {
+        "VerificationCoverage": {"score": 1.0, "success": True},
+        "VerificationCorrectness": {"score": 1.0, "success": True},
+        "OutcomeValidity": {"score": 0.0, "success": False},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == pytest.approx(1.0)
+
+
 def test_finalize_skips_when_no_correctness_signal() -> None:
     # Failed / unscored record: no composite is written (outcomeScore stays null).
     scores = {"ToolInvocation": {"score": 0.5, "success": True}}

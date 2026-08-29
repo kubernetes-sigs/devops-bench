@@ -203,6 +203,32 @@ def test_run_context_without_cluster_omits_kubeconfig(mocker: MockerFixture) -> 
     assert mock_run.call_args.kwargs["extra_env"] is None
 
 
+def test_wait_threads_context_into_argv(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.wait("pod", timeout_sec=10, kubeconfig="/tmp/kc", context="kind-devops-bench-kind")
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "wait",
+        "--for=condition=Ready",
+        "pod",
+        "--timeout=10s",
+        "--context",
+        "kind-devops-bench-kind",
+    ]
+
+
+def test_wait_without_context_omits_context_flag(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.wait("pod", timeout_sec=10, kubeconfig="/tmp/kc")
+
+    argv = mock_run.call_args.args[0]
+    assert "--context" not in argv
+
+
 def test_get_resource_propagates_invalid_json(mocker: MockerFixture) -> None:
     mocker.patch(
         "devops_bench.k8s.kubectl.run",
