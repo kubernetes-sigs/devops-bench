@@ -19,6 +19,8 @@ The poll function and kubectl primitives are stubbed; no real cluster work.
 
 from __future__ import annotations
 
+import json
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -161,6 +163,32 @@ def test_get_resource_is_called_with_a_floored_timeout(
         ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=timeout_sec)
 
     assert mock_get.call_args.kwargs["timeout"] == expected_timeout
+
+
+def test_context_is_forwarded_into_kubectl_argv() -> None:
+    # Goes all the way down to the real ``devops_bench.k8s.kubectl.run`` seam
+    # (rather than stubbing ``get_resource``) so the wiring from the
+    # verifier's own ``context`` field through to the ``kubectl`` argv is
+    # actually exercised, not just the verifier's own kwargs.
+    deployment = {"status": {"readyReplicas": 3}}
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(deployment))
+    with patch("devops_bench.k8s.kubectl.run", return_value=completed) as mock_run:
+        ScalingCompleteVerifier(
+            deployment="web", min_replicas=1, context="kind-devops-bench-kind"
+        ).verify(timeout_sec=5)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[-2:] == ["--context", "kind-devops-bench-kind"]
+
+
+def test_no_context_omits_context_flag_from_kubectl_argv() -> None:
+    deployment = {"status": {"readyReplicas": 3}}
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(deployment))
+    with patch("devops_bench.k8s.kubectl.run", return_value=completed) as mock_run:
+        ScalingCompleteVerifier(deployment="web", min_replicas=1).verify(timeout_sec=5)
+
+    argv = mock_run.call_args.args[0]
+    assert "--context" not in argv
 
 
 def test_name_is_echoed_onto_result() -> None:

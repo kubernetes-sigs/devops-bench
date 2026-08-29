@@ -147,6 +147,50 @@ def test_apply_builds_argv(mocker: MockerFixture) -> None:
     assert argv == ["kubectl", "apply", "-f", "/manifests/app.yaml", "-n", "staging"]
 
 
+def test_can_i_builds_argv_and_never_checks(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run", return_value=_completed("no", returncode=1)
+    )
+
+    kubectl.can_i(
+        "delete",
+        "deployments",
+        subject="system:serviceaccount:apps:deployer",
+        namespace="apps",
+    )
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "auth",
+        "can-i",
+        "delete",
+        "deployments",
+        "-n",
+        "apps",
+        "--as",
+        "system:serviceaccount:apps:deployer",
+    ]
+    # A denied check exits 1 by design, not a command failure -- can_i must
+    # never raise on that, so it always calls run with check=False.
+    assert mock_run.call_args.kwargs["check"] is False
+
+
+def test_can_i_appends_resource_name(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed("yes"))
+
+    kubectl.can_i(
+        "get",
+        "secrets",
+        subject="system:serviceaccount:warehouse:inventory-sync",
+        name="inventory-sync-creds",
+        namespace="warehouse",
+    )
+
+    argv = mock_run.call_args.args[0]
+    assert "secrets/inventory-sync-creds" in argv
+
+
 def test_rollout_status_with_timeout(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
 
@@ -201,6 +245,32 @@ def test_run_context_without_cluster_omits_kubeconfig(mocker: MockerFixture) -> 
     kubectl.wait("pod", timeout_sec=10, kubeconfig=ctx)
 
     assert mock_run.call_args.kwargs["extra_env"] is None
+
+
+def test_wait_threads_context_into_argv(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.wait("pod", timeout_sec=10, kubeconfig="/tmp/kc", context="kind-devops-bench-kind")
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "wait",
+        "--for=condition=Ready",
+        "pod",
+        "--timeout=10s",
+        "--context",
+        "kind-devops-bench-kind",
+    ]
+
+
+def test_wait_without_context_omits_context_flag(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.wait("pod", timeout_sec=10, kubeconfig="/tmp/kc")
+
+    argv = mock_run.call_args.args[0]
+    assert "--context" not in argv
 
 
 def test_get_resource_propagates_invalid_json(mocker: MockerFixture) -> None:
