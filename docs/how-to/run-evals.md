@@ -162,11 +162,9 @@ flags win when both are set:
 | `BENCH_PARALLEL` | Enable per-run isolation when true. |
 | `RUN_ID` | Explicit run id for isolation / artifact naming. |
 
-Provider-specific variables (e.g. `GCP_PROJECT_ID`, `GCP_LOCATION`,
-`INFRA_PROVIDER`) are deliberately not read here — they are resolved by the
-provider and deployer layers directly (see
-[infrastructure](../components/infra.md)). The agent-side `AGENT_*` variables are
-covered in [agents](../components/agents.md).
+Provider- and agent-specific variables are resolved by their own layers, not
+here — see [infrastructure](../components/infra.md) and
+[agents](../components/agents.md).
 
 ---
 
@@ -200,9 +198,9 @@ By default everything runs **locally on this host**, with outputs under
 a remote runner VM ("bastion") over SSH, run there, and pull results back to
 `RESULTS_DIR/<stamp>`. The bastion tooling lives beside the wrapper:
 `scripts/bastion/sync-to-bastion.sh`, `scripts/bastion/vm-setup.sh`, and the
-`tf/modules/bastion` stack. These scripts currently target one cloud's tooling
-(`gcloud compute ssh` with IAP tunneling by default, or direct SSH via
-`BASTION_SSH_HOST` / `BASTION_SSH_USER`). On the runner host, per-provider
+`tf/modules/bastion` stack. The scripts reach the bastion over SSH
+(`BASTION_SSH_HOST` / `BASTION_SSH_USER` select the host and
+user). On the runner host, per-provider
 secrets are sourced from `~/secrets.env`; never print or commit key values.
 
 ### Example
@@ -241,7 +239,7 @@ Defaults live in `scripts/bastion/_matrix_lib.sh` and `run_matrix.sh`.
 | `PROJECT_ID` | Cloud project id; required unless `DRY_RUN`. |
 | `MAX_PARALLEL` | Max combos running at once (default 3). |
 | `AGENT_TIMEOUT_SEC` | Per-agent-call timeout. The matrix default is 1200s; the bare harness default is 600s (`devops_bench/agents/config.py`). |
-| `BENCH_VERTEX` | Unset every API key from `secrets.env` and export Vertex AI credentials via the runner host's ambient (ADC) credentials. Provider selection is unchanged — `AGENT_PROVIDER` / `JUDGE_PROVIDER` still choose the providers. |
+| `BENCH_VERTEX` | Unset every API key from `secrets.env` and export Vertex AI credentials via the runner host's ambient credentials. Provider selection is unchanged — `AGENT_PROVIDER` / `JUDGE_PROVIDER` still choose the providers. |
 | `BENCH_REMOTE` | Run on the bastion over SSH; unset runs every combo locally on this host. |
 | `SKIP_SYNC` | Skip the working-tree sync to the bastion (after you've already synced once). |
 | `DRY_RUN` | Print the expanded matrix + per-combo env without provisioning anything. |
