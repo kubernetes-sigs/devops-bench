@@ -33,8 +33,14 @@ import pytest
 from devops_bench.chaos import ChaosResult, ChaosSpec
 from devops_bench.chaos.faults.generate_load import GenerateLoadFault
 from devops_bench.chaos.triggers.time_delay import TimeTrigger
+from devops_bench.core import ConfigError
 from devops_bench.core.context import RunContext
-from devops_bench.evalharness.scenario import ScenarioManager, pick_free_port
+from devops_bench.evalharness.scenario import (
+    VERIFICATION_TIMEOUT_SEC,
+    ScenarioManager,
+    _positive_int_env,
+    pick_free_port,
+)
 from devops_bench.verification import VerificationResult, VerifierAgent
 from devops_bench.verification.base import VERIFIERS, BaseVerifier
 from devops_bench.verification.spec import parse_entries
@@ -242,7 +248,7 @@ def test_scenario_resolves_verify_against_mapping() -> None:
     # ``check`` node) flowed straight to the VerifierAgent: the lookup is O(1),
     # never imports verification on the chaos side, and the entry's resolved
     # mode (converge vs assert) governs the check.
-    mock_run_entry.assert_called_once_with(verification_entry, timeout_sec=120)
+    mock_run_entry.assert_called_once_with(verification_entry, timeout_sec=VERIFICATION_TIMEOUT_SEC)
 
     chaos_report, perf_report = manager.get_reports()
     assert chaos_report["verification"]["success"] is True
@@ -626,6 +632,41 @@ def test_scenario_skips_lb_resolution_for_local_cluster() -> None:
     assert _ENV_SKIP_PORT_FORWARD not in captured["env"]
     assert captured["env"][_ENV_TARGET_DEPLOYMENT] == "dep"
     assert captured["env"][_ENV_TARGET_NAMESPACE] == "ns"
+
+
+def test_positive_int_env_parses_valid_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BENCH_VERIFY_TIMEOUT_SEC", "45")
+    assert _positive_int_env("BENCH_VERIFY_TIMEOUT_SEC", 120) == 45
+
+
+def test_positive_int_env_unset_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BENCH_VERIFY_TIMEOUT_SEC", raising=False)
+    assert _positive_int_env("BENCH_VERIFY_TIMEOUT_SEC", 120) == 120
+
+
+def test_positive_int_env_unset_falls_back_to_default_for_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BENCH_VERIFY_TOTAL_BUDGET_SEC", raising=False)
+    assert _positive_int_env("BENCH_VERIFY_TOTAL_BUDGET_SEC", 600) == 600
+
+
+def test_positive_int_env_non_numeric_raises_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BENCH_VERIFY_TIMEOUT_SEC", "not-a-number")
+    with pytest.raises(ConfigError, match="BENCH_VERIFY_TIMEOUT_SEC"):
+        _positive_int_env("BENCH_VERIFY_TIMEOUT_SEC", 120)
+
+
+def test_positive_int_env_zero_raises_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BENCH_VERIFY_TOTAL_BUDGET_SEC", "0")
+    with pytest.raises(ConfigError, match="BENCH_VERIFY_TOTAL_BUDGET_SEC"):
+        _positive_int_env("BENCH_VERIFY_TOTAL_BUDGET_SEC", 600)
+
+
+def test_positive_int_env_negative_raises_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BENCH_VERIFY_TIMEOUT_SEC", "-5")
+    with pytest.raises(ConfigError, match="BENCH_VERIFY_TIMEOUT_SEC"):
+        _positive_int_env("BENCH_VERIFY_TIMEOUT_SEC", 120)
 
 
 @pytest.fixture(autouse=True)
