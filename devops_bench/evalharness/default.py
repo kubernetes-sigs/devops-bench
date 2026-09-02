@@ -75,6 +75,7 @@ _BUILTIN_AGENT_MODULES: tuple[str, ...] = (
     "devops_bench.agents.cli.openclaw",
     "devops_bench.agents.cli.antigravity",
     "devops_bench.agents.api.agent",
+    "devops_bench.agents.adk.agent",
 )
 
 # Aliases normalized to canonical agent keys before registry lookup.

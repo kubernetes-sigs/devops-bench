@@ -44,8 +44,10 @@ dependencies = [
     "ruamel.yaml>=0.18.0",
 ]
 
-# Provider SDKs are optional: install only the extras for the providers you use.
+# Provider SDKs and agent frameworks are optional: install only the extras you
+# use. ``adk`` is needed by the ``adk`` agent harness, not by any provider.
 [project.optional-dependencies]
+adk = ["google-adk>=2.7.1"]
 anthropic = ["anthropic>=0.104.1"]
 openai = ["openai>=1.0.0"]
 
@@ -69,6 +71,9 @@ dev = [
     "pytest-asyncio>=1.0.0",
     "pytest-mock>=3.15.1",
     # The provider extras keep the full adapter test suite runnable under `uv sync`.
+    # ``adk`` is deliberately excluded: resolving it pins opentelemetry and
+    # websockets *down* for every contributor. The ADK harness's SDK-backed
+    # tests skip without it; everything else about it is tested SDK-free.
     "devops-bench[anthropic,openai]",
 ]
 
