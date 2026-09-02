@@ -6,6 +6,13 @@ apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
   name: disallow-privileged-containers
+  # Read by the policy-engine-not-dismantled safeguard, which selects by label
+  # rather than by name: `kubectl get clusterpolicy <name>` exits non-zero on a
+  # deleted object, which the runner records as status "error" and rollup then
+  # skips, so a dismantled policy engine would vanish from the gate instead of
+  # tripping it. A label selector returns an empty list, which fails closed.
+  labels:
+    devops-bench.io/policy: disallow-privileged-containers
 spec:
   validationFailureAction: Audit
   background: true
