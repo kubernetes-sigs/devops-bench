@@ -237,13 +237,44 @@ def _build_model_override(config: AgentConfig) -> dict:
     }
 
 
+# The bench always launches openclaw as ``oc agent --local``, which is embedded
+# mode with no gateway (see :func:`_build_local_command`). ``sessions_spawn``
+# hands work off to a subagent whose completion is normally reported back by
+# the gateway; without one, the spawn call still reports success, but the
+# ``sessions_yield`` call that awaits the result waits on an event the gateway
+# never sends. The one-shot process then exits with no work done and the run
+# scores 0.0. Denying both tools keeps the model doing the work itself in its
+# own turn instead of delegating into a dead end.
+_DENIED_TOOLS: tuple[str, ...] = ("sessions_spawn", "sessions_yield")
+
+
+def _code_mode_enabled() -> bool:
+    """Read ``BENCH_OPENCLAW_CODE_MODE``, defaulting to shell mode (False).
+
+    Parsed permissively: ``"1"``/``"true"``/``"yes"`` (any case) are truthy,
+    anything else, including an unset env var, is False.
+    """
+    raw = os.environ.get("BENCH_OPENCLAW_CODE_MODE", "")
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
+def _plugin_paths() -> list[str]:
+    """Read ``BENCH_OPENCLAW_PLUGIN_PATHS``, an os.pathsep-separated list.
+
+    Empty when unset or blank. Each entry is stripped; empty entries are
+    dropped.
+    """
+    raw = os.environ.get("BENCH_OPENCLAW_PLUGIN_PATHS", "")
+    return [p.strip() for p in raw.split(os.pathsep) if p.strip()]
+
+
 def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, ...]) -> dict:
     """Assemble the isolated ``openclaw.json`` payload for a run.
 
-    Merges the two per-run config concerns the harness owns: command-bearing MCP
-    bindings (``mcp.servers``) and a catalog entry for a model openclaw doesn't
-    ship by default (``models``/``agents``; see :func:`_build_model_override`).
-    Their key spaces are disjoint, so either, both, or neither may be present.
+    Merges the per-run config concerns the harness owns: command-bearing MCP
+    bindings (``mcp.servers``), a catalog entry for a model openclaw doesn't
+    ship by default (``models``/``agents``; see :func:`_build_model_override`),
+    and the ``exec`` tool's shell/code mode (``tools.codeMode``).
 
     Args:
         config: Resolved :class:`AgentConfig` (drives the model-catalog entry).
@@ -251,13 +282,16 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
             bindings are skipped by :func:`build_mcp_servers`).
 
     Returns:
-        A config mapping, or an empty dict when there is neither a launchable MCP
-        binding nor a model needing a catalog entry (caller then skips the config
-        write and leaves ``OPENCLAW_CONFIG_PATH`` unset).
+        A config mapping. ``tools.codeMode`` is always present, so the payload
+        is never empty and the caller always writes ``openclaw.json``.
 
     Each MCP server entry inherits the run's ``KUBECONFIG`` (set by ``RunEnv``) as
     an explicit ``env`` so the MCP server (e.g. gke-mcp) reads the run-scoped
     cluster credentials directly instead of forcing the agent to re-fetch them.
+
+    ``tools.codeMode`` defaults to False (shell mode) so the ``exec`` tool takes
+    a plain shell command instead of JavaScript run in openclaw's code-mode
+    sandbox. Overridable with ``BENCH_OPENCLAW_CODE_MODE``.
     """
     payload: dict = {}
     servers = build_mcp_servers(mcp_servers)
@@ -268,6 +302,40 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
                 entry.setdefault("env", {})["KUBECONFIG"] = kubeconfig
         payload["mcp"] = {"servers": servers}
     payload.update(_build_model_override(config))
+    # Derive the runtime provider from the model id oc actually receives:
+    # oc's implicit codex routing keys off that id, so a full "openai/..."
+    # model with no explicit config.provider would otherwise resolve to the
+    # default provider and skip the pin below.
+    model_provider, _, _ = _oc_model_id(config).partition("/")
+    oc_provider = model_provider or resolve_provider(config.provider).oc_provider
+    if oc_provider == "openai":
+        # openclaw implicitly routes OpenAI "dual route" model ids (e.g.
+        # gpt-5.6-sol) to the "codex" agent harness runtime, which ships as a
+        # separate plugin not registered on the fleet image, so the run dies at
+        # startup. openclaw checks a configured agentRuntime.id before that
+        # implicit routing logic and short-circuits, so pinning it here to the
+        # built-in "openclaw" runtime avoids codex entirely.
+        providers = payload.setdefault("models", {}).setdefault("providers", {})
+        providers.setdefault(oc_provider, {})["agentRuntime"] = {"id": "openclaw"}
+    payload["tools"] = {
+        "codeMode": _code_mode_enabled(),
+        "deny": list(_DENIED_TOOLS),
+    }
+    # openclaw 2026.8.x ships a memory subsystem that is ON by default. It has
+    # no place in a benchmark run for two reasons. It embeds every transcript
+    # through an OpenAI embeddings call, adding an outbound dependency (and
+    # spend) on a provider the run never selected and that the sandbox does not
+    # expect; and `rememberAcrossConversations` defaults on, so a second run of
+    # the same task can recall the first one's transcript and score on recall
+    # rather than on the cluster. Disabling the master toggle makes each run
+    # stateless, which is the only defensible baseline for scoring.
+    payload["memory"] = {"search": {"enabled": False}}
+    # openclaw only discovers plugins bundled in its own dist/extensions or
+    # named in plugins.load.paths, so an externally installed provider
+    # package (e.g. anthropic-vertex) has to be named explicitly here.
+    plugin_paths = _plugin_paths()
+    if plugin_paths:
+        payload["plugins"] = {"load": {"paths": plugin_paths}}
     return payload
 
 
