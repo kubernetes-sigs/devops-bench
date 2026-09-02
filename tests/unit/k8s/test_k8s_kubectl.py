@@ -322,3 +322,39 @@ def test_port_forward_abandons_process_that_survives_sigkill(mocker: MockerFixtu
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
     assert proc.wait.call_count == 2
+
+
+# kubectl renders a server error with one of two templates depending on whether
+# the returned Status carries a reason, so both have to read as NotFound while
+# every other stderr keeps erroring.
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        # Reason set: the common rendering.
+        ('Error from server (NotFound): namespaces "hello-app" not found', True),
+        ('Error from server (NotFound): deployments.apps "web" not found', True),
+        ("Error from server (NotFound): the server could not find the requested resource", True),
+        # Reason empty: kubectl drops the parenthesised code entirely.
+        ('Error from server: namespaces "hello-app" not found', True),
+        ('W0902 client warning\nError from server: deployments.apps "web" not found\n', True),
+        # A different reason is not an absence, even when the message quotes the
+        # code verbatim.
+        ('Error from server (Forbidden): configmaps "(NotFound)" is forbidden', False),
+        ("Error from server (Timeout): the request timed out", False),
+        # Not the apiserver answering at all: an unreachable cluster, a missing
+        # binary, an unknown resource type. These stay unobserved.
+        ("Unable to connect to the server: dial tcp: connection refused", False),
+        ("bash: kubectl: command not found", False),
+        ('error: the server doesn\'t have a resource type "widget"', False),
+        ("not found", False),
+        ("", False),
+    ],
+)
+def test_is_not_found_matches_both_renderings_only(stderr: str, expected: bool) -> None:
+    exc = SubprocessError(["kubectl", "get"], returncode=1, stderr=stderr)
+
+    assert kubectl.is_not_found(exc) is expected
+
+
+def test_is_not_found_tolerates_an_exception_without_stderr() -> None:
+    assert kubectl.is_not_found(RuntimeError("boom")) is False

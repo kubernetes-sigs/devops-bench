@@ -922,6 +922,20 @@ def test_absent_passes_when_the_named_resource_does_not_exist() -> None:
     assert result.success is True
 
 
+def test_a_notfound_without_the_reason_code_is_still_a_fail() -> None:
+    # A 404 whose Status carries no reason (a hand-rolled one from an aggregated
+    # apiserver or an admission webhook) renders without the parenthesised code.
+    # It is the same observation, so it must not fall back to "error".
+    exc = SubprocessError(
+        cmd=["kubectl", "get", "namespace", "hello-app", "-o", "json"],
+        returncode=1,
+        stderr='Error from server: namespaces "hello-app" not found',
+    )
+    with patch(_GET, side_effect=exc):
+        result = _verifier(op="exists", resource_name="hello-app").verify(0.0)
+    assert result.status == "fail"
+
+
 def test_a_kubectl_failure_that_is_not_notfound_still_errors() -> None:
     exc = SubprocessError(
         cmd=["kubectl", "get", "namespace", "hello-app"],
@@ -934,9 +948,8 @@ def test_a_kubectl_failure_that_is_not_notfound_still_errors() -> None:
 
 
 def test_a_message_merely_containing_not_found_is_not_treated_as_notfound() -> None:
-    # A missing kubectl binary says "not found" too. Only the apiserver's
-    # "(NotFound)" reason code counts, or an environment problem would score as
-    # an observed absence.
+    # A missing kubectl binary says "not found" too. Only an "Error from server"
+    # line counts, or an environment problem would score as an observed absence.
     exc = SubprocessError(
         cmd=["kubectl", "get", "namespace", "hello-app"],
         returncode=127,
