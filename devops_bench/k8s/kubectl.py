@@ -50,7 +50,7 @@ _log = get_logger("k8s.kubectl")
 # prefix is what does the real work of keeping an unrelated message that merely
 # contains "not found" (a missing binary, say) from passing for the reason
 # code, and matching on it covers both renderings.
-_NOT_FOUND_RE = re.compile(
+_NOT_FOUND_RE: re.Pattern[str] = re.compile(
     r"^Error from server \(NotFound\):|^Error from server: .*\bnot found\s*$",
     re.MULTILINE,
 )
