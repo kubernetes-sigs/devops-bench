@@ -1,0 +1,62 @@
+# Storefront backend. Serves a fixed 200 response on all paths. It consumes the
+# `app-config` ConfigMap and `app-secret` Secret via envFrom (marked optional so a
+# region that is missing them still starts — that omission is the config drift the
+# agent must reconcile in the standby region during post-failover validation).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-text=OK"
+            - "-listen=:8080"
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: app-config
+                optional: true
+            - secretRef:
+                name: app-secret
+                optional: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080
