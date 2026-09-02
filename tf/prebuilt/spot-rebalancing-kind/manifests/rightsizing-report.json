@@ -1,0 +1,31 @@
+{
+  "generated_by": "VPA recommender (p95 over trailing 14 days)",
+  "namespace": "apps",
+  "currency": "USD",
+  "pricing": {
+    "on_demand_vcpu_hour": 0.0335,
+    "on_demand_gib_hour": 0.0045,
+    "spot_discount_fraction": 0.70,
+    "note": "Spot capacity is billed at roughly 30% of the on-demand rate (a ~70% discount)."
+  },
+  "recommendations": [
+    {
+      "workload": "payments-api",
+      "current_requests": { "cpu": "500m", "memory": "512Mi" },
+      "recommended_requests": { "cpu": "150m", "memory": "192Mi" },
+      "rationale": "Observed p95 utilization is well below requests; over-provisioned."
+    },
+    {
+      "workload": "image-resizer",
+      "current_requests": { "cpu": "500m", "memory": "256Mi" },
+      "recommended_requests": { "cpu": "100m", "memory": "128Mi" },
+      "rationale": "Bursty but low steady-state usage; over-provisioned."
+    },
+    {
+      "workload": "report-builder",
+      "current_requests": { "cpu": "1000m", "memory": "1Gi" },
+      "recommended_requests": { "cpu": "200m", "memory": "256Mi" },
+      "rationale": "Heavily over-provisioned; p95 usage is a fraction of requests."
+    }
+  ]
+}
