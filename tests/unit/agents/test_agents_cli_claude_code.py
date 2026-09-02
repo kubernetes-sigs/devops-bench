@@ -39,6 +39,7 @@ from devops_bench.agents.capabilities import (
 from devops_bench.agents.cli.claude_code import ClaudeCodeAgent, parse_stream_json
 from devops_bench.agents.cli.claude_code import agent as claude_mod
 from devops_bench.agents.cli.claude_code.agent import _build_argv, _build_env
+from devops_bench.agents.cli.claude_code.parsing import StreamParse
 from devops_bench.agents.result import TOKEN_BUCKETS, empty_tokens
 from devops_bench.core.errors import ConfigError, SubprocessError
 from devops_bench.results.normalize import normalize_tokens
@@ -58,17 +59,31 @@ def _stream(*events: dict) -> str:
     return "\n".join(json.dumps(event) for event in events) + "\n"
 
 
-def _assistant(*blocks: dict, msg_id: str | None = None, usage: dict | None = None) -> dict:
+def _assistant(
+    *blocks: dict,
+    msg_id: str | None = None,
+    usage: dict | None = None,
+    model: str | None = None,
+    ts: str | None = None,
+) -> dict:
     message: dict = {"content": list(blocks)}
     if msg_id is not None:
         message["id"] = msg_id
     if usage is not None:
         message["usage"] = usage
-    return {"type": "assistant", "message": message}
+    if model is not None:
+        message["model"] = model
+    event: dict = {"type": "assistant", "message": message}
+    if ts is not None:
+        event["timestamp"] = ts
+    return event
 
 
-def _user(*blocks: dict) -> dict:
-    return {"type": "user", "message": {"content": list(blocks)}}
+def _user(*blocks: dict, ts: str | None = None) -> dict:
+    event: dict = {"type": "user", "message": {"content": list(blocks)}}
+    if ts is not None:
+        event["timestamp"] = ts
+    return event
 
 
 SAMPLE_STREAM = _stream(
@@ -122,9 +137,9 @@ def _tok(**overrides: int | None) -> dict[str, int | None]:
 
 def test_parser_fills_the_shared_canonical_buckets() -> None:
     """Guards against ``TOKEN_BUCKETS`` drifting away from what this parser emits."""
-    _output, _trajectory, tokens, _errors = parse_stream_json(SAMPLE_STREAM)
+    parsed = parse_stream_json(SAMPLE_STREAM)
 
-    assert set(tokens) == set(TOKEN_BUCKETS)
+    assert set(parsed.tokens) == set(TOKEN_BUCKETS)
 
 
 def test_tokens_reach_the_result_row_unchanged() -> None:
@@ -146,8 +161,8 @@ def test_tokens_reach_the_result_row_unchanged() -> None:
         }
     )
 
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    normalized = normalize_tokens(tokens)
+    parsed = parse_stream_json(blob)
+    normalized = normalize_tokens(parsed.tokens)
 
     assert normalized.input == 2748
     assert normalized.output == 11267
@@ -176,9 +191,9 @@ def test_thinking_tokens_split_out_of_output() -> None:
         }
     )
 
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
+    parsed = parse_stream_json(blob)
 
-    assert tokens == _tok(
+    assert parsed.tokens == _tok(
         input=4,
         cached=13445,
         cache_write=31257,
@@ -194,8 +209,8 @@ def test_thinking_tokens_absent_leaves_reasoning_unreported() -> None:
     blob = _stream(
         {"type": "result", "result": "ok", "usage": {"input_tokens": 4, "output_tokens": 78}}
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens == _tok(input=4, reasoning=None, output=78, total=82)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens == _tok(input=4, reasoning=None, output=78, total=82)
 
 
 def test_thinking_tokens_exceeding_output_clamp_at_zero() -> None:
@@ -207,17 +222,17 @@ def test_thinking_tokens_exceeding_output_clamp_at_zero() -> None:
             "usage": {"output_tokens": 5, "output_tokens_details": {"thinking_tokens": 9}},
         }
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens["output"] == 0
-    assert tokens["reasoning"] == 9
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens["output"] == 0
+    assert parsed.tokens["reasoning"] == 9
 
 
 def test_parse_stream_json_emits_canonical_trajectory() -> None:
-    output, trajectory, tokens, errors = parse_stream_json(SAMPLE_STREAM)
-    assert output == "Done."
-    assert errors == []
-    assert tokens == _tok(input=10, cached=5, output=20, total=35)
-    assert trajectory == [
+    parsed = parse_stream_json(SAMPLE_STREAM)
+    assert parsed.output == "Done."
+    assert parsed.errors == []
+    assert parsed.tokens == _tok(input=10, cached=5, output=20, total=35)
+    assert parsed.trajectory == [
         {
             "name": "gke__list_clusters",
             "args": {"project": "p1"},
@@ -238,31 +253,31 @@ def test_parse_stream_json_marks_failed_tool_results_as_error_status() -> None:
         _assistant({"type": "tool_use", "id": "c", "name": "x", "input": {}}),
         _user({"type": "tool_result", "tool_use_id": "c", "content": "oops", "is_error": True}),
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert trajectory[0]["status"] == "error"
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.trajectory[0]["status"] == "error"
 
 
 def test_parse_stream_json_records_unmatched_tool_results() -> None:
     blob = _stream(_user({"type": "tool_result", "tool_use_id": "ghost", "content": "?"}))
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert trajectory == []
-    assert any("without matching tool_use" in msg for msg in errors)
+    parsed = parse_stream_json(blob)
+    assert parsed.trajectory == []
+    assert any("without matching tool_use" in msg for msg in parsed.errors)
 
 
 def test_parse_stream_json_records_json_decode_errors_on_errors_list() -> None:
     blob = "{not json}\n" + json.dumps({"type": "result", "result": "ok"}) + "\n"
-    output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert output == "ok"
-    assert trajectory == []
-    assert len(errors) == 1
-    assert "parse error" in errors[0]
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "ok"
+    assert parsed.trajectory == []
+    assert len(parsed.errors) == 1
+    assert "parse error" in parsed.errors[0]
 
 
 def test_parse_stream_json_records_error_result_subtype() -> None:
     blob = _stream({"type": "result", "subtype": "error_max_turns", "result": ""})
-    _output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == ["stream-json result error: error_max_turns"]
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == ["stream-json result error: error_max_turns"]
 
 
 def test_parse_stream_json_records_is_error_under_a_success_subtype() -> None:
@@ -277,32 +292,41 @@ def test_parse_stream_json_records_is_error_under_a_success_subtype() -> None:
             "result": "The model x is not available on your vertex deployment.",
         }
     )
-    output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert output == "The model x is not available on your vertex deployment."
-    assert errors == ["stream-json result flagged is_error (api status 404)"]
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "The model x is not available on your vertex deployment."
+    assert parsed.errors == ["stream-json result flagged is_error (api status 404)"]
 
 
 def test_parse_stream_json_records_is_error_without_an_api_status() -> None:
     blob = _stream({"type": "result", "subtype": "success", "is_error": True, "result": "nope"})
-    _output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == ["stream-json result flagged is_error"]
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == ["stream-json result flagged is_error"]
 
 
 def test_parse_stream_json_does_not_double_report_an_error_subtype() -> None:
     """``error_*`` subtypes also carry ``is_error``; one error line, not two."""
     blob = _stream({"type": "result", "subtype": "error_max_turns", "is_error": True, "result": ""})
-    _output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == ["stream-json result error: error_max_turns"]
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == ["stream-json result error: error_max_turns"]
 
 
 def test_parse_stream_json_ignores_a_false_is_error() -> None:
     blob = _stream({"type": "result", "subtype": "success", "is_error": False, "result": "ok"})
-    _output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
 
 
 def test_parse_stream_json_empty_input_returns_empty() -> None:
-    assert parse_stream_json("") == ("", [], _tok(), [])
+    assert parse_stream_json("") == StreamParse(
+        output="",
+        trajectory=[],
+        tokens=_tok(),
+        errors=[],
+        terminal_reason="",
+        model_turns=None,
+        tool_wait_sec=None,
+        served_models=[],
+    )
 
 
 def test_parse_stream_json_flags_failed_mcp_server_at_init() -> None:
@@ -319,10 +343,10 @@ def test_parse_stream_json_flags_failed_mcp_server_at_init() -> None:
         },
         {"type": "result", "subtype": "success", "result": "ok"},
     )
-    output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert output == "ok"
-    assert any("broken" in e and "failed" in e for e in errors)
-    assert not any("gke" in e for e in errors)
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "ok"
+    assert any("broken" in e and "failed" in e for e in parsed.errors)
+    assert not any("gke" in e for e in parsed.errors)
 
 
 def test_parse_stream_json_ignores_transient_pending_mcp_status_at_init() -> None:
@@ -342,10 +366,10 @@ def test_parse_stream_json_ignores_transient_pending_mcp_status_at_init() -> Non
         _user({"type": "tool_result", "tool_use_id": "t1", "content": "cluster-a"}),
         {"type": "result", "subtype": "success", "result": "ok"},
     )
-    output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert output == "ok"
-    assert errors == []
-    assert trajectory[0]["status"] == "completed"
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "ok"
+    assert parsed.errors == []
+    assert parsed.trajectory[0]["status"] == "completed"
 
 
 def test_parse_stream_json_strips_mcp_client_prefix_from_tool_names() -> None:
@@ -359,8 +383,8 @@ def test_parse_stream_json_strips_mcp_client_prefix_from_tool_names() -> None:
             {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": "ls"}},
         ),
     )
-    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
-    assert [t["name"] for t in trajectory] == ["default__generate_manifest", "Bash"]
+    parsed = parse_stream_json(blob)
+    assert [t["name"] for t in parsed.trajectory] == ["default__generate_manifest", "Bash"]
 
 
 def test_parse_stream_json_drops_thinking_blocks() -> None:
@@ -375,9 +399,9 @@ def test_parse_stream_json_drops_thinking_blocks() -> None:
         ),
         _user({"type": "tool_result", "tool_use_id": "c1", "content": "ok"}),
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert trajectory == [
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.trajectory == [
         {"name": "Bash", "args": {"command": "ls"}, "result": "ok", "status": "completed"},
     ]
 
@@ -386,9 +410,11 @@ def test_parse_stream_json_keeps_pending_tool_use_as_called() -> None:
     """A tool_use with no matching tool_result (timeout-truncated stream) stays
     in the trajectory with status ``called`` and a ``None`` result."""
     blob = _stream(_assistant({"type": "tool_use", "id": "c1", "name": "do", "input": {"k": "v"}}))
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert trajectory == [{"name": "do", "args": {"k": "v"}, "result": None, "status": "called"}]
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    assert parsed.trajectory == [
+        {"name": "do", "args": {"k": "v"}, "result": None, "status": "called"}
+    ]
+    assert parsed.errors == []
 
 
 def test_parse_stream_json_falls_back_to_assistant_text_without_result_event() -> None:
@@ -398,10 +424,10 @@ def test_parse_stream_json_falls_back_to_assistant_text_without_result_event() -
         _assistant({"type": "text", "text": "partial "}),
         _assistant({"type": "text", "text": "answer"}),
     )
-    output, _trajectory, tokens, errors = parse_stream_json(blob)
-    assert output == "partial answer"
-    assert tokens == _tok()
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "partial answer"
+    assert parsed.tokens == _tok()
+    assert parsed.errors == []
 
 
 def test_parse_stream_json_falls_back_to_accumulated_usage_without_result_event() -> None:
@@ -418,10 +444,10 @@ def test_parse_stream_json_falls_back_to_accumulated_usage_without_result_event(
             usage={"input_tokens": 20, "output_tokens": 7, "cache_creation_input_tokens": 3},
         ),
     )
-    output, _trajectory, tokens, errors = parse_stream_json(blob)
-    assert output == "ab"
-    assert tokens == _tok(input=30, cached=2, cache_write=3)
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "ab"
+    assert parsed.tokens == _tok(input=30, cached=2, cache_write=3)
+    assert parsed.errors == []
 
 
 def test_parse_stream_json_accumulator_leaves_output_unreported() -> None:
@@ -437,10 +463,10 @@ def test_parse_stream_json_accumulator_leaves_output_unreported() -> None:
             usage={"input_tokens": 4, "output_tokens": 3},
         ),
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens["output"] is None
-    assert tokens["total"] is None
-    assert tokens == _tok(input=4)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens["output"] is None
+    assert parsed.tokens["total"] is None
+    assert parsed.tokens == _tok(input=4)
 
 
 def test_parse_stream_json_result_usage_wins_over_accumulated() -> None:
@@ -457,8 +483,8 @@ def test_parse_stream_json_result_usage_wins_over_accumulated() -> None:
             "usage": {"input_tokens": 10, "output_tokens": 20},
         },
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens == _tok(input=10, output=20, total=30)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens == _tok(input=10, output=20, total=30)
 
 
 def test_parse_stream_json_falls_back_when_result_usage_degenerate() -> None:
@@ -469,8 +495,8 @@ def test_parse_stream_json_falls_back_when_result_usage_degenerate() -> None:
         _assistant({"type": "text", "text": "x"}, usage={"input_tokens": 15, "output_tokens": 4}),
         {"type": "result", "subtype": "success", "result": "x", "usage": {}},
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens == _tok(input=15)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens == _tok(input=15)
 
 
 def test_parse_stream_json_result_string_is_authoritative_over_text() -> None:
@@ -480,8 +506,8 @@ def test_parse_stream_json_result_string_is_authoritative_over_text() -> None:
         _assistant({"type": "text", "text": "Done."}),
         {"type": "result", "subtype": "success", "result": "Done."},
     )
-    output, _trajectory, _tokens, _errors = parse_stream_json(blob)
-    assert output == "Done."
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "Done."
 
 
 def test_parse_stream_json_dedupes_accumulated_usage_by_message_id() -> None:
@@ -498,8 +524,8 @@ def test_parse_stream_json_dedupes_accumulated_usage_by_message_id() -> None:
             usage=usage,
         ),
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens == _tok(input=100, cached=8)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens == _tok(input=100, cached=8)
 
 
 def test_parse_stream_json_empty_result_falls_back_to_text() -> None:
@@ -509,9 +535,9 @@ def test_parse_stream_json_empty_result_falls_back_to_text() -> None:
         _assistant({"type": "text", "text": "partial answer"}),
         {"type": "result", "subtype": "error_max_turns", "result": ""},
     )
-    output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert output == "partial answer"
-    assert any("error_max_turns" in e for e in errors)
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "partial answer"
+    assert any("error_max_turns" in e for e in parsed.errors)
 
 
 def test_parse_stream_json_all_zero_result_usage_is_authoritative() -> None:
@@ -526,8 +552,8 @@ def test_parse_stream_json_all_zero_result_usage_is_authoritative() -> None:
             "usage": {"input_tokens": 0, "output_tokens": 0},
         },
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens == _tok(input=0, output=0, total=0)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens == _tok(input=0, output=0, total=0)
 
 
 def test_parse_stream_json_degenerate_second_result_does_not_clobber() -> None:
@@ -542,9 +568,9 @@ def test_parse_stream_json_degenerate_second_result_does_not_clobber() -> None:
         },
         {"type": "result", "subtype": "error_during_execution", "result": "", "usage": {}},
     )
-    output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert output == "first"
-    assert tokens == _tok(input=10, output=20, total=30)
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "first"
+    assert parsed.tokens == _tok(input=10, output=20, total=30)
 
 
 def test_parse_stream_json_recovers_concatenated_objects_on_one_line() -> None:
@@ -558,10 +584,10 @@ def test_parse_stream_json_recovers_concatenated_objects_on_one_line() -> None:
             "usage": {"input_tokens": 3, "output_tokens": 1},
         }
     )
-    output, _trajectory, tokens, errors = parse_stream_json(line + "\n")
-    assert output == "hi"
-    assert tokens == _tok(input=3, output=1, total=4)
-    assert errors == []
+    parsed = parse_stream_json(line + "\n")
+    assert parsed.output == "hi"
+    assert parsed.tokens == _tok(input=3, output=1, total=4)
+    assert parsed.errors == []
 
 
 def test_parse_stream_json_survives_unescaped_unicode_line_breaks() -> None:
@@ -581,12 +607,12 @@ def test_parse_stream_json_survives_unescaped_unicode_line_breaks() -> None:
     blob = "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n"
     assert "\u0085" in blob  # guard: the fixture must carry the raw character
 
-    output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert output == "done"
-    assert len(trajectory) == 1
-    assert trajectory[0]["status"] == "completed"
-    assert trajectory[0]["result"] == body
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.output == "done"
+    assert len(parsed.trajectory) == 1
+    assert parsed.trajectory[0]["status"] == "completed"
+    assert parsed.trajectory[0]["result"] == body
 
 
 def test_parse_stream_json_clips_oversized_tool_results() -> None:
@@ -598,9 +624,9 @@ def test_parse_stream_json_clips_oversized_tool_results() -> None:
         _assistant({"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
         _user({"type": "tool_result", "tool_use_id": "t1", "content": payload}),
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    result = trajectory[0]["result"]
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    result = parsed.trajectory[0]["result"]
+    assert parsed.errors == []
     assert len(result) < len(payload)
     assert result.startswith("A" * 100)
     assert result.endswith("TAIL")
@@ -614,8 +640,8 @@ def test_parse_stream_json_keeps_tool_results_under_the_cap_verbatim() -> None:
         _assistant({"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
         _user({"type": "tool_result", "tool_use_id": "t1", "content": payload}),
     )
-    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
-    assert trajectory[0]["result"] == payload
+    parsed = parse_stream_json(blob)
+    assert parsed.trajectory[0]["result"] == payload
 
 
 def test_parse_stream_json_non_dict_message_does_not_crash() -> None:
@@ -631,9 +657,9 @@ def test_parse_stream_json_non_dict_message_does_not_crash() -> None:
             "usage": {"input_tokens": 5, "output_tokens": 2},
         },
     )
-    output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert output == "ok"
-    assert tokens == _tok(input=5, output=2, total=7)
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "ok"
+    assert parsed.tokens == _tok(input=5, output=2, total=7)
 
 
 def test_parse_stream_json_rejects_bool_usage_values() -> None:
@@ -646,8 +672,8 @@ def test_parse_stream_json_rejects_bool_usage_values() -> None:
             "usage": {"input_tokens": True, "output_tokens": 20},
         },
     )
-    _output, _trajectory, tokens, _errors = parse_stream_json(blob)
-    assert tokens == _tok(input=None, output=20, total=20)
+    parsed = parse_stream_json(blob)
+    assert parsed.tokens == _tok(input=None, output=20, total=20)
 
 
 def test_parse_stream_json_matches_duplicate_tool_use_ids_fifo() -> None:
@@ -659,9 +685,9 @@ def test_parse_stream_json_matches_duplicate_tool_use_ids_fifo() -> None:
         _user({"type": "tool_result", "tool_use_id": "x", "content": "r1"}),
         _user({"type": "tool_result", "tool_use_id": "x", "content": "r2"}),
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert [(t["name"], t["result"]) for t in trajectory] == [("A", "r1"), ("B", "r2")]
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    assert [(t["name"], t["result"]) for t in parsed.trajectory] == [("A", "r1"), ("B", "r2")]
+    assert parsed.errors == []
 
 
 def test_block_text_preserves_non_text_blocks() -> None:
@@ -677,8 +703,277 @@ def test_block_text_preserves_non_text_blocks() -> None:
             }
         ),
     )
-    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
-    assert trajectory[0]["result"] == '{"type": "image", "source": {"x": 1}}ok'
+    parsed = parse_stream_json(blob)
+    assert parsed.trajectory[0]["result"] == '{"type": "image", "source": {"x": 1}}ok'
+
+
+# ---------------------------------------------------------------------------
+# Per-run telemetry: terminal_reason, model_turns, tool_wait_sec, served_models
+# ---------------------------------------------------------------------------
+
+
+def test_parse_stream_json_maps_a_completed_run_to_completed() -> None:
+    blob = _stream(
+        {"type": "result", "subtype": "success", "terminal_reason": "completed", "result": "ok"}
+    )
+    assert parse_stream_json(blob).terminal_reason == "completed"
+
+
+def test_parse_stream_json_buckets_a_cli_specific_reason_as_error() -> None:
+    """The CLI's reason vocabulary is far wider than the bench's four values, so
+    a failure reason buckets to ``error`` — with the specific reason kept on
+    ``errors`` rather than dropped."""
+    blob = _stream(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "terminal_reason": "model_error",
+            "result": "",
+        }
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.terminal_reason == "error"
+    assert parsed.errors == ["stream-json result terminal_reason: model_error"]
+
+
+def test_parse_stream_json_scores_a_turn_capped_run_as_completed() -> None:
+    """``TERMINAL_REASONS`` puts a turn cap in ``completed`` so an efficiency
+    ceiling does not read as a capability failure, and the sibling harnesses
+    land there because their cap is invisible from outside the process. Claude
+    Code can see its cap, so it has to be mapped there deliberately or the two
+    harnesses report opposite values for the same event."""
+    blob = _stream(
+        {
+            "type": "result",
+            "subtype": "error_max_turns",
+            "terminal_reason": "max_turns",
+            "is_error": True,
+            "result": "",
+        }
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.terminal_reason == "completed"
+    # The cap itself is not lost — it just is not a failure.
+    assert parsed.errors == ["stream-json result terminal_reason: max_turns"]
+
+
+def test_parse_stream_json_scores_a_turn_cap_as_completed_without_a_cli_reason() -> None:
+    """A binary predating ``terminal_reason`` shows the cap only in the subtype;
+    it must not land in a different bucket than the same run on a newer one."""
+    blob = _stream({"type": "result", "subtype": "error_max_turns", "result": ""})
+    parsed = parse_stream_json(blob)
+    assert parsed.terminal_reason == "completed"
+    assert parsed.errors == ["stream-json result error: error_max_turns"]
+
+
+def test_parse_stream_json_keeps_the_cli_reason_when_a_failure_flag_also_fired() -> None:
+    """Every reason the CLI itself classifies as an error (``api_error``,
+    ``prompt_too_long``, ``blocking_limit``) arrives as ``subtype: "success"``
+    with ``is_error`` set, so a mapping that only reads the flags would record
+    an anonymous failure for the whole reachable failure vocabulary."""
+    blob = _stream(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 404,
+            "terminal_reason": "api_error",
+            "result": "The model x is not available.",
+        }
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.terminal_reason == "error"
+    assert parsed.errors == ["stream-json result terminal_reason: api_error (api status 404)"]
+
+
+def test_parse_stream_json_buckets_a_stopped_short_reason_without_failure_flags() -> None:
+    """A loop the CLI does not itself flag (``hook_stopped``, ``aborted_tools``)
+    sets neither ``is_error`` nor an ``error_*`` subtype; the reason alone must
+    still mark the run as failed."""
+    blob = _stream(
+        {
+            "type": "result",
+            "subtype": "success",
+            "terminal_reason": "hook_stopped",
+            "result": "partial",
+        }
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.terminal_reason == "error"
+    assert parsed.errors == ["stream-json result terminal_reason: hook_stopped"]
+
+
+def test_parse_stream_json_resolves_reason_from_flags_when_the_cli_omits_it() -> None:
+    """``terminal_reason`` is optional on the event; older binaries omit it."""
+    ok = _stream({"type": "result", "subtype": "success", "result": "ok"})
+    bad = _stream({"type": "result", "subtype": "success", "is_error": True, "result": "no"})
+    assert parse_stream_json(ok).terminal_reason == "completed"
+    assert parse_stream_json(bad).terminal_reason == "error"
+
+
+def test_parse_stream_json_leaves_reason_unset_without_a_terminal_event() -> None:
+    """A killed or truncated stream reports no reason of its own, leaving the
+    call to the harness, which knows whether it did the killing."""
+    blob = _stream(_assistant({"type": "text", "text": "hi"}))
+    assert parse_stream_json(blob).terminal_reason == ""
+
+
+def test_parse_stream_json_first_terminal_event_wins_for_reason_and_errors() -> None:
+    """A later terminal event must not append a failure the resolved reason no
+    longer reflects, or the row says ``completed`` while its own error list
+    names a mid-execution failure."""
+    blob = _stream(
+        {"type": "result", "subtype": "success", "terminal_reason": "completed", "result": "ok"},
+        {"type": "result", "subtype": "error_during_execution", "result": ""},
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.terminal_reason == "completed"
+    assert parsed.errors == []
+
+
+def test_parse_stream_json_ignores_the_cli_synthetic_error_envelope() -> None:
+    """The CLI renders its own failures as an assistant envelope carrying
+    ``model: "<synthetic>"`` and a UUID id. Its text is the error the user
+    should see, but no model was called, so counting it would put a model id
+    that does not exist on the leaderboard and invent a round-trip."""
+    blob = _stream(
+        _assistant({"type": "text", "text": "hi"}, msg_id="msg_1", model="claude-opus-5"),
+        {
+            "type": "assistant",
+            "is_api_error_message": True,
+            "error": "model_not_found",
+            "message": {
+                "id": "0335a8d1-0723-4f3b-a1f6-d5d0b352aa5a",
+                "model": "<synthetic>",
+                "content": [{"type": "text", "text": "There's an issue with the selected model."}],
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        },
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.served_models == ["claude-opus-5"]
+    assert parsed.model_turns == 1
+    assert "There's an issue with the selected model." in parsed.output
+
+
+def test_parse_stream_json_counts_model_turns_by_message_id() -> None:
+    """Claude Code emits one envelope per content block, all repeating the
+    message id, so envelope count would overcount a single model turn."""
+    blob = _stream(
+        _assistant({"type": "text", "text": "on it"}, msg_id="m1"),
+        _assistant({"type": "tool_use", "id": "a", "name": "Read", "input": {}}, msg_id="m1"),
+        _assistant({"type": "tool_use", "id": "b", "name": "Read", "input": {}}, msg_id="m1"),
+        _user({"type": "tool_result", "tool_use_id": "a", "content": "x"}),
+        _user({"type": "tool_result", "tool_use_id": "b", "content": "y"}),
+        _assistant({"type": "text", "text": "done"}, msg_id="m2"),
+    )
+    assert parse_stream_json(blob).model_turns == 2
+
+
+def test_parse_stream_json_leaves_model_turns_unreported_without_message_ids() -> None:
+    """Zero turns and "the stream carries no ids" are different facts; only the
+    latter is unknown, and ``None`` is how the row records unknown."""
+    blob = _stream(_assistant({"type": "text", "text": "hi"}))
+    assert parse_stream_json(blob).model_turns is None
+
+
+def test_parse_stream_json_treats_an_empty_message_id_as_unidentified() -> None:
+    """An empty id is no id: counting it invents a turn, and deduping on it
+    merges genuinely distinct messages and drops the second one's usage."""
+    blob = _stream(
+        _assistant({"type": "text", "text": "a"}, msg_id="", usage={"input_tokens": 5}),
+        _assistant({"type": "text", "text": "b"}, msg_id="", usage={"input_tokens": 5}),
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.model_turns is None
+    assert parsed.tokens["input"] == 10
+
+
+def test_parse_stream_json_times_a_tool_call_from_its_envelope_timestamps() -> None:
+    blob = _stream(
+        _assistant(
+            {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+            ts="2026-08-24T17:44:45.000Z",
+        ),
+        _user(
+            {"type": "tool_result", "tool_use_id": "a", "content": "x"},
+            ts="2026-08-24T17:44:47.500Z",
+        ),
+    )
+    assert parse_stream_json(blob).tool_wait_sec == pytest.approx(2.5)
+
+
+def test_parse_stream_json_counts_concurrent_tool_calls_once() -> None:
+    """A model turn dispatches its calls together; summing their durations
+    would report more tool time than the run took."""
+    blob = _stream(
+        _assistant(
+            {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+            {"type": "tool_use", "id": "b", "name": "Read", "input": {}},
+            ts="2026-08-24T17:44:45.000Z",
+        ),
+        _user(
+            {"type": "tool_result", "tool_use_id": "a", "content": "x"},
+            ts="2026-08-24T17:44:47.000Z",
+        ),
+        _user(
+            {"type": "tool_result", "tool_use_id": "b", "content": "y"},
+            ts="2026-08-24T17:44:48.000Z",
+        ),
+    )
+    assert parse_stream_json(blob).tool_wait_sec == pytest.approx(3.0)
+
+
+def test_parse_stream_json_leaves_tool_wait_unreported_without_timestamps() -> None:
+    blob = _stream(
+        _assistant({"type": "tool_use", "id": "a", "name": "Read", "input": {}}),
+        _user({"type": "tool_result", "tool_use_id": "a", "content": "x"}),
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.trajectory[0]["status"] == "completed"
+    assert parsed.tool_wait_sec is None
+
+
+def test_parse_stream_json_leaves_tool_wait_unreported_for_an_unanswered_call() -> None:
+    """A call the run never got an answer for has no measurable wait; the model
+    time before it must not be attributed to tools."""
+    blob = _stream(
+        _assistant(
+            {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+            ts="2026-08-24T17:44:45.000Z",
+        ),
+        {"type": "result", "subtype": "success", "result": "ok"},
+    )
+    assert parse_stream_json(blob).tool_wait_sec is None
+
+
+def test_parse_stream_json_records_served_models_in_first_seen_order() -> None:
+    blob = _stream(
+        _assistant({"type": "text", "text": "a"}, msg_id="m1", model="claude-opus-5"),
+        _assistant({"type": "text", "text": "b"}, msg_id="m2", model="claude-sonnet-5"),
+        _assistant({"type": "text", "text": "c"}, msg_id="m3", model="claude-opus-5"),
+    )
+    assert parse_stream_json(blob).served_models == ["claude-opus-5", "claude-sonnet-5"]
+
+
+def test_parse_stream_json_served_models_excludes_the_cli_helper_model() -> None:
+    """``modelUsage`` on the terminal event also lists the CLI's own background
+    helper, which never answered the task; only assistant envelopes count."""
+    blob = _stream(
+        _assistant({"type": "text", "text": "a"}, msg_id="m1", model="claude-opus-5"),
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": "a",
+            "modelUsage": {"claude-opus-5": {}, "claude-haiku-4-5@20251001": {}},
+        },
+    )
+    assert parse_stream_json(blob).served_models == ["claude-opus-5"]
+
+
+def test_parse_stream_json_leaves_served_models_empty_when_unstamped() -> None:
+    blob = _stream(_assistant({"type": "text", "text": "hi"}, msg_id="m1"))
+    assert parse_stream_json(blob).served_models == []
 
 
 # ---------------------------------------------------------------------------
@@ -929,7 +1224,7 @@ def test_execute_reports_a_timeout_as_a_timeout(monkeypatch: pytest.MonkeyPatch)
     bucket, where ``exit -1`` would have put it."""
 
     def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
-        raise SubprocessError(argv, returncode=-1, stdout="", stderr="killed")
+        raise SubprocessError(argv, returncode=-1, stdout="", stderr="killed", timed_out=True)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude", timeout_sec=900)).run("p")
@@ -951,7 +1246,9 @@ def test_execute_recovers_partial_trajectory_on_timeout(monkeypatch: pytest.Monk
     )
 
     def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
-        raise SubprocessError(argv, returncode=-1, stdout=partial, stderr="killed after timeout")
+        raise SubprocessError(
+            argv, returncode=-1, stdout=partial, stderr="killed after timeout", timed_out=True
+        )
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
@@ -970,6 +1267,8 @@ def test_execute_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None
     assert result.has_errors()
     assert "failed to spawn claude" in result.errors[0]
     assert result.tokens == _tok()
+    assert result.terminal_reason == "error"
+    assert result.latency > 0
 
 
 def test_execute_passes_timeout_to_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -982,6 +1281,121 @@ def test_execute_passes_timeout_to_subprocess(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(claude_mod, "run", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude", timeout_sec=15.5)).run("p")
     assert captured["timeout"] == 15.5
+
+
+# ---------------------------------------------------------------------------
+# _execute: per-run telemetry reaching the result
+# ---------------------------------------------------------------------------
+
+
+def test_execute_reports_per_run_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = _stream(
+        _assistant(
+            {"type": "tool_use", "id": "c1", "name": "Read", "input": {}},
+            msg_id="m1",
+            model="claude-opus-5",
+            ts="2026-08-24T17:44:45.000Z",
+        ),
+        _user(
+            {"type": "tool_result", "tool_use_id": "c1", "content": "x"},
+            ts="2026-08-24T17:44:46.000Z",
+        ),
+        _assistant({"type": "text", "text": "done"}, msg_id="m2", model="claude-opus-5"),
+        {"type": "result", "subtype": "success", "terminal_reason": "completed", "result": "done"},
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout=stream, stderr="", returncode=0)
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
+    assert result.terminal_reason == "completed"
+    assert result.model_turns == 2
+    assert result.tool_wait_sec == pytest.approx(1.0)
+    assert result.served_models == ["claude-opus-5"]
+    assert result.latency > 0
+
+
+def test_execute_reports_timeout_over_the_streams_own_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kill is the harness's own doing, so it outranks a terminal event the
+    process managed to emit before dying."""
+    partial = _stream(
+        {"type": "result", "subtype": "success", "terminal_reason": "completed", "result": "ok"}
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        raise SubprocessError(argv, returncode=-1, stdout=partial, stderr="killed", timed_out=True)
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
+    assert result.terminal_reason == "timeout"
+
+
+def test_execute_reports_a_non_timeout_subprocess_error_as_an_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``timed_out`` distinguishes the wall-clock kill from any other raise, so a
+    non-timeout failure is not mislabelled as one."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        raise SubprocessError(argv, returncode=2, stdout="", stderr="boom", timed_out=False)
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
+    assert result.errors[0] == "claude failed to run: exit 2: boom"
+    assert result.terminal_reason == "error"
+
+
+def test_execute_reports_the_terminal_event_over_a_non_zero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI exits non-zero on a turn cap, which the parser resolves to
+    ``completed``, so the terminal event is the more specific signal."""
+    stream = _stream(
+        {
+            "type": "result",
+            "subtype": "error_max_turns",
+            "terminal_reason": "max_turns",
+            "is_error": True,
+            "result": "ok",
+        }
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout=stream, stderr="", returncode=1)
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
+    assert result.terminal_reason == "completed"
+    assert any("max_turns" in e for e in result.errors)
+
+
+def test_execute_falls_back_to_the_exit_code_without_a_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
+    assert result.terminal_reason == "completed"
+
+
+def test_execute_falls_back_to_a_non_zero_exit_without_a_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated pipe or a binary that died before its terminal event leaves
+    the exit code as the only verdict available."""
+    stream = _stream(_assistant({"type": "text", "text": "partial"}))
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout=stream, stderr="boom", returncode=1)
+
+    monkeypatch.setattr(claude_mod, "run", fake_run)
+    result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
+    assert result.terminal_reason == "error"
 
 
 # ---------------------------------------------------------------------------

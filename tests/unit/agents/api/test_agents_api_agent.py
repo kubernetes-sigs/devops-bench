@@ -811,6 +811,9 @@ def test_execute_times_out_via_config_timeout_sec(monkeypatch: pytest.MonkeyPatc
     result = ApiAgent(AgentConfig(timeout_sec=0.05)).run("p")
     assert result.has_errors()
     assert "timed out after 0.05s" in result.errors[0]
+    # The budget stopped it, not a failure: the same condition reads "timeout"
+    # on every CLI harness, and the row must not group it with provider crashes.
+    assert result.terminal_reason == "timeout"
 
 
 def test_execute_reraises_internal_timeout_before_deadline(monkeypatch: pytest.MonkeyPatch) -> None:

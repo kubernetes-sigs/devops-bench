@@ -94,6 +94,7 @@ def run(
             returncode=-1,
             stdout=_as_text(exc.stdout),
             stderr=_as_text(exc.stderr),
+            timed_out=True,
         ) from exc
 
     if check and completed.returncode != 0:

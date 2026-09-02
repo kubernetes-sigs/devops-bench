@@ -93,11 +93,11 @@ SAMPLE_EVENTS = _events(
 
 
 def test_parse_trajectory_export_folds_call_result_pairs() -> None:
-    trajectory, tokens, output, errors = parse_trajectory_export(SAMPLE_EVENTS)
-    assert errors == []
-    assert tokens == {"input": 5, "output": 10, "total": 15}
-    assert output == "All pods healthy."
-    assert trajectory == [
+    export = parse_trajectory_export(SAMPLE_EVENTS)
+    assert export.errors == []
+    assert export.tokens == {"input": 5, "output": 10, "total": 15}
+    assert export.output == "All pods healthy."
+    assert export.trajectory == [
         {
             "name": "kubectl_get_pods",
             "args": {"namespace": "default"},
@@ -129,10 +129,153 @@ def test_parse_trajectory_export_sums_usage_across_turns() -> None:
             "data": {"usage": {"input": 75, "output": 15, "total": 90}, "assistantTexts": ["done"]},
         },
     )
-    _trajectory, tokens, output, errors = parse_trajectory_export(blob)
-    assert errors == []
-    assert output == "done"
-    assert tokens == {"input": 425, "output": 65, "total": 490}
+    export = parse_trajectory_export(blob)
+    assert export.errors == []
+    assert export.output == "done"
+    assert export.tokens == {"input": 425, "output": 65, "total": 490}
+
+
+def test_parse_trajectory_export_sums_cache_write_from_per_call_events() -> None:
+    """``cacheWrite`` lives only on ``assistant.message``, not ``model.completed``.
+
+    Shape taken from a live export: the per-call usages sum to the
+    ``model.completed`` total for every bucket except ``cacheWrite``, which the
+    rollup drops. Cache writes are priced above input on Anthropic, so losing
+    the bucket understates what an openclaw run was billed.
+    """
+    blob = _events(
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "content": [],
+                    "usage": {"input": 90, "output": 8, "cacheRead": 160, "cacheWrite": 12},
+                }
+            },
+        },
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "content": [],
+                    "usage": {"input": 92, "output": 11, "cacheRead": 162, "cacheWrite": 7},
+                }
+            },
+        },
+        {
+            "type": "model.completed",
+            "data": {
+                "usage": {"input": 182, "output": 19, "cacheRead": 322, "total": 523},
+                "assistantTexts": ["done"],
+            },
+        },
+    )
+    export = parse_trajectory_export(blob)
+    assert export.errors == []
+    assert export.tokens["cacheWrite"] == 19
+    # The rollup total omits cacheWrite too, so it is folded back in: the
+    # canonical contract is that total is the sum of every bucket.
+    assert export.tokens["total"] == 182 + 19 + 322 + 19
+    assert export.tokens["total"] == (
+        export.tokens["input"]
+        + export.tokens["output"]
+        + export.tokens["cacheRead"]
+        + export.tokens["cacheWrite"]
+    )
+    # The rollup buckets are untouched — nothing is counted from both sources.
+    assert export.tokens["input"] == 182
+    assert export.tokens["output"] == 19
+    assert export.tokens["cacheRead"] == 322
+
+
+def test_parse_trajectory_export_omits_cache_write_when_unreported() -> None:
+    """No ``cacheWrite`` anywhere means the key is absent, so the row reads None.
+
+    An older openclaw whose events carry no per-call usage must not be recorded
+    as having written zero cache tokens.
+    """
+    blob = _events(
+        {"type": "assistant.message", "data": {"message": {"content": []}}},
+        {"type": "model.completed", "data": {"usage": {"input": 10, "output": 2}}},
+    )
+    assert "cacheWrite" not in parse_trajectory_export(blob).tokens
+
+
+def test_parse_trajectory_export_counts_model_turns_not_tool_calls() -> None:
+    """One ``assistant.message`` can issue several tool calls, so the two differ.
+
+    Shape taken from a live openclaw run whose single message carried two
+    ``toolCall`` entries. Reporting ``len(trajectory)`` as turns would say three
+    round-trips happened where the provider was called twice, which is the
+    number input tokens actually grow with.
+    """
+    blob = _events(
+        {"type": "assistant.message", "data": {"message": {"content": []}}},
+        _tool_call("1", "kubectl_get_pods", {}),
+        _tool_result("1", "ok"),
+        _tool_call("2", "kubectl_describe", {}),
+        _tool_result("2", "ok"),
+        {"type": "assistant.message", "data": {"message": {"content": []}}},
+        {"type": "model.completed", "data": {"usage": {"input": 5}, "assistantTexts": ["done"]}},
+    )
+    export = parse_trajectory_export(blob)
+    assert export.model_turns == 2
+    assert len(export.trajectory) == 2
+
+
+def test_parse_trajectory_export_leaves_model_turns_none_without_messages() -> None:
+    """No ``assistant.message`` events means unmeasured, not zero turns.
+
+    An export that produced output cannot have taken zero round-trips, so ``0``
+    would be a parse miss dressed up as a fact and would drag a dashboard
+    average down.
+    """
+    blob = _events(
+        {"type": "model.completed", "data": {"usage": {"input": 5}, "assistantTexts": ["done"]}},
+    )
+    assert parse_trajectory_export(blob).model_turns is None
+
+
+def test_parse_trajectory_export_records_every_model_that_answered() -> None:
+    """openclaw fails over mid-run, so the requested model can be the wrong label.
+
+    Two distinct ids across the run is the failover itself; both are kept, in
+    first-seen order, and a repeat is not counted twice.
+    """
+    blob = _events(
+        {"type": "assistant.message", "data": {"message": {"model": "gemini-3-flash-preview"}}},
+        {"type": "assistant.message", "data": {"message": {"model": "gemini-3-flash-preview"}}},
+        {"type": "assistant.message", "data": {"message": {"model": "claude-opus-4-5"}}},
+    )
+    export = parse_trajectory_export(blob)
+    assert export.served_models == ["gemini-3-flash-preview", "claude-opus-4-5"]
+
+
+def test_parse_trajectory_export_leaves_served_models_empty_when_unreported() -> None:
+    blob = _events({"type": "assistant.message", "data": {"message": {"content": []}}})
+    assert parse_trajectory_export(blob).served_models == []
+
+
+def test_parse_trajectory_export_times_tools_and_merges_concurrent_calls() -> None:
+    """Two calls issued in one message overlap, so their spans count once.
+
+    Timestamps taken from a live export: both ``tool.call`` events landed on the
+    same millisecond. Summing the two durations would say the run spent longer
+    in tools than it ran for.
+    """
+    blob = _events(
+        {**_tool_call("1", "a", {}), "ts": "2026-08-24T17:44:45.862Z"},
+        {**_tool_call("2", "b", {}), "ts": "2026-08-24T17:44:45.862Z"},
+        {**_tool_result("1", "ok"), "ts": "2026-08-24T17:44:46.081Z"},
+        {**_tool_result("2", "ok"), "ts": "2026-08-24T17:44:46.362Z"},
+    )
+    assert parse_trajectory_export(blob).tool_wait_sec == pytest.approx(0.5, abs=1e-6)
+
+
+def test_parse_trajectory_export_leaves_tool_wait_none_without_timestamps() -> None:
+    """An export with no ``ts`` reports unmeasured, not zero seconds in tools."""
+    blob = _events(_tool_call("1", "a", {}), _tool_result("1", "ok"))
+    assert parse_trajectory_export(blob).tool_wait_sec is None
 
 
 def test_parse_trajectory_export_sums_nested_cost_breakdown() -> None:
@@ -141,10 +284,36 @@ def test_parse_trajectory_export_sums_nested_cost_breakdown() -> None:
         {"type": "model.completed", "data": {"usage": {"input": 10, "cost": {"total": 0.01}}}},
         {"type": "model.completed", "data": {"usage": {"input": 5, "cost": {"total": 0.02}}}},
     )
-    _trajectory, tokens, _output, errors = parse_trajectory_export(blob)
-    assert errors == []
-    assert tokens["input"] == 15
-    assert tokens["cost"]["total"] == pytest.approx(0.03)
+    export = parse_trajectory_export(blob)
+    assert export.errors == []
+    assert export.tokens["input"] == 15
+    assert export.tokens["cost"]["total"] == pytest.approx(0.03)
+
+
+def test_parse_trajectory_export_keeps_cache_write_inside_a_nested_cost_block() -> None:
+    """The top-level ``cacheWrite`` skip must not reach into the cost breakdown.
+
+    The token bucket is skipped so it keeps one source, but cost dollars have no
+    second source -- dropping them would leave the itemized costs short of their
+    own total.
+    """
+    blob = _events(
+        {
+            "type": "model.completed",
+            "data": {
+                "usage": {
+                    "input": 10,
+                    "cacheWrite": 4,
+                    "cost": {"input": 0.5, "cacheWrite": 0.25, "total": 0.75},
+                }
+            },
+        },
+    )
+    tokens = parse_trajectory_export(blob).tokens
+    # The rollup's own cacheWrite is still ignored (single-sourced elsewhere)...
+    assert "cacheWrite" not in tokens
+    # ...but the nested cost entry survives.
+    assert tokens["cost"] == {"input": 0.5, "cacheWrite": 0.25, "total": 0.75}
 
 
 def test_parse_trajectory_export_marks_failed_tool_result_as_error() -> None:
@@ -153,9 +322,9 @@ def test_parse_trajectory_export_marks_failed_tool_result_as_error() -> None:
         _tool_call("1", "exec", {"command": "false"}),
         _tool_result("1", "boom", is_error=True, status="error"),
     )
-    trajectory, _tokens, _output, errors = parse_trajectory_export(blob)
-    assert errors == []
-    assert trajectory[0]["status"] == "error"
+    export = parse_trajectory_export(blob)
+    assert export.errors == []
+    assert export.trajectory[0]["status"] == "error"
 
 
 def test_parse_trajectory_export_output_falls_back_to_assistant_message() -> None:
@@ -169,16 +338,16 @@ def test_parse_trajectory_export_output_falls_back_to_assistant_message() -> Non
         },
         {"type": "model.completed", "data": {"usage": {"input": 1, "output": 2}}},
     )
-    _trajectory, tokens, output, _errors = parse_trajectory_export(blob)
-    assert tokens == {"input": 1, "output": 2}
-    assert output == "done."
+    export = parse_trajectory_export(blob)
+    assert export.tokens == {"input": 1, "output": 2}
+    assert export.output == "done."
 
 
 def test_parse_trajectory_export_surfaces_decode_errors() -> None:
     blob = "{not json}\n" + json.dumps(_tool_call("1", "x", {})) + "\n"
-    trajectory, _tokens, _output, errors = parse_trajectory_export(blob)
-    assert any("parse error" in m for m in errors)
-    assert len(trajectory) == 1
+    export = parse_trajectory_export(blob)
+    assert any("parse error" in m for m in export.errors)
+    assert len(export.trajectory) == 1
 
 
 def test_parse_trajectory_export_drops_unpaired_result_and_surfaces_error() -> None:
@@ -190,12 +359,12 @@ def test_parse_trajectory_export_drops_unpaired_result_and_surfaces_error() -> N
     ``AgentResult.trajectory``; orphans are diagnostics, not trajectory entries.
     """
     blob = _events(_tool_result("ghost", "?"))
-    trajectory, _tokens, _output, errors = parse_trajectory_export(blob)
+    export = parse_trajectory_export(blob)
     # Orphan must NOT appear in the canonical trajectory.
-    assert trajectory == []
+    assert export.trajectory == []
     # ...but MUST be surfaced on errors so the run is never silent-empty.
-    assert any("without matching call" in m for m in errors)
-    assert any("ghost" in m for m in errors)
+    assert any("without matching call" in m for m in export.errors)
+    assert any("ghost" in m for m in export.errors)
 
 
 def test_strip_ansi_removes_color_codes() -> None:
@@ -365,6 +534,7 @@ def test_execute_happy_path_emits_canonical_trajectory(
     agent = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=30.0))
     result = agent.run("audit pods in default")
     assert result.errors == []
+    assert result.terminal_reason == "completed"
     assert len(result.trajectory) == 2
     assert result.trajectory[0]["name"] == "kubectl_get_pods"
     assert result.tokens == {"input": 5, "output": 10, "total": 15}
@@ -452,13 +622,57 @@ def test_execute_records_export_subprocess_failure(
 def test_execute_records_bash_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fake_bash(cmd, **kwargs):
         # core.subprocess.run wraps TimeoutExpired in SubprocessError.
-        raise SubprocessError(["/bin/bash", "-c", cmd], returncode=-1, stdout="", stderr="")
+        raise SubprocessError(
+            ["/bin/bash", "-c", cmd], returncode=-1, stdout="", stderr="", timed_out=True
+        )
 
     _install_oc_run(monkeypatch, fake_bash)
     result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=5.0)).run("p")
     assert result.has_errors()
     assert "timed out" in result.errors[0]
     assert result.trajectory == []
+    assert result.terminal_reason == "timeout"
+
+
+def test_execute_recovers_telemetry_from_a_timed_out_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A killed agent turn still exported its session; the row keeps that telemetry.
+
+    The budget ends the turn, not the session on disk, and export-trajectory is
+    a separate subprocess. Nulling the trajectory here would blank the counters
+    on exactly the rows where "how far did it get" is the question.
+    """
+
+    def fake_bash(cmd, **kwargs):
+        raise SubprocessError(
+            ["/bin/bash", "-c", cmd], returncode=-1, stdout="", stderr="", timed_out=True
+        )
+
+    _install_oc_run(monkeypatch, fake_bash, _bundle_writer(SAMPLE_EVENTS))
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=5.0)).run("p")
+    assert result.terminal_reason == "timeout"
+    assert any("timed out" in e for e in result.errors)
+    # The partial run's work survives rather than being discarded with the kill.
+    assert len(result.trajectory) == 2
+    assert result.tokens == {"input": 5, "output": 10, "total": 15}
+    assert result.output == "All pods healthy."
+
+
+def test_execute_non_timeout_subprocess_error_is_not_labelled_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``terminal_reason`` follows ``exc.timed_out``, not the exception type."""
+
+    def fake_bash(cmd, **kwargs):
+        raise SubprocessError(
+            ["/bin/bash", "-c", cmd], returncode=-1, stdout="", stderr="", timed_out=False
+        )
+
+    _install_oc_run(monkeypatch, fake_bash)
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=5.0)).run("p")
+    assert result.terminal_reason == "error"
+    assert not any("timed out" in e for e in result.errors)
 
 
 def test_execute_passes_timeout_to_bash(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -471,6 +685,62 @@ def test_execute_passes_timeout_to_bash(monkeypatch: pytest.MonkeyPatch, tmp_pat
     _install_oc_run(monkeypatch, fake_bash)
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=12.5)).run("p")
     assert captured["timeout"] == 12.5
+
+
+class _FakeClock:
+    """Monotonic clock that only moves when a fake explicitly advances it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _install_fake_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    clock = _FakeClock()
+    monkeypatch.setattr(oc_mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+    return clock
+
+
+def test_latency_excludes_the_trajectory_export(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reported latency is the agent turn, not the turn plus our export.
+
+    Exporting the trajectory afterwards is harness work; billing it to the
+    agent makes openclaw look slower than a harness that has no export step.
+    """
+    clock = _install_fake_clock(monkeypatch)
+
+    def fake_bash(cmd, **kwargs):
+        clock.now += 5.0
+        return _make_subprocess_result("ok", "", 0)
+
+    def fake_core_run(argv, **kwargs):
+        clock.now += 100.0
+        return _make_subprocess_result(json.dumps([]), "", 0)
+
+    _install_oc_run(monkeypatch, fake_bash, fake_core_run)
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
+    assert result.latency == 5.0
+
+
+def test_timeout_result_carries_the_elapsed_agent_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clock = _install_fake_clock(monkeypatch)
+
+    def fake_bash(cmd, **kwargs):
+        clock.now += 7.0
+        raise SubprocessError(
+            ["/bin/bash", "-c", cmd], returncode=-1, stdout="", stderr="", timed_out=True
+        )
+
+    _install_oc_run(monkeypatch, fake_bash)
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=7.0)).run("p")
+    assert result.latency == 7.0
+    assert result.terminal_reason == "timeout"
 
 
 # Tests for the now-deleted legacy surface — fail-fast if SSH transport returns.

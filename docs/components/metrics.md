@@ -172,10 +172,22 @@ A list of per-task records. The interesting part of each is its `scores` map, wh
 
 ### `rows.json` — the dashboard contract
 
-A flattened view, one row per setup × task × run × iteration, defined in [`row.py`](../../devops_bench/results/row.py) and produced by [`normalize.py`](../../devops_bench/results/normalize.py). This is what the leaderboard ingests. Each row carries `setupId`, `model`, `harness`, `augmentation`, `outcomeScore`, `correctnessScore`, `recoverableSafetyScore`, `catastrophic`, `scoringVersion`, `toolScore`, `latencySec`, input/output tokens, `status`, and `validated`.
+A flattened view, one row per setup × task × run × iteration, defined in [`row.py`](../../devops_bench/results/row.py) and produced by [`normalize.py`](../../devops_bench/results/normalize.py). This is what the leaderboard ingests. Each row carries `setupId`, `model`, `harness`, `augmentation`, `outcomeScore`, `correctnessScore`, `recoverableSafetyScore`, `catastrophic`, `scoringVersion`, `toolScore`, `latencySec`, the token buckets, `status`, and `validated`, plus the per-run telemetry below.
 
-Three things are deliberate here:
+| Field | Meaning |
+| --- | --- |
+| `terminalReason` | Why the *agent* stopped: `completed`, `timeout`, `error`, or `""` when the harness does not report it. Distinct from `status`, which describes the record — a run the harness killed at its budget still reads `status: "success"`. |
+| `timeoutSec` | The wall-clock budget the iteration ran under, or `null` when uncapped. "Timed out" and "used 90% of its budget" are both uninterpretable without it. |
+| `toolCalls` / `toolErrors` | Calls in the trajectory and how many returned an error. A high error count against a passing score means the model recovered; against a failing one it usually means the environment broke. |
+| `modelTurns` | Model round-trips. Not `toolCalls`: one turn can issue several tool calls, and a text-only turn issues none. |
+| `toolWaitSec` | How much of `latencySec` was spent waiting on tools, concurrent calls counted once. Without it a cold cluster and a slow model are the same number. |
+| `servedModel` | The model that actually answered, which is not always the one requested. More than one comma-joined entry means the provider failed over mid-run. |
 
+Token buckets are `inputTokens`, `cachedTokens`, `cacheWriteTokens`, `reasoningTokens`, `outputTokens` and `totalTokens`. On canonical telemetry the total is the sum of the rest; totals are read from the record and never recomputed, so a pre-canonical row can carry a total that excludes cached or reasoning tokens. A bucket the harness did not report is `null`, never `0`.
+
+Four things are deliberate here:
+
+- `latencySec` is the **agent span**, not the whole harness run — workspace setup and transcript parsing are excluded, so the number is comparable across harnesses that differ in setup cost.
 - Scores are kept **continuous** (never pre-thresholded into pass/fail), so any pass@k formula stays computable downstream.
 - A `null` score means the metric **didn't run**, distinct from a genuine zero.
 - `recoverableSafetyScore` is the **raw** fraction, not the rescaled `rec_v`. This layer maps and never scores, so the row's sub-scores will not reconcile by hand against `outcomeScore` — run the raw value through the `[0.1, 1.0]` rescale first.
