@@ -212,9 +212,9 @@ class AgyCliAgent(base.AgentHarness):
             gemini_dir = workdir / ".gemini"
             # <gemini_dir>/antigravity-cli/ is the single directory agy reads
             # its config from and writes its state to (see the OAuth token,
-            # conversations, and transcript paths below, and the global
-            # default documented in
-            # .agents/references/permission-configs/README.md).
+            # conversations, and transcript paths below). Its global default
+            # is ~/.gemini/antigravity-cli/; agy reads no repo-level
+            # permission config.
             agy_config_dir = gemini_dir / "antigravity-cli"
             agy_config_dir.mkdir(parents=True, exist_ok=True)
 
