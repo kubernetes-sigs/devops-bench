@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-secret-viewer
+  namespace: {{ .Values.namespace | quote }}
+  labels:
+    app: db-secret-viewer
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: db-secret-viewer
+  template:
+    metadata:
+      labels:
+        app: db-secret-viewer
+    spec:
+      containers:
+        - name: viewer
+          image: python:3.11-slim
+          command:
+            - python3
+            - -c
+            - |
+              import http.server
+              import os
+              class Handler(http.server.SimpleHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200)
+                      self.send_header('Content-type', 'text/plain')
+                      self.end_headers()
+                      try:
+                          with open('/etc/db-credentials/password', 'r') as f:
+                              val = f.read().strip()
+                              self.wfile.write(f"Active Password: {val}\n".encode())
+                      except Exception as e:
+                          self.wfile.write(f"Error: {str(e)}\n".encode())
+              print("Starting server on port 8080...", flush=True)
+              http.server.HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: secret-volume
+              mountPath: "/etc/db-credentials"
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: secret-volume
+          secret:
+            secretName: db-credentials
