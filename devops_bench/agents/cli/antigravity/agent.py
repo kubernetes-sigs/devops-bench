@@ -29,6 +29,7 @@ from devops_bench.agents import config as agents_config
 from devops_bench.agents import result as agents_result
 from devops_bench.agents.cli.antigravity import parsing
 from devops_bench.agents.shared import cli_capabilities
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError, preflight_mcp
 from devops_bench.core import subprocess as devops_subprocess
 
 if TYPE_CHECKING:
@@ -276,6 +277,18 @@ class AgyCliAgent(base.AgentHarness):
                 (agy_config_dir / "settings.json").write_text(
                     json.dumps(settings, indent=2), encoding="utf-8"
                 )
+
+            # Same gate the other CLI harnesses run: a granted server that never
+            # starts leaves agy falling back to shell tools while the run is
+            # still scored as an MCP arm.
+            try:
+                preflight_mcp(
+                    caps.mcp_servers,
+                    base_env={**os.environ, **env_overlay},
+                    cwd=workdir,
+                )
+            except McpUnreachableError as exc:
+                return agents_result.AgentResult.errored(f"MCP preflight failed: {exc}")
 
             # Copy (not symlink) the OAuth token into the workspace: agy may
             # refresh it in place during a run, and a symlink shared across

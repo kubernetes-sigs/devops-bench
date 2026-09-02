@@ -46,9 +46,9 @@ class AllCapabilities:
     def mcp(self) -> McpBinding | None:
         """Return the first MCP binding, or ``None`` when MCP is disabled.
 
-        Gotcha:
-            Only the first binding is honored; servers 2..N are dropped —
-            iterate ``mcp_servers`` for all.
+        Convenience for the common single-server grant. Agents drive every
+        granted server, so anything acting on the grant must iterate
+        ``mcp_servers`` rather than read this.
         """
         return self.mcp_servers[0] if self.mcp_servers else None
 
