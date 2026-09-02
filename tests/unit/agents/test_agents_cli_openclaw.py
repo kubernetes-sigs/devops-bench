@@ -526,19 +526,6 @@ def test_openclaw_agent_mirrors_rules_binding_onto_mixin_attribute() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_prepend_rules_passes_prompt_through_when_rules_empty() -> None:
-    from devops_bench.agents.cli.openclaw.agent import _prepend_rules
-
-    assert _prepend_rules("", "do the thing") == "do the thing"
-    assert _prepend_rules("   \n  ", "do the thing") == "do the thing"
-
-
-def test_prepend_rules_separates_brief_from_prompt_with_blank_line() -> None:
-    from devops_bench.agents.cli.openclaw.agent import _prepend_rules
-
-    assert _prepend_rules("be careful", "audit pods") == "be careful\n\naudit pods"
-
-
 def test_execute_prepends_bound_rules_to_oc_prompt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -597,6 +584,24 @@ def test_build_openclaw_config_wraps_servers_under_mcp() -> None:
     """A launchable binding renders under the ``mcp.servers`` config path."""
     cfg = _build_openclaw_config(AgentConfig(), (McpBinding(name="gke", command=("gke-mcp",)),))
     assert cfg == {"mcp": {"servers": {"gke": {"command": "gke-mcp"}}}}
+
+
+def test_build_openclaw_config_forwards_every_run_isolation_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both isolation vars reach the server, not just ``KUBECONFIG``.
+
+    openclaw spawns the server with a filtered env, so an unforwarded
+    ``CLOUDSDK_CONFIG`` leaves a gcloud-backed server reading the operator's
+    ambient credentials rather than the run's.
+    """
+    monkeypatch.setenv("KUBECONFIG", "/run/kubeconfig")
+    monkeypatch.setenv("CLOUDSDK_CONFIG", "/run/gcloud")
+    cfg = _build_openclaw_config(AgentConfig(), (McpBinding(name="gke", command=("gke-mcp",)),))
+    assert cfg["mcp"]["servers"]["gke"]["env"] == {
+        "KUBECONFIG": "/run/kubeconfig",
+        "CLOUDSDK_CONFIG": "/run/gcloud",
+    }
 
 
 def test_build_openclaw_config_empty_without_launchable_server_or_override() -> None:

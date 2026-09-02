@@ -73,6 +73,8 @@ from devops_bench.agents.shared.cli_capabilities import (
     agent_workdir,
     build_mcp_servers,
     materialize_skills,
+    mcp_isolation_env,
+    prepend_rules,
 )
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.errors import ConfigError
@@ -255,17 +257,19 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
         binding nor a model needing a catalog entry (caller then skips the config
         write and leaves ``OPENCLAW_CONFIG_PATH`` unset).
 
-    Each MCP server entry inherits the run's ``KUBECONFIG`` (set by ``RunEnv``) as
-    an explicit ``env`` so the MCP server (e.g. gke-mcp) reads the run-scoped
-    cluster credentials directly instead of forcing the agent to re-fetch them.
+    Each MCP server entry gets the run-isolation vars as an explicit ``env``
+    (resolved by
+    :func:`~devops_bench.agents.shared.cli_capabilities.mcp_isolation_env`) so
+    the MCP server (e.g. gke-mcp) reads the run-scoped cluster and gcloud config
+    directly instead of the operator's ambient ones. openclaw spawns the servers
+    itself, so they inherit its filtered env and not the harness's.
     """
     payload: dict = {}
     servers = build_mcp_servers(mcp_servers)
     if servers:
-        kubeconfig = os.environ.get("KUBECONFIG")
-        if kubeconfig:
+        for key, value in mcp_isolation_env(config.extra_env).items():
             for entry in servers.values():
-                entry.setdefault("env", {})["KUBECONFIG"] = kubeconfig
+                entry.setdefault("env", {})[key] = value
         payload["mcp"] = {"servers": servers}
     payload.update(_build_model_override(config))
     return payload
@@ -325,25 +329,6 @@ def _oc_model_flag(config: AgentConfig) -> str:
     if not model_id:
         return ""
     return f"--model {shlex.quote(model_id)} "
-
-
-def _prepend_rules(rules_text: str, prompt: str) -> str:
-    """Return ``prompt`` with ``rules_text`` prepended as an operator brief.
-
-    Empty / whitespace-only rules pass the prompt through unchanged so a default
-    :class:`AgentRules` is indistinguishable from "no preamble". A non-empty
-    brief is separated from the prompt by a blank line.
-
-    Args:
-        rules_text: The bound rules text (``capabilities.rules.text``).
-        prompt: The task prompt for this run.
-
-    Returns:
-        The combined string to hand to ``oc agent -m``.
-    """
-    if not rules_text or not rules_text.strip():
-        return prompt
-    return f"{rules_text.rstrip()}\n\n{prompt}"
 
 
 def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_bin: str) -> str:
@@ -437,7 +422,7 @@ class OpenClawAgent(AgentHarness):
         """
         caps = self.config.capabilities
         oc_bin = self._resolve_oc_bin()
-        final_prompt = _prepend_rules(caps.rules.text, prompt)
+        final_prompt = prepend_rules(caps.rules.text, prompt)
 
         with agent_workdir(workspace_path, prefix="oc-run-") as workdir:
             state_dir = workdir / _OPENCLAW_STATE_DIRNAME

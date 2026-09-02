@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the CLI capability helpers shared by the Gemini/openclaw agents."""
+"""Tests for the CLI capability helpers shared by the Gemini/openclaw/hermes agents."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -25,6 +27,8 @@ from devops_bench.agents.shared.cli_capabilities import (
     agent_workdir,
     build_mcp_servers,
     materialize_skills,
+    mcp_isolation_env,
+    prepend_rules,
 )
 
 
@@ -172,3 +176,32 @@ def test_agent_workdir_creates_and_cleans_up_temp_dir_when_no_path_supplied() ->
         assert workdir.name.startswith("agent-workdir-test-")
 
     assert not created.exists()
+
+
+def test_prepend_rules_passes_the_prompt_through_when_rules_are_blank() -> None:
+    """A default ``AgentRules`` must be indistinguishable from "no preamble"."""
+    assert prepend_rules("", "do the thing") == "do the thing"
+    assert prepend_rules("   \n  ", "do the thing") == "do the thing"
+
+
+def test_prepend_rules_separates_the_brief_from_the_prompt_with_a_blank_line() -> None:
+    assert prepend_rules("be careful\n", "audit pods") == "be careful\n\naudit pods"
+
+
+def test_mcp_isolation_env_reads_the_ambient_run_values() -> None:
+    with patch.dict(os.environ, {"KUBECONFIG": "/run/kubeconfig"}, clear=True):
+        assert mcp_isolation_env({}) == {"KUBECONFIG": "/run/kubeconfig"}
+
+
+def test_mcp_isolation_env_prefers_the_configured_override() -> None:
+    """``extra_env`` wins, as it does in each CLI's own env overlay."""
+    with patch.dict(os.environ, {"KUBECONFIG": "/run/kubeconfig"}, clear=True):
+        resolved = mcp_isolation_env({"KUBECONFIG": "/override"})
+
+    assert resolved == {"KUBECONFIG": "/override"}
+
+
+def test_mcp_isolation_env_treats_a_blank_override_as_unset() -> None:
+    """Presence decides, not truthiness: ``""`` must not fall back to ambient."""
+    with patch.dict(os.environ, {"KUBECONFIG": "/run/kubeconfig"}, clear=True):
+        assert mcp_isolation_env({"KUBECONFIG": ""}) == {}

@@ -84,6 +84,7 @@ _SPECS["your-key"] = ProviderSpec(
     canonical="your-key",
     adapter_family="<key>",          # the MODELS.get() key from step 1
     oc_provider="your-key",          # openclaw wire-provider id
+    hermes_provider="your-key",      # `hermes chat --provider` name, None if unsupported
     api_key_envs=("YOURPROVIDER_API_KEY",),  # () if keyless
     keyless_ok=False,
     backend=None,                    # or a backend hint your adapter reads
