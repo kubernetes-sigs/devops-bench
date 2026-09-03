@@ -358,3 +358,43 @@ def test_is_not_found_matches_both_renderings_only(stderr: str, expected: bool) 
 
 def test_is_not_found_tolerates_an_exception_without_stderr() -> None:
     assert kubectl.is_not_found(RuntimeError("boom")) is False
+
+
+def test_exec_pod_builds_argv_and_returns_the_completed_process(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout="v2\n"),
+    )
+
+    result = kubectl.exec_pod(
+        "prober",
+        ["cat", "/etc/version"],
+        container="sidecar",
+        namespace="shop",
+    )
+
+    assert result.stdout == "v2\n"
+    assert mock_run.call_args.args[0] == [
+        "kubectl",
+        "exec",
+        "prober",
+        "-c",
+        "sidecar",
+        "-n",
+        "shop",
+        "--",
+        "cat",
+        "/etc/version",
+    ]
+
+
+def test_exec_pod_separates_the_command_from_kubectl_flags(mocker: MockerFixture) -> None:
+    # Without the `--` terminator, a command carrying its own flags would be
+    # parsed by kubectl instead of being passed into the container.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.exec_pod("prober", ["curl", "-s", "http://orders-api/health"])
+
+    argv = mock_run.call_args.args[0]
+    assert argv[: argv.index("--")] == ["kubectl", "exec", "prober"]
+    assert argv[argv.index("--") + 1 :] == ["curl", "-s", "http://orders-api/health"]
