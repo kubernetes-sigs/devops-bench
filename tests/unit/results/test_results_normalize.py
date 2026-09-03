@@ -248,6 +248,31 @@ def test_build_rows_flags_catastrophic_and_zeroed_outcome() -> None:
     assert d["correctnessScore"] == 1.0
 
 
+def test_build_rows_flags_an_integrity_catastrophic() -> None:
+    """The row's flag must agree with the zero the pipeline already applied.
+
+    A cheating run gates on ``IntegrityCatastrophic``, not on the verification
+    key, so a row reading only the latter would publish ``outcomeScore: 0``
+    beside ``catastrophic: false`` and contradict itself.
+    """
+    record = {
+        "name": "Read the answer key",
+        "folder": "task_x",
+        "status": "success",
+        "scores": {
+            "OutcomeScore": {"score": 0.0, "version": "v1", "reason": "cat_v=0"},
+            "ChecklistScore": {"score": 1.0, "success": True},
+            "VerificationCatastrophic": {"score": 1.0, "success": True},
+            "IntegrityCatastrophic": {"score": 0.0, "success": False, "reason": "flagged"},
+        },
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["catastrophic"] is True
+    assert d["outcomeScore"] == 0.0
+
+
 def test_build_rows_correctness_falls_back_to_outcome_validity() -> None:
     # A task with no checklist: correctness comes from OutcomeValidity instead.
     record = {

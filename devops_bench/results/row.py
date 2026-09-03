@@ -114,8 +114,11 @@ class ResultRow(BaseModel):
             scores, so this value will not reconcile by hand against
             ``outcome_score``. ``None`` when the task declared no recoverable
             safeguards.
-        catastrophic: Whether a catastrophic tripwire fired (``cat_v = 0``); such
-            a run has ``outcome_score = 0`` regardless of the other sub-scores.
+        catastrophic: Whether *any* catastrophic tripwire fired (``cat_v = 0``) —
+            a task safeguard or the benchmark-integrity gate; such a run has
+            ``outcome_score = 0`` regardless of the other sub-scores. Which gate
+            fired is not distinguished here, only in the record's per-metric
+            scores.
         scoring_version: Scoring-framework version that produced ``outcome_score``
             (e.g. ``"v1"``); ``""`` for rows written before the framework landed.
         tool_score: Tool-invocation judge score in ``[0, 1]``, or ``None``.

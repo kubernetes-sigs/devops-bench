@@ -30,7 +30,6 @@ from devops_bench.core import score_keys
 from devops_bench.results.row import Manifest, ResultRow
 
 __all__ = [
-    "CATASTROPHIC_SCORE_KEY",
     "OUTCOME_SCORE_KEY",
     "TOOL_SCORE_KEY",
     "NormalizedTokens",
@@ -63,7 +62,12 @@ _RECOVERABLE_KEYS = (
     score_keys.VERIFICATION_RECOVERABLE_KEY,
     score_keys.JUDGED_RECOVERABLE_KEY,
 )
-CATASTROPHIC_SCORE_KEY = score_keys.VERIFICATION_CATASTROPHIC_KEY
+# Every key that hard gates the outcome. Shared with ``metrics.pipeline``
+# rather than mirrored, unlike the two chains above: the row's ``catastrophic``
+# flag has to agree with the zero the pipeline already applied to
+# ``outcomeScore``, and a comment is a weaker guarantee of that than one
+# definition. Which gate fired is not yet on the row.
+_CATASTROPHIC_KEYS = score_keys.CATASTROPHIC_SCORE_KEYS
 
 # Token usage aliases per provider, in lookup priority. The canonical keys
 # (``input`` / ``cached`` / ``reasoning`` / ``output``; see
@@ -293,7 +297,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
         scores = record.get("scores")
         tokens = normalize_tokens(record.get("tokens"))
         correctness = _first_score(scores, _CORRECTNESS_KEYS)
-        catastrophic_score = extract_score(scores, CATASTROPHIC_SCORE_KEY)
+        catastrophic = any(extract_score(scores, k) == 0.0 for k in _CATASTROPHIC_KEYS)
         rows.append(
             ResultRow(
                 setup_id=manifest.setup_id,
@@ -308,7 +312,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 outcome_score=extract_score(scores, OUTCOME_SCORE_KEY),
                 correctness_score=correctness,
                 recoverable_safety_score=_first_score(scores, _RECOVERABLE_KEYS),
-                catastrophic=catastrophic_score == 0.0,
+                catastrophic=catastrophic,
                 scoring_version=_scoring_version(scores),
                 tool_score=extract_score(scores, TOOL_SCORE_KEY),
                 latency_sec=float(record.get("latency") or 0.0),

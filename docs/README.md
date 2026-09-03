@@ -23,6 +23,7 @@ and [glossary](./components/glossary.md).
 - [Infrastructure](./components/infra.md) — deployers and cloud providers, and how to configure infra for a task.
 - [Agents](./components/agents.md) — the agent harnesses under test and their capabilities.
 - [Metrics](./components/metrics.md) — the scoring framework and how to read results.
+- [Cheating detection](./components/cheat-detection.md) — how runs are scanned for access to the benchmark's own material.
 
 ## Reference
 
