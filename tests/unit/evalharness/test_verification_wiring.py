@@ -57,6 +57,24 @@ def _harness() -> DefaultEvalHarness:
     return harness
 
 
+class _FakeClock:
+    """Monotonic clock a test advances explicitly, in place of real sleeps.
+
+    ``_run_verification`` reads the clock only through ``time.monotonic``, so
+    substituting this for the module's ``time`` binding makes the budget
+    arithmetic exact and keeps the suite off the wall clock.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def test_report_carries_the_scoring_vocabulary_for_every_entry() -> None:
     entries, errors = parse_entries(_SPEC)
     assert errors == []
@@ -339,3 +357,133 @@ def test_resolve_spec_placeholders_recurses_through_nested_entries() -> None:
     checks = resolved[0]["check"]["checks"]
     assert checks[0]["namespace"] == "shop"
     assert checks[1]["selector"] == "app=web"
+
+
+def test_converging_entries_share_the_total_budget_rather_than_racing_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No converging entry may take the whole budget and starve the rest.
+
+    Regression: the total budget used to be consumed first-come-first-served,
+    so on a failing task the first few entries each polled to their own
+    per-entry cap and every later entry was recorded budget-exhausted. Those
+    entries then dropped out of the score's denominator, producing a
+    plausible-looking correctness value computed from a fraction of the
+    declared objectives.
+    """
+    spec = [{**_SPEC[0], "name": f"web-ready-{i}"} for i in range(10)]
+    entries, errors = parse_entries(spec)
+    assert errors == []
+    monkeypatch.setattr("devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", 100.0)
+    clock = _FakeClock()
+    monkeypatch.setattr("devops_bench.evalharness.default.time", clock)
+
+    seen: list[float] = []
+
+    def fake_run_entry(entry: object, timeout_sec: float = 120) -> VerificationResult:
+        # Model the worst case the regression was about: an entry that never
+        # converges polls to the end of whatever it was granted. Burning the
+        # share is what makes the budget actually deplete, so a starving
+        # allocation would show up in `seen` instead of being masked by a
+        # clock that never moves.
+        seen.append(timeout_sec)
+        clock.advance(timeout_sec)
+        return VerificationResult(success=False, elapsed_time=timeout_sec, reason="not ready")
+
+    with patch(
+        "devops_bench.evalharness.default.VerifierAgent.run_entry", side_effect=fake_run_entry
+    ):
+        report = _harness()._run_verification(entries, timeout_sec=120)
+
+    # Every entry was actually evaluated: none fell off the end of the budget.
+    assert len(seen) == 10
+    assert not any(
+        r["reason"] == "verification total budget exhausted before evaluation" for r in report
+    )
+    # Every entry got exactly its fair share (100/10), not the full 120s cap, and
+    # the ten shares add up to the whole budget with nothing left stranded.
+    assert seen == [100.0 / 10] * 10
+    assert clock.now == 100.0
+    # ...and because that share is a fraction of the 120s the task agreed to, a
+    # non-convergence is not an observation that the condition is false. Scoring
+    # it "fail" would report full coverage over a failure never actually seen.
+    assert all(r["status"] == "error" for r in report)
+    assert all(r["success"] is False for r in report)
+    assert all("not observed" in r["reason"] for r in report)
+
+
+def test_an_early_finisher_hands_its_unused_budget_to_later_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The share is recomputed live, so unused time is not forfeited."""
+    spec = [{**_SPEC[0], "name": f"web-ready-{i}"} for i in range(4)]
+    entries, errors = parse_entries(spec)
+    assert errors == []
+    monkeypatch.setattr("devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", 40.0)
+    monkeypatch.setattr("devops_bench.evalharness.default.time", _FakeClock())
+
+    seen: list[float] = []
+
+    def fake_run_entry(entry: object, timeout_sec: float = 120) -> VerificationResult:
+        seen.append(timeout_sec)
+        return VerificationResult(success=True, elapsed_time=0.0, reason="ok")
+
+    with patch(
+        "devops_bench.evalharness.default.VerifierAgent.run_entry", side_effect=fake_run_entry
+    ):
+        _harness()._run_verification(entries, timeout_sec=120)
+
+    # Each returns instantly, so nothing is spent and every entry sees the whole
+    # 40s divided by however many converging entries are still to come.
+    assert seen == [40.0 / 4, 40.0 / 3, 40.0 / 2, 40.0 / 1]
+    # Strictly greater: a static per-entry share would leave these equal, so
+    # this is what actually shows the unused time being handed back.
+    assert seen[-1] > seen[0]
+
+
+def test_a_slow_assert_entry_does_not_eat_the_converging_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An assert entry is outside the total budget, so it must not spend it.
+
+    Assert entries are excluded from the share divisor, but that alone does not
+    protect the converging entries: a slow single evaluation still advances the
+    wall clock the total deadline is measured against. The deadline is pushed
+    out by the assert's own duration so the entries after it are unaffected.
+    """
+    spec = [
+        {**_SPEC[0], "name": "safeguard", "role": "safeguard", "severity": "recoverable"},
+        {**_SPEC[0], "name": "objective-1"},
+        {**_SPEC[0], "name": "objective-2"},
+    ]
+    entries, errors = parse_entries(spec)
+    assert errors == []
+    assert entries[0].resolved_mode == "assert"
+    monkeypatch.setattr("devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", 10.0)
+    clock = _FakeClock()
+    monkeypatch.setattr("devops_bench.evalharness.default.time", clock)
+
+    slow_assert_sec = 1.0
+    seen: list[tuple[str, float]] = []
+
+    def fake_run_entry(entry: object, timeout_sec: float = 120) -> VerificationResult:
+        name = entry.name  # type: ignore[attr-defined]
+        seen.append((name, timeout_sec))
+        if name == "safeguard":
+            clock.advance(slow_assert_sec)
+        return VerificationResult(success=True, elapsed_time=0.0, reason="ok")
+
+    with patch(
+        "devops_bench.evalharness.default.VerifierAgent.run_entry", side_effect=fake_run_entry
+    ):
+        _harness()._run_verification(entries, timeout_sec=120)
+
+    budgets = {name: t for name, t in seen}
+    # Both objectives must actually run: asserting only the first would pass
+    # even if the second were skipped or handed an exhausted budget.
+    assert set(budgets) == {"safeguard", "objective-1", "objective-2"}
+    # Both objectives still split the full 10s, not 10s minus the assert's 1s.
+    assert budgets["objective-1"] == 10.0 / 2
+    # objective-1 returns instantly, so its unspent share is handed back and
+    # objective-2 sees the whole budget rather than half of it.
+    assert budgets["objective-2"] == 10.0

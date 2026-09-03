@@ -461,19 +461,41 @@ class DefaultEvalHarness(Harness):
         evaluator.
 
         Two budgets apply. ``timeout_sec`` is the per-entry cap for a single
-        converging entry's checks. :data:`VERIFICATION_TOTAL_BUDGET_SEC` is
-        the wall-clock cap for this whole pass across every entry; without it
-        a task with many failing converge objectives burns entries x
-        ``timeout_sec`` (12 entries x 120s is 22+ minutes). A single monotonic
-        deadline is computed from the total budget once at the top, and each
-        converging entry gets ``min(timeout_sec, remaining)``. Assert entries
-        ignore the total budget and always run: they are single evaluations,
-        and a safeguard that goes unchecked defeats the point of having it.
-        A converging entry with less than :data:`MIN_LEAF_BUDGET_SECONDS`
-        remaining is recorded here as budget-exhausted rather than handed to
-        ``run_entry``: the runner's own leaf guard uses that same threshold
-        to short-circuit an under-budget leaf as a definite "deadline
-        exhausted" outcome, and this entry was never observed either way.
+        converging entry's checks. :data:`VERIFICATION_TOTAL_BUDGET_SEC`
+        bounds the converging entries as a group; without it a task with many
+        failing converge objectives burns entries x ``timeout_sec`` (12
+        entries x 120s is 22+ minutes). It is not a cap on the pass as a
+        whole: each assert entry runs outside the budget and pushes the
+        deadline out by its own duration, so the worst case is the total
+        budget plus the sum of those durations, and an assert leaf floors its
+        own kubectl call rather than inheriting a zero budget (see
+        :func:`~devops_bench.verification.base.single_call_timeout`).
+
+        A single monotonic deadline is computed from the total budget once at
+        the top, and the converging entries **share** what remains of it: each
+        gets ``min(timeout_sec, remaining / converging_entries_left)``. Sharing
+        is what keeps the total cap from being consumed first-come-first-served,
+        where a handful of early entries polling to their own cap leave the
+        rest unevaluated and silently drop out of the score's denominator. The
+        share is recomputed from the live remaining time, so an entry that
+        finishes early hands its unused budget back to the ones after it.
+        Assert entries ignore the total budget and always run: they are single
+        evaluations, and a safeguard that goes unchecked defeats the point of
+        having it.
+
+        A converging entry whose share came in under ``timeout_sec`` and did
+        not converge is recorded ``"error"``, not ``"fail"``. Such an entry
+        fails only by reaching a deadline, and a truncated deadline is one this
+        pass imposed rather than one the task agreed to: the condition was not
+        observed false, it was not observed. Scoring it as a miss would trade
+        the old symptom (correctness computed from a fraction of the
+        objectives, with coverage visibly low) for a subtler one: full-looking
+        coverage over failures the harness never saw. A converging entry with
+        less than :data:`MIN_LEAF_BUDGET_SECONDS` remaining is likewise
+        recorded as budget-exhausted rather than handed to ``run_entry``: the
+        runner's own leaf guard uses that same threshold to short-circuit an
+        under-budget leaf as a definite "deadline exhausted" outcome, and this
+        entry was never observed either way.
 
         Args:
             entries: The task's parsed verification entries.
@@ -487,8 +509,22 @@ class DefaultEvalHarness(Harness):
         agent = VerifierAgent()
         report: list[dict[str, Any]] = []
         total_deadline = time.monotonic() + VERIFICATION_TOTAL_BUDGET_SEC
+        # How many converging entries remain from each position onward, so an
+        # early entry that polls to its own cap cannot starve the ones after it.
+        # Counted per position rather than decremented as the loop goes: a
+        # running counter goes stale the moment an entry is skipped before
+        # reaching the decrement, and obliges every mode added later to maintain
+        # it. Assert entries are excluded because they consume no budget, so
+        # counting them would shrink everyone's share for nothing.
+        converging_left: list[int] = []
+        still_to_come = 0
+        for entry in reversed(entries):
+            if entry.resolved_mode != "assert":
+                still_to_come += 1
+            converging_left.append(still_to_come)
+        converging_left.reverse()
 
-        for entry in entries:
+        for index, entry in enumerate(entries):
             remaining = total_deadline - time.monotonic()
             if entry.resolved_mode != "assert" and remaining < MIN_LEAF_BUDGET_SECONDS:
                 # Never evaluated, not a condition observed false.
@@ -508,13 +544,43 @@ class DefaultEvalHarness(Harness):
                 )
                 continue
 
+            # Recomputed from the live remaining time, so an entry that finishes
+            # early hands its unused share back to the rest.
+            share = remaining / max(converging_left[index], 1)
+            # The floor is not a guard: the check above already establishes
+            # remaining >= MIN_LEAF_BUDGET_SECONDS. It deliberately lets an entry
+            # overspend its share once that share drops below a second, because a
+            # leaf handed a fraction of a second buys a guaranteed non-answer
+            # rather than a cheap one. The cost is tail starvation in miniature:
+            # past roughly VERIFICATION_TOTAL_BUDGET_SEC / MIN_LEAF_BUDGET_SECONDS
+            # converging entries the early ones take their full second and the
+            # rest fall into the budget-exhausted path above.
+            entry_budget = max(share, MIN_LEAF_BUDGET_SECONDS)
+            # Handed to an assert entry for symmetry only: run_entry discards
+            # timeout_sec outright for a single evaluation.
+            granted = min(timeout_sec, entry_budget)
+            truncated = entry.resolved_mode != "assert" and granted < timeout_sec
+
+            started = time.monotonic()
             try:
-                result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
+                result = agent.run_entry(entry, timeout_sec=granted)
                 success = result.success
                 status = result.status
                 reason = result.reason
                 elapsed = result.elapsed_time
                 children = [child.model_dump() for child in result.children]
+                if truncated and status == "fail":
+                    # Not observed false, just not observed: a converging entry
+                    # fails only by reaching a deadline, and this one's deadline
+                    # was the shared budget rather than the cap the task agreed
+                    # to. "error" keeps it out of the correctness denominator so
+                    # coverage can report how much of the spec was measured.
+                    success = False
+                    status = "error"
+                    reason = (
+                        f"not observed: given {granted:.1f}s of the "
+                        f"{timeout_sec:.0f}s converge budget; {reason}"
+                    )
             except Exception as exc:  # noqa: BLE001 - one entry must not abort the rest
                 _log.exception("verification entry %r failed to evaluate", entry.name)
                 success, status, reason, elapsed, children = (
@@ -524,6 +590,13 @@ class DefaultEvalHarness(Harness):
                     0.0,
                     [],
                 )
+            finally:
+                if entry.resolved_mode == "assert":
+                    # An assert entry is outside the total budget, so it must not
+                    # spend it either: push the deadline out by however long it
+                    # took. Otherwise a slow single evaluation silently shortens
+                    # every converging entry that follows.
+                    total_deadline += time.monotonic() - started
 
             report.append(
                 {
