@@ -66,6 +66,26 @@ def test_rebatch_stamps_shared_run_id_and_t():
     assert [r.task_folder for r in out] == ["task-a", "task-b"]
 
 
+def test_rebatch_keeps_historical_catastrophic_bool_beside_defaulted_kinds():
+    """A row written before ``catastrophicKinds`` existed keeps its bool.
+
+    Re-validation defaults the missing list to ``[]`` while ``catastrophic``
+    stays ``True``, so on historical rows the bool is authoritative and
+    ``catastrophic == bool(catastrophicKinds)`` does *not* hold (see
+    ``results/row.py``). Pinned here because deriving the bool from the list —
+    the obvious later cleanup — would silently flip such a row to clean.
+    """
+    row = _row(catastrophic=True, outcomeScore=0.0)
+    assert "catastrophicKinds" not in row
+    (out,) = rebatch_rows([row], run_id="run_x", t="2026-06-01T12:00:00Z")
+    assert out.catastrophic is True
+    assert out.catastrophic_kinds == []
+    # The re-serialized shape a reader consumes agrees with the model.
+    dumped = out.to_dict()
+    assert dumped["catastrophic"] is True
+    assert dumped["catastrophicKinds"] == []
+
+
 def test_dedupe_keeps_latest_original_t():
     rows = [
         _row(taskFolder="task-a", t="2026-06-01T00:00:01Z", outcomeScore=0.0),

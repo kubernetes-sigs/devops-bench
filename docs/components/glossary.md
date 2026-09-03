@@ -69,6 +69,7 @@ devops-bench/
 │   ├── chaos/               # ChaosSpec, faults, triggers, ChaosAgent
 │   ├── verification/        # VerificationSpec + leaf verifiers
 │   ├── metrics/             # LLM-as-judge + deterministic scoring (METRICS registry)
+│   ├── cheat_detection/     # Trajectory scan for access to the benchmark's own material
 │   ├── tasks/               # Task schema + filesystem loader
 │   ├── k8s/                 # kubectl wrappers (get, wait, poll, port-forward)
 │   ├── results/             # Result rows, manifest, aggregation, normalization

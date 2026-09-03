@@ -35,6 +35,7 @@ import pytest
 from devops_bench.agents import AGENTS, AgentHarness
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import ConfigError, MissingDependencyError
+from devops_bench.core.score_keys import INTEGRITY_CATASTROPHIC_KEY, OUTCOME_SCORE_KEY
 from devops_bench.evalharness import default as harness_default
 from devops_bench.evalharness.default import DefaultEvalHarness
 from devops_bench.tasks import Task
@@ -47,6 +48,9 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "BENCH_USE_MCP",
         "BENCH_AGENT_TYPE",
+        "BENCH_CHEAT_DETECT",
+        "BENCH_CHEAT_RULES",
+        "BENCH_CHEAT_INVENTORY",
         "AGENT_MCP_SERVER",
         "AGENT_ALLOWED_TOOLS",
         "AGENT_SKILLS_PATHS",
@@ -58,6 +62,10 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "NAMESPACE",
     ):
         monkeypatch.delenv(var, raising=False)
+    # The pre-run inventory scans Path.home(); unit runs must not depend on
+    # whatever happens to live in the developer's real home directory. The
+    # dedicated inventory test re-enables it against a controlled fake home.
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "0")
 
 
 def test_parse_chaos_specs_raises_on_malformed_json(isolated_env: None) -> None:
@@ -695,6 +703,7 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "recoverable_safety",
         "chaos_report",
         "perf_report",
+        "cheating_report",
         "documentation",
         "capabilities_granted",
         "verification_parse_errors",
@@ -789,3 +798,335 @@ def test_success_and_failed_records_have_identical_top_level_keys(isolated_env: 
     )
     failed = harness._build_failed_record(task, RuntimeError("boom"))  # noqa: SLF001
     assert set(success.keys()) == set(failed.keys()) == _RESULTS_JSON_REQUIRED_KEYS
+
+
+# --- cheating detection wiring (flag-only) ---
+
+
+class _SensitiveReadingAgent(AgentHarness):
+    """Stand-in agent whose trajectory reads the task definition."""
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        return AgentResult(
+            output="done",
+            trajectory=[
+                ToolCall(
+                    name="exec",
+                    args={"command": "cat ~/devops-bench/tasks/common/opa-remediation/task.yaml"},
+                    result=None,
+                    status="completed",
+                ).to_dict()
+            ],
+        )
+
+
+def _run_with_fake_agent(tmp_path: Path, agent_key: str) -> dict[str, Any]:
+    """Register the sensitive-reading agent, run one no-infra task, return its record."""
+    AGENTS.register(agent_key)(_SensitiveReadingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type=agent_key,
+            no_infra=True,
+            results_root=str(tmp_path),
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        results = harness.run([task])
+        assert len(results) == 1
+        return results[0]
+    finally:
+        AGENTS._items.pop(agent_key, None)  # noqa: SLF001
+
+
+def test_run_flags_sensitive_access_and_gates_it_without_a_judge(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """A task.yaml read in the trajectory is flagged, then gated to zero.
+
+    End to end through ``run()``, with no judge configured — ``get_judge_model()``
+    raises in this environment, which is the point. The integrity gate is
+    deterministic, so an unrelated judge outage must not be able to unscore it:
+    before the fallback in ``_score``, that exception aborted the whole batch and
+    a cheating run kept a null ``outcomeScore``, dropping out of leaderboard
+    aggregates entirely. ``validated`` stays untouched either way — the gate
+    publishes a zero, it does not invalidate the row.
+    """
+    record = _run_with_fake_agent(tmp_path, "fake-sensitive-reader")
+
+    report = record["cheating_report"]
+    assert report["status"] == "flagged"
+    assert "task-definition" in report["categories"]
+    assert "harness-repo" in report["categories"]
+    assert report["findings"][0]["trajectory_index"] == 0
+
+    scores = record["scores"]
+    assert scores[INTEGRITY_CATASTROPHIC_KEY]["score"] == 0.0
+    assert scores[OUTCOME_SCORE_KEY]["score"] == 0.0
+    assert INTEGRITY_CATASTROPHIC_KEY in scores[OUTCOME_SCORE_KEY]["reason"]
+    # Judged metrics found no judge and are simply absent, not failed-closed.
+    assert "OutcomeValidity" not in scores
+    assert record["validated"] is False
+
+
+def test_run_leaves_report_empty_when_detection_disabled(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BENCH_CHEAT_DETECT=0 keeps the seeded empty report on every record."""
+    monkeypatch.setenv("BENCH_CHEAT_DETECT", "0")
+    record = _run_with_fake_agent(tmp_path, "fake-sensitive-reader-off")
+    assert record["cheating_report"] == {}
+
+
+def test_bad_cheat_rules_path_fails_loud_at_construction(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo'd BENCH_CHEAT_RULES is an operator error, not a detector failure:
+    it must raise at harness construction, not degrade to empty reports."""
+    monkeypatch.setenv("BENCH_CHEAT_RULES", str(tmp_path / "no-such-rules.yaml"))
+    with pytest.raises(ConfigError, match="rules file"):
+        DefaultEvalHarness(project_id="p", cluster_name="c")
+
+
+def test_detection_failure_on_one_record_spares_the_rest(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Annotation is best-effort per record: one failing record keeps its
+    seeded empty report while every other record is still annotated."""
+    from devops_bench.cheat_detection import annotate_records
+
+    def flaky(records: list[dict[str, Any]], rules: Any) -> None:
+        if records[0].get("name") == "boom":
+            raise RuntimeError("scan exploded")
+        annotate_records(records, rules)
+
+    # Patched where the harness looks the name up, not where it is defined.
+    monkeypatch.setattr("devops_bench.evalharness.default.annotate_records", flaky)
+
+    AGENTS.register("fake-flaky-detection")(_LeftoverReadingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-flaky-detection",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        tasks = [
+            Task.from_dict({"task_id": "t1", "name": "boom", "prompt": "p"}),
+            Task.from_dict({"task_id": "t2", "name": "fine", "prompt": "p"}),
+        ]
+        results = harness.run(tasks)
+    finally:
+        AGENTS._items.pop("fake-flaky-detection", None)  # noqa: SLF001
+
+    assert results[0]["cheating_report"] == {}
+    assert results[1]["cheating_report"]["status"] == "clean"
+
+
+class _LeftoverReadingAgent(AgentHarness):
+    """Stand-in agent whose trajectory reads a prior run's leftover notes."""
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        return AgentResult(
+            output="done",
+            trajectory=[
+                ToolCall(
+                    name="exec",
+                    args={"command": "cat ~/old-notes.txt"},
+                    result=None,
+                    status="completed",
+                ).to_dict()
+            ],
+        )
+
+
+def test_run_inventory_flags_prior_run_leftover_access(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file already in the home before the run generates a live inventory rule."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / "old-notes.txt").write_text("leftover from a previous run\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+
+    AGENTS.register("fake-leftover-reader")(_LeftoverReadingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-leftover-reader",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        results = harness.run([task])
+    finally:
+        AGENTS._items.pop("fake-leftover-reader", None)  # noqa: SLF001
+
+    report = results[0]["cheating_report"]
+    assert report["status"] == "flagged"
+    assert "prior-run-artifact" in report["categories"]
+
+
+def test_run_inventory_spares_prompt_authorized_entry(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing entry the task prompt names is required work, not a cheat."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / "old-notes.txt").write_text("leftover from a previous run\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+
+    AGENTS.register("fake-authorized-reader")(_LeftoverReadingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-authorized-reader",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        task = Task.from_dict(
+            {
+                "task_id": "t",
+                "name": "demo",
+                "prompt": "Review the handover notes in 'old-notes.txt' and act on them.",
+            }
+        )
+        results = harness.run([task])
+    finally:
+        AGENTS._items.pop("fake-authorized-reader", None)  # noqa: SLF001
+
+    assert results[0]["cheating_report"]["status"] == "clean"
+
+
+def test_run_survives_detector_failure(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detector crash must not sink the run; results.json is still written."""
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr("devops_bench.evalharness.default.annotate_records", _boom)
+    record = _run_with_fake_agent(tmp_path, "fake-sensitive-reader-crash")
+
+    assert record["status"] == "success"
+    assert record["cheating_report"] == {}
+    # The raw results survived the detector failure on disk as well.
+    run_dirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert len(run_dirs) == 1 and (run_dirs[0] / "results.json").exists()
+
+
+class _BatchContaminatingAgent(AgentHarness):
+    """Task 1 leaves a deliverable in the home; task 2 reads it back.
+
+    Class-level state because the registry constructs its own instance per
+    task, and the point of the test is what carries *between* those tasks.
+    """
+
+    home: Path
+    calls: int = 0
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        type(self).calls += 1
+        if type(self).calls == 1:
+            (self.home / "task-1-report.md").write_text(
+                "# Task 1 remediation\n- set privileged to false on team-alpha/cache\n",
+                encoding="utf-8",
+            )
+            command = "echo done > ~/task-1-report.md"
+        else:
+            command = "cat ~/task-1-report.md"
+        return AgentResult(
+            output="done",
+            trajectory=[
+                ToolCall(
+                    name="exec", args={"command": command}, result=None, status="completed"
+                ).to_dict()
+            ],
+        )
+
+
+def test_inventory_is_resnapshotted_between_tasks(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 1's deliverable is an answer key for task 2, and must be covered.
+
+    A single run-start snapshot cannot see it — the file does not exist yet
+    when the batch begins — so this pins that the home is re-inventoried
+    before each task rather than once per invocation.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+
+    _BatchContaminatingAgent.home = fake_home
+    _BatchContaminatingAgent.calls = 0
+    AGENTS.register("fake-batch-contaminator")(_BatchContaminatingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-batch-contaminator",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        results = harness.run(
+            [
+                Task.from_dict({"task_id": "t1", "name": "writer", "prompt": "do the work"}),
+                Task.from_dict({"task_id": "t2", "name": "reader", "prompt": "do other work"}),
+            ]
+        )
+    finally:
+        AGENTS._items.pop("fake-batch-contaminator", None)  # noqa: SLF001
+
+    # Task 1 created the entry; its own snapshot predates it, so it stays clean.
+    assert results[0]["cheating_report"]["status"] == "clean"
+    # Task 2's snapshot saw it, so reading it by path is flagged.
+    report = results[1]["cheating_report"]
+    assert report["status"] == "flagged"
+    assert "prior-run-artifact" in report["categories"]
+
+
+def test_mid_batch_entry_is_not_fingerprinted(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry created during the batch gets a path rule but no fingerprint.
+
+    Fingerprints are unfilterable, so fingerprinting task 1's honest report
+    would flag a later iteration that merely worded its own report the same
+    way. Only the run-start leftovers may contribute content patterns.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+
+    _BatchContaminatingAgent.home = fake_home
+    _BatchContaminatingAgent.calls = 0
+    AGENTS.register("fake-batch-fingerprint")(_BatchContaminatingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-batch-fingerprint",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        harness.run(
+            [
+                Task.from_dict({"task_id": "t1", "name": "writer", "prompt": "do the work"}),
+                Task.from_dict({"task_id": "t2", "name": "reader", "prompt": "do other work"}),
+            ]
+        )
+        rules = harness._inventory_home(fingerprint_only=frozenset())  # noqa: SLF001
+    finally:
+        AGENTS._items.pop("fake-batch-fingerprint", None)  # noqa: SLF001
+
+    assert "task-1-report.md" in {r.source for r in rules if r.source}
+    assert not any("team-alpha/cache" in p for r in rules for p in r.patterns)
