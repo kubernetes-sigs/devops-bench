@@ -32,16 +32,25 @@ import shlex
 import textwrap
 import threading
 import time
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from devops_bench.chaos.base import FAULTS, ChaosResult, Fault
+from devops_bench.chaos.base import (
+    ENV_LOCAL_PORT,
+    ENV_SKIP_PORT_FORWARD,
+    ENV_TARGET_DEPLOYMENT,
+    ENV_TARGET_NAMESPACE,
+    FAULTS,
+    ChaosResult,
+    Fault,
+)
 from devops_bench.core import get_logger
 from devops_bench.core.context import RunContext
 from devops_bench.core.subprocess import run
-from devops_bench.k8s import port_forward, rollout_status
+from devops_bench.k8s import get_resource, poll_until, port_forward, rollout_status
 
 __all__ = [
     "GenerateLoadFault",
@@ -60,23 +69,19 @@ _LOAD_MARKER = "fortio load"
 # Wall-clock ceiling for a single chaos command.
 _COMMAND_TIMEOUT = 40
 
-# The workload's in-cluster (remote) port for chaos load generation, and the
-# default local side of the port-forward. Parallel runs override only the local
-# side via ``_ENV_LOCAL_PORT`` so two concurrent forwards do not contend.
-_LOCAL_PORT = 8080
+# Fallback port used only when the target Service cannot be read. The real
+# ports are discovered from the Service (see :func:`_resolve_endpoint`).
+_FALLBACK_PORT = 8080
 
 # Single source of truth for the load target when a spec omits one. The local
 # port-forward URL the cluster workload is exposed on.
-_DEFAULT_TARGET_URL = f"http://localhost:{_LOCAL_PORT}"
+_DEFAULT_TARGET_URL = f"http://localhost:{_FALLBACK_PORT}"
 
-# ``RunContext.env`` keys naming the port-forward target the harness writes
-# onto the context before injection.
-_ENV_TARGET_DEPLOYMENT = "CHAOS_TARGET_DEPLOYMENT"
-_ENV_TARGET_NAMESPACE = "CHAOS_TARGET_NAMESPACE"
-_ENV_SKIP_PORT_FORWARD = "CHAOS_SKIP_PORT_FORWARD"
-# Optional per-run local port the harness allocates for parallel isolation; the
-# fault binds the port-forward's local side here and points the load URL at it.
-_ENV_LOCAL_PORT = "CHAOS_LOCAL_PORT"
+# Seconds to wait for the target Service's external LoadBalancer IP to be
+# assigned. LB provisioning typically completes within a minute but can lag —
+# bound it so a stuck assignment falls back to the port-forward path instead of
+# stalling the run.
+_LB_IP_TIMEOUT_SEC = 180
 
 # Seconds to wait for the target deployment's rollout to finish before opening
 # the port-forward. The agent often mutates the deployment (e.g. adds resource
@@ -216,6 +221,99 @@ def run_chaos_command(
         return f"Error: {exc}"
 
 
+@dataclass(frozen=True)
+class _Endpoint:
+    """How the target workload can be reached, as read from its Service.
+
+    Attributes:
+        port: The Service's exposed port — what a client outside the cluster
+            (an external LoadBalancer) connects to.
+        target_port: The pod-side port a ``kubectl port-forward`` must target.
+            Falls back to :attr:`port` when the Service names it symbolically,
+            since a named port cannot be forwarded without resolving the pod
+            spec.
+        lb_host: External LoadBalancer IP or hostname, or ``None`` when the
+            Service is not a LoadBalancer or none was assigned in time.
+    """
+
+    port: int
+    target_port: int
+    lb_host: str | None
+
+
+def _read_ports(doc: dict[str, Any]) -> tuple[int, int]:
+    """Extract ``(port, target_port)`` from a Service document."""
+    ports = (doc.get("spec") or {}).get("ports") or []
+    entry = ports[0] if ports else {}
+    port = entry.get("port") or _FALLBACK_PORT
+    raw_target = entry.get("targetPort")
+    # A symbolic targetPort ("http") would need the pod spec to resolve; the
+    # Service port is the closest usable stand-in.
+    target_port = raw_target if isinstance(raw_target, int) else port
+    return int(port), int(target_port)
+
+
+def _resolve_endpoint(service: str, namespace: str, *, wait_for_lb: bool) -> _Endpoint | None:
+    """Read the target Service's ports and, optionally, its LoadBalancer host.
+
+    Args:
+        service: Service name (named after the target deployment).
+        namespace: Namespace the Service lives in.
+        wait_for_lb: Poll up to :data:`_LB_IP_TIMEOUT_SEC` for an external
+            LoadBalancer ingress. Skipped for local clusters, which never get
+            one and would otherwise burn the full timeout.
+
+    Returns:
+        The resolved :class:`_Endpoint`, or ``None`` when the Service cannot be
+        read at all — the caller then falls back to default ports.
+    """
+    try:
+        doc = get_resource("service", service, namespace=namespace)
+    except Exception as exc:  # noqa: BLE001 - unreadable Service is a soft failure
+        _log.warning("could not read service %s/%s: %s", namespace, service, exc)
+        return None
+
+    port, target_port = _read_ports(doc)
+    # Only a LoadBalancer Service will ever be assigned an ingress, so polling
+    # any other type just burns the full timeout before falling back.
+    is_lb = (doc.get("spec") or {}).get("type") == "LoadBalancer"
+    if not wait_for_lb or not is_lb:
+        return _Endpoint(port=port, target_port=target_port, lb_host=None)
+
+    resolved: dict[str, str] = {}
+
+    def _has_ip() -> bool:
+        try:
+            current = get_resource("service", service, namespace=namespace)
+        except Exception as exc:  # noqa: BLE001 - poll keeps retrying
+            _log.debug("waiting for LB IP on %s/%s: %s", namespace, service, exc)
+            return False
+        ingress = (current.get("status") or {}).get("loadBalancer", {}).get("ingress") or []
+        entry = (ingress[0] if ingress else {}) or {}
+        host = entry.get("ip") or entry.get("hostname")
+        if not host:
+            return False
+        resolved["host"] = host
+        return True
+
+    _log.info(
+        "resolving external LB host for service %s/%s (timeout %ss)",
+        namespace,
+        service,
+        _LB_IP_TIMEOUT_SEC,
+    )
+    if not poll_until(_has_ip, timeout_sec=_LB_IP_TIMEOUT_SEC):
+        _log.warning(
+            "external LB host for service %s/%s not assigned within %ss; "
+            "falling back to port-forward",
+            namespace,
+            service,
+            _LB_IP_TIMEOUT_SEC,
+        )
+        return _Endpoint(port=port, target_port=target_port, lb_host=None)
+    return _Endpoint(port=port, target_port=target_port, lb_host=resolved["host"])
+
+
 class LoadTarget(BaseModel):
     """Target for a generated load spike.
 
@@ -291,21 +389,22 @@ class GenerateLoadFault(Fault):
         ctx: RunContext,
         chaos_active_event: threading.Event | None = None,
     ) -> ChaosResult:
-        """Open a port-forward, run the LLM-planned chaos loop, tear it down.
+        """Reach the target workload, run the LLM-planned chaos loop, tear down.
 
-        The fault owns its own connectivity: when the run context names a
-        target deployment (via :data:`_ENV_TARGET_DEPLOYMENT` /
-        :data:`_ENV_TARGET_NAMESPACE` on ``ctx.env``) and the port-forward is
-        not skipped, :meth:`inject` opens a ``kubectl port-forward`` to that
-        deployment, points the load URL at ``http://localhost:<port>`` for the
-        duration of injection, generates load, and tears the tunnel down in a
-        ``finally``. When the deployment is absent or
-        :data:`_ENV_SKIP_PORT_FORWARD` is set (E2E smoke / unit tests), it runs
-        the chaos loop against whatever URL the target already carries.
+        The fault owns its transport end to end. When the run context names a
+        target deployment (via :data:`~devops_bench.chaos.ENV_TARGET_DEPLOYMENT`
+        / :data:`~devops_bench.chaos.ENV_TARGET_NAMESPACE` on ``ctx.env``) and
+        the caller did not opt out, it reads the target Service to learn its
+        real ports and, on a non-local cluster, its external LoadBalancer host.
+        An assigned LoadBalancer is addressed directly; otherwise the fault
+        opens its own ``kubectl port-forward`` and points the load URL at the
+        local tunnel for the duration of injection. When the deployment is
+        absent or :data:`~devops_bench.chaos.ENV_SKIP_PORT_FORWARD` is set (E2E
+        smoke / unit tests), it runs against whatever URL the target carries.
 
         Args:
-            ctx: Run context; ``ctx.env`` carries the port-forward target the
-                harness threaded in (deployment, namespace, skip flag).
+            ctx: Run context; ``ctx.env`` names the target workload and
+                ``ctx.cluster`` tells the fault whether the cluster is local.
             chaos_active_event: Optional event the executor signals when a
                 load spike starts, so the harness can synchronize measurements.
 
@@ -316,9 +415,9 @@ class GenerateLoadFault(Fault):
             ``error``.
         """
         env = ctx.env or {}
-        deployment = env.get(_ENV_TARGET_DEPLOYMENT)
-        namespace = env.get(_ENV_TARGET_NAMESPACE, "default")
-        skip_port_forward = bool(env.get(_ENV_SKIP_PORT_FORWARD))
+        deployment = env.get(ENV_TARGET_DEPLOYMENT)
+        namespace = env.get(ENV_TARGET_NAMESPACE, "default")
+        skip_port_forward = bool(env.get(ENV_SKIP_PORT_FORWARD))
 
         start = time.monotonic()
         # Populated by ``run_chaos_command`` with the spike's real exit status so
@@ -326,16 +425,31 @@ class GenerateLoadFault(Fault):
         load_result: dict[str, Any] = {}
         try:
             # Parallel runs pass a free local port so two concurrent forwards do
-            # not contend; the remote (workload) side stays ``_LOCAL_PORT``.
-            # Parsed inside the guard so a malformed value fails this fault
-            # instead of escaping ``inject``.
-            local_port = int(env.get(_ENV_LOCAL_PORT) or _LOCAL_PORT)
+            # not contend. Parsed inside the guard so a malformed value fails
+            # this fault instead of escaping ``inject``.
+            local_port = int(env.get(ENV_LOCAL_PORT) or _FALLBACK_PORT)
 
-            # Open the fault's own tunnel only when a target deployment is named
-            # and the caller did not opt out; otherwise run against the existing
-            # URL.
-            forward: contextlib.AbstractContextManager[Any]
+            endpoint: _Endpoint | None = None
             if deployment and not skip_port_forward:
+                # A local cluster never gets a LoadBalancer, so skip the poll
+                # rather than burning the full timeout before falling back.
+                is_local = ctx.cluster is not None and ctx.cluster.location == "local"
+                endpoint = _resolve_endpoint(
+                    deployment, namespace, wait_for_lb=not is_local
+                ) or _Endpoint(port=_FALLBACK_PORT, target_port=_FALLBACK_PORT, lb_host=None)
+
+            forward: contextlib.AbstractContextManager[Any]
+            effective_url: str | None
+            if endpoint is None:
+                # Nothing to reach for us: run against the URL the spec carries.
+                forward = contextlib.nullcontext()
+                effective_url = None
+            elif endpoint.lb_host is not None:
+                # Reachable directly: no tunnel needed from any runner location.
+                effective_url = f"http://{endpoint.lb_host}:{endpoint.port}"
+                _log.info("chaos load will hit external LB %s (no port-forward)", effective_url)
+                forward = contextlib.nullcontext()
+            else:
                 # Wait for the deployment to be rolled out (a Ready pod exists)
                 # before forwarding, so the port-forward does not race a rolling
                 # update the agent may have just triggered. Best-effort: a
@@ -357,16 +471,13 @@ class GenerateLoadFault(Fault):
                 forward = port_forward(
                     f"deployment/{deployment}",
                     local_port,
-                    remote_port=_LOCAL_PORT,
+                    remote_port=endpoint.target_port,
                     namespace=namespace,
                 )
-                local_url: str | None = f"http://localhost:{local_port}"
-            else:
-                forward = contextlib.nullcontext()
-                local_url = None
+                effective_url = f"http://localhost:{local_port}"
 
             with forward:
-                output = self._run_agent_loop(local_url, chaos_active_event, load_result)
+                output = self._run_agent_loop(effective_url, chaos_active_event, load_result)
         except Exception as exc:  # noqa: BLE001 - one fault must never abort the run
             elapsed = time.monotonic() - start
             _log.exception("generate_load fault crashed")
@@ -409,21 +520,21 @@ class GenerateLoadFault(Fault):
 
     def _run_agent_loop(
         self,
-        local_url: str | None,
+        effective_url: str | None,
         chaos_active_event: threading.Event | None,
         load_result: dict[str, Any],
     ) -> str:
         """Drive the chaos agent against the effective target URL.
 
-        When ``local_url`` is set the fault is reaching its target through a
-        port-forward, so the load URL is pointed at the local tunnel for the
-        duration of the loop (and restored afterwards) — this keeps both the
-        system instruction and the goal prompt agreeing with the URL the load
-        actually hits. When ``local_url`` is ``None`` the existing target URL is
-        used unchanged.
+        When ``effective_url`` is set the fault resolved its own route to the
+        workload (an external LoadBalancer or a local port-forward), so the load
+        URL is pointed there for the duration of the loop and restored
+        afterwards — this keeps both the system instruction and the goal prompt
+        agreeing with the URL the load actually hits. When it is ``None`` the
+        existing target URL is used unchanged.
 
         Args:
-            local_url: Local port-forward URL to target, or ``None`` to use the
+            effective_url: Resolved URL to target, or ``None`` to use the
                 target's own ``service_url``.
             chaos_active_event: Optional event signaled when load goes active.
             load_result: Mutable dict the tool handler records the spike's exit
@@ -443,8 +554,8 @@ class GenerateLoadFault(Fault):
             return run_chaos_command(command, event, load_result=load_result)
 
         original_url = self.target.service_url
-        if local_url is not None:
-            self.target.service_url = local_url
+        if effective_url is not None:
+            self.target.service_url = effective_url
         try:
             system_instruction = build_system_instruction(self.target.service_url)
             agent = ChaosAgent(
