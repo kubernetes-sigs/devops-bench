@@ -52,3 +52,9 @@ def test_parse_node_finds_leaf_verifiers_without_importing_them_directly():
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert "ok" in proc.stdout
+
+
+def test_cloud_resource_property_importable_from_package_root() -> None:
+    from devops_bench.verification.verifiers import CloudResourcePropertyVerifier
+
+    assert CloudResourcePropertyVerifier.__name__ == "CloudResourcePropertyVerifier"
