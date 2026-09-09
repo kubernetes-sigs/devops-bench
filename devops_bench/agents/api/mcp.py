@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Any
@@ -37,6 +38,11 @@ class MCPClient:
 
     Attributes:
         server_path: Command used to launch the MCP server over stdio.
+        env: Full environment the server is spawned with, or ``None`` to leave
+            the SDK's minimal default in place. A binding declaring ``env`` must
+            supply the whole environment here, not just its own keys — the SDK
+            replaces rather than merges.
+        cwd: Directory to spawn the server in, or ``None`` for the caller's.
         session: The active ``ClientSession`` once entered, else ``None``.
 
     Raises:
@@ -45,8 +51,16 @@ class MCPClient:
         ValueError: If ``server_path`` is empty or whitespace-only (on enter).
     """
 
-    def __init__(self, server_path: str) -> None:
+    def __init__(
+        self,
+        server_path: str,
+        *,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> None:
         self.server_path = server_path
+        self.env = None if env is None else dict(env)
+        self.cwd = cwd or None
         self.exit_stack = AsyncExitStack()
         self.session: Any = None
 
@@ -70,7 +84,12 @@ class MCPClient:
                 "MCP server_path is empty; set AGENT_TARGET/MCP_SERVER_PATH to the "
                 "MCP server command."
             )
-        server_params = StdioServerParameters(command=parts[0], args=parts[1:])
+        # ``env=None`` leaves the SDK's minimal default environment in place;
+        # a supplied mapping replaces it outright, so the caller passes a full
+        # environment rather than just the binding's declared keys.
+        server_params = StdioServerParameters(
+            command=parts[0], args=parts[1:], env=self.env, cwd=self.cwd
+        )
         # Unwind anything already entered (e.g. the spawned server subprocess)
         # when a later setup step fails — __aexit__ never runs if __aenter__
         # raises, so cleanup must happen here.

@@ -26,6 +26,7 @@ from devops_bench.agents.shared.cli_capabilities import (
     build_mcp_servers,
     materialize_skills,
 )
+from devops_bench.core import ConfigError
 
 
 def test_build_mcp_servers_maps_command_to_command_and_args() -> None:
@@ -52,6 +53,28 @@ def test_build_mcp_servers_names_unnamed_bindings_by_index() -> None:
     """A binding with no name falls back to a positional ``mcp<index>`` key."""
     servers = build_mcp_servers((McpBinding(name="", command=("srv",)),))
     assert servers == {"mcp0": {"command": "srv"}}
+
+
+def test_build_mcp_servers_rejects_bindings_that_resolve_to_one_name() -> None:
+    """A colliding name would drop a granted server from the launch map."""
+    with pytest.raises(ConfigError, match="resolve to the name 'gke'"):
+        build_mcp_servers(
+            (
+                McpBinding(name="gke", command=("a",)),
+                McpBinding(name="gke", command=("b",)),
+            )
+        )
+
+
+def test_build_mcp_servers_rejects_a_name_colliding_with_the_index_fallback() -> None:
+    """An explicit name can collide with an unnamed binding's ``mcp<index>`` key."""
+    with pytest.raises(ConfigError, match="resolve to the name 'mcp1'"):
+        build_mcp_servers(
+            (
+                McpBinding(name="mcp1", command=("a",)),
+                McpBinding(name="", command=("b",)),
+            )
+        )
 
 
 def test_materialize_skills_writes_named_skill_files(tmp_path: Path) -> None:
@@ -172,3 +195,150 @@ def test_agent_workdir_creates_and_cleans_up_temp_dir_when_no_path_supplied() ->
         assert workdir.name.startswith("agent-workdir-test-")
 
     assert not created.exists()
+
+
+def test_build_mcp_servers_renders_env_and_cwd() -> None:
+    """A binding's ``env``/``cwd`` reach the CLI's server entry, so a server
+    needing its own credential or working directory is launchable."""
+    binding = McpBinding(
+        name="github",
+        command=("npx", "server-github"),
+        env=(("GITHUB_TOKEN", "${GITHUB_TOKEN}"),),
+        cwd="/work",
+    )
+
+    assert build_mcp_servers((binding,)) == {
+        "github": {
+            "command": "npx",
+            "args": ["server-github"],
+            "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"},
+            "cwd": "/work",
+        }
+    }
+
+
+def test_build_mcp_servers_keeps_secret_references_unexpanded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rendered entry must carry the reference, never the resolved value:
+    this mapping is written into the agent's workspace, which the harness
+    collects wholesale into the run's artifacts."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_realsecret")
+    binding = McpBinding(
+        name="github", command=("npx",), env=(("GITHUB_TOKEN", "${GITHUB_TOKEN}"),)
+    )
+
+    rendered = build_mcp_servers((binding,))
+
+    assert rendered["github"]["env"] == {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}
+
+
+def test_build_mcp_servers_omits_env_and_cwd_when_unset() -> None:
+    """A binding with neither adds no keys, leaving the CLI's defaults in place."""
+    assert build_mcp_servers((McpBinding(name="s", command=("srv",)),)) == {"s": {"command": "srv"}}
+
+
+def test_materialize_skills_copies_the_whole_bundle(tmp_path: Path) -> None:
+    """A skill's siblings come with it: ``SKILL.md`` routinely instructs the
+    agent to read ``references/``/``templates/``/``scripts/``, and copying the
+    one file leaves those instructions pointing at nothing."""
+    src = tmp_path / "src" / "design-doc"
+    (src / "templates").mkdir(parents=True)
+    (src / "SKILL.md").write_text(
+        "---\nname: design-doc\ndescription: d\n---\nread templates/full.md\n",
+        encoding="utf-8",
+    )
+    (src / "templates" / "full.md").write_text("TEMPLATE BODY", encoding="utf-8")
+    (src / "reference.md").write_text("REFERENCE BODY", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    written = materialize_skills(dest, (str(tmp_path / "src"),))
+
+    assert written == ["design-doc"]
+    assert (dest / "design-doc" / "templates" / "full.md").read_text() == "TEMPLATE BODY"
+    assert (dest / "design-doc" / "reference.md").read_text() == "REFERENCE BODY"
+    assert "read templates/full.md" in (dest / "design-doc" / "SKILL.md").read_text()
+
+
+def test_materialize_skills_recreates_links_without_copying_host_files(tmp_path: Path) -> None:
+    """Bundle copies must not dereference symlinks.
+
+    The workspace this writes into is collected wholesale into the run's
+    artifacts, so dereferencing a link would write the *contents* of whatever it
+    points at — a host credential, for instance — into those artifacts. An
+    in-bundle link is recreated as a link; one escaping the bundle is dropped.
+    """
+    outside = tmp_path / "outside" / "id_rsa"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("HOST PRIVATE KEY", encoding="utf-8")
+    src = tmp_path / "src" / "linky"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: linky\ndescription: d\n---\nbody\n", encoding="utf-8")
+    (src / "real.md").write_text("IN BUNDLE", encoding="utf-8")
+    (src / "alias.md").symlink_to("real.md")
+    (src / "creds").symlink_to(outside)
+    dest = tmp_path / "dest"
+
+    written = materialize_skills(dest, (str(tmp_path / "src"),))
+
+    assert written == ["linky"]
+    assert (dest / "linky" / "alias.md").is_symlink()
+    assert (dest / "linky" / "alias.md").read_text() == "IN BUNDLE"
+    assert not (dest / "linky" / "creds").exists(follow_symlinks=False)
+    assert "HOST PRIVATE KEY" not in (dest / "linky" / "SKILL.md").read_text()
+
+
+def test_materialize_skills_survives_a_dangling_link(tmp_path: Path) -> None:
+    """A broken link inside a bundle used to abort the whole run with
+    ``shutil.Error``; it is dropped along with the escaping ones."""
+    src = tmp_path / "src" / "broken"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text(
+        "---\nname: broken\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    (src / "gone").symlink_to(tmp_path / "never-existed")
+
+    written = materialize_skills(tmp_path / "dest", (str(tmp_path / "src"),))
+
+    assert written == ["broken"]
+
+
+def test_materialize_skills_skips_a_skill_md_at_the_discovery_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``SKILL.md`` at the top of a granted path has the whole tree as its
+    bundle, so copying it would nest every sibling skill inside it — and each
+    sibling is materialized again in its own right. It is skipped and warned."""
+    src = tmp_path / "src"
+    (src / "rotate").mkdir(parents=True)
+    (src / "rotate" / "SKILL.md").write_text(
+        "---\nname: rotate\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    (src / "SKILL.md").write_text(
+        "---\nname: at-root\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    dest = tmp_path / "dest"
+
+    with caplog.at_level("WARNING", logger="devops_bench.agents.shared.cli_capabilities"):
+        written = materialize_skills(dest, (str(src),))
+
+    assert written == ["rotate"]
+    assert not (dest / "at-root").exists()
+    assert not (dest / "rotate" / "rotate").exists()
+    assert any("discovery root" in r.message for r in caplog.records)
+
+
+def test_materialize_skills_skips_a_root_skill_reached_through_a_symlinked_path(
+    tmp_path: Path,
+) -> None:
+    """The root comparison resolves both sides, so granting a path by way of a
+    symlink does not slip a root-level bundle past the guard."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text(
+        "---\nname: at-root\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    assert materialize_skills(tmp_path / "dest", (str(link),)) == []

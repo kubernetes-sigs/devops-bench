@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sqlite3
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from devops_bench.agents import capabilities
 from devops_bench.agents import config as agents_config
 from devops_bench.agents.cli.antigravity import agent as agy_mod
 from devops_bench.agents.cli.antigravity import parsing
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError
 from devops_bench.core import subprocess as devops_subprocess
 from devops_bench.core.errors import SubprocessError
 
@@ -816,6 +818,36 @@ def test_agy_cli_agent_forwards_extra_flags(
 
 @mock.patch.object(pathlib.Path, "home")
 @mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_fails_the_run_when_a_granted_mcp_server_is_unreachable(
+    mock_run, mock_home, tmp_path, monkeypatch
+):
+    """A granted server that never starts leaves agy falling back to shell tools
+    while the run is still scored as an MCP arm — the same gate the other CLI
+    harnesses run, so the binary must never be launched."""
+
+    def boom(*_a, **_kw):
+        raise McpUnreachableError("MCP server 'gke' is unreachable: could not launch server")
+
+    mock_home.return_value = tmp_path
+    monkeypatch.setattr(agy_mod, "preflight_mcp", boom)
+    caps = capabilities.AllCapabilities(
+        mcp_servers=(capabilities.McpBinding(name="gke", command=("gke-mcp",)),)
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy", model="gemini-3.5-flash", capabilities=caps
+    )
+
+    result = agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert result.errors == [
+        "MCP preflight failed: MCP server 'gke' is unreachable: could not launch server"
+    ]
+    # The gcloud project/location lookups still run; the agy binary must not.
+    assert all(call.args[0][0] == "gcloud" for call in mock_run.call_args_list)
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
 def test_agy_cli_agent_discovers_gemini_dir_conversations_fallback(
     mock_run: mock.MagicMock,
     mock_home: mock.MagicMock,
@@ -907,3 +939,72 @@ def test_agy_cli_agent_discovers_parent_conversations_when_nested_is_empty(
     )
     assert len(result.trajectory) == 2
     assert result.errors == []
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_probes_with_the_run_env_and_workdir(
+    mock_run, mock_home, tmp_path, monkeypatch
+):
+    """The probe must launch the server the way agy will: with the harness env
+    overlay applied and in the workspace, or it validates a different process
+    than the one the run uses."""
+    seen: dict = {}
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(args=["agy"], returncode=0, stdout="ok", stderr="")
+
+    def record(_bindings, **kw):
+        # The workspace is a temp dir torn down when ``_execute`` returns, so
+        # its existence has to be sampled here rather than asserted afterwards.
+        seen.update(kw, cwd_exists=pathlib.Path(kw["cwd"]).is_dir())
+
+    monkeypatch.setattr(agy_mod, "preflight_mcp", record)
+    caps = capabilities.AllCapabilities(
+        mcp_servers=(capabilities.McpBinding(name="gke", command=("gke-mcp",)),)
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy", model="gemini-3.5-flash", api_key="secret-key", capabilities=caps
+    )
+
+    agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert seen["base_env"]["GEMINI_API_KEY"] == "secret-key"
+    assert seen["base_env"]["PATH"] == os.environ["PATH"]
+    assert seen["cwd_exists"]
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_probes_every_granted_binding(mock_run, mock_home, tmp_path, monkeypatch):
+    """Every granted binding is handed to the probe verbatim. Passing a subset —
+    or a rebuilt binding that drops ``env``/``cwd`` — would gate on a server the
+    run does not launch, and the dead one it does launch would score as an MCP
+    arm."""
+    seen: dict = {}
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(args=["agy"], returncode=0, stdout="ok", stderr="")
+
+    def record(bindings, **kw):
+        seen["bindings"] = bindings
+        seen["kwargs"] = kw
+
+    monkeypatch.setattr(agy_mod, "preflight_mcp", record)
+    bindings = (
+        capabilities.McpBinding(name="gke", command=("gke-mcp",)),
+        capabilities.McpBinding(
+            name="facts",
+            command=("uvx", "facts-server"),
+            env=(("FACTS_TOKEN", "${FACTS_TOKEN}"),),
+            cwd="/srv/facts",
+        ),
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=capabilities.AllCapabilities(mcp_servers=bindings),
+    )
+
+    agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert seen["bindings"] == bindings
+    assert set(seen["kwargs"]) == {"base_env", "cwd"}

@@ -45,6 +45,7 @@ from devops_bench.agents.cli.openclaw.agent import (
     _oc_model_id,
 )
 from devops_bench.agents.cli.openclaw.parsing import _pick_session_key, _strip_ansi
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError
 from devops_bench.core.errors import ConfigError, SubprocessError
 
 
@@ -909,3 +910,29 @@ def test_execute_cleans_up_temp_working_dir_after_run(
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert captured["cwd"] is not None
     assert not os.path.exists(captured["cwd"])
+
+
+def test_execute_fails_the_run_when_a_granted_mcp_server_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A dead MCP server is fatal and ``oc`` is never invoked — otherwise the
+    run scores as an MCP arm while the model only had shell tools."""
+    invoked: list[Any] = []
+
+    def fake_bash(command: str, **kwargs: Any) -> SimpleNamespace:
+        invoked.append(command)
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    def fake_preflight(*_args: Any, **_kwargs: Any) -> dict:
+        raise McpUnreachableError("MCP server 'gke' is unreachable: could not launch server")
+
+    _install_oc_run(monkeypatch, fake_bash)
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
+
+    assert invoked == [], "oc must not run once preflight has failed"
+    assert result.errors == [
+        "MCP preflight failed: MCP server 'gke' is unreachable: could not launch server"
+    ]
