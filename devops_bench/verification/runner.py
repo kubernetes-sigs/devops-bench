@@ -84,6 +84,17 @@ def _node_name(node: Any) -> str | None:
     return getattr(node, "name", None)
 
 
+def _non_success_verb(status: VerificationStatus) -> str:
+    """Return "errored" for a status of "error", else "failed".
+
+    Shared wording so every combinator's joined ``reason`` string tells an
+    unobserved child (never ran, could not be evaluated) apart from a
+    genuinely observed negative result, the same distinction
+    :meth:`VerifierAgent._run_sequence` already makes for its own reasons.
+    """
+    return "errored" if status == "error" else "failed"
+
+
 def _failed(node: Any, reason: str, status: VerificationStatus = "fail") -> VerificationResult:
     """Build a not-run-to-completion result for a node.
 
@@ -373,7 +384,7 @@ class VerifierAgent:
             if res.success:
                 reasons.append(f"[{i}] succeeded")
                 break
-            reasons.append(f"[{i}] failed: {res.reason}")
+            reasons.append(f"[{i}] {_non_success_verb(res.status)}: {res.reason}")
 
         status = _combine_disjunction([c.status for c in children])
         return VerificationResult(
@@ -442,7 +453,10 @@ class VerifierAgent:
             if res.success:
                 reasons.append(f"[{i}] unexpectedly succeeded: {res.reason}")
                 break
-            reasons.append(f"[{i}] did not hold, as required")
+            if res.status == "error":
+                reasons.append(f"[{i}] errored: {res.reason}")
+            else:
+                reasons.append(f"[{i}] did not hold, as required")
 
         status = _combine_negated_disjunction([c.status for c in children])
         return VerificationResult(
@@ -551,7 +565,8 @@ class VerifierAgent:
         # A parallel node runs every child, so the joined reason is the only
         # place the caller sees which child failed and why.
         reasons = [
-            f"[{i}] {'ok' if r.success else f'failed: {r.reason}'}" for i, r in enumerate(results)
+            f"[{i}] {'ok' if r.success else f'{_non_success_verb(r.status)}: {r.reason}'}"
+            for i, r in enumerate(results)
         ]
         return VerificationResult(
             success=status == "pass",
