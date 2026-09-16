@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-db-config
+  namespace: accounts
+data:
+  endpoint: "postgres://ledger-db:5432/accounts"
