@@ -42,9 +42,16 @@ from typing import ClassVar
 from devops_bench.core.config import get_env
 from devops_bench.core.logging import get_logger
 
-__all__ = ["RunEnv"]
+__all__ = ["CHILD_SCOPED_ENVS", "RunEnv"]
 
 _log = get_logger("core.run_env")
+
+#: The run-scoped config paths a child process must inherit to stay inside the
+#: run. A subset of :data:`RunEnv._MUTATED_KEYS` — the run id and the parallel
+#: flag are bookkeeping, not isolation. Lives here rather than in the agent
+#: layer because this module is what points them at per-run paths: a var added
+#: below has exactly one place to be added here too.
+CHILD_SCOPED_ENVS: tuple[str, ...] = ("KUBECONFIG", "CLOUDSDK_CONFIG")
 
 # GKE cluster names are capped at 40 chars and must match
 # ``[a-z]([-a-z0-9]*[a-z0-9])?``.
