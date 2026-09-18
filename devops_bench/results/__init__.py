@@ -30,10 +30,12 @@ from devops_bench.results.normalize import (
     setup_id,
     slugify,
 )
-from devops_bench.results.row import SCHEMA_VERSION, Manifest, ResultRow
+from devops_bench.results.row import SCHEMA_VERSION, CheckGroupRow, CheckRow, Manifest, ResultRow
 
 __all__ = [
     "SCHEMA_VERSION",
+    "CheckGroupRow",
+    "CheckRow",
     "Manifest",
     "NormalizedTokens",
     "ResultRow",

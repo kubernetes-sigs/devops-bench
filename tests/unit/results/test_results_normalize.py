@@ -186,6 +186,12 @@ def test_build_rows_success_record():
         "t": "2026-06-01T00:00:00Z",
         "taskFolder": "task_001",
         "taskName": "Rotate Secret",
+        "taskTitle": "",
+        "taskSummary": "",
+        "taskCategory": "",
+        "taskTags": [],
+        "checkGroups": {},
+        "checks": [],
         "iteration": 0,
         "outcomeScore": 0.9,
         "correctnessScore": None,
@@ -389,6 +395,12 @@ def test_result_row_keys_match_typescript_interface():
         "cacheWriteTokens",
         "totalTokens",
         "validated",
+        "taskTitle",
+        "taskSummary",
+        "taskCategory",
+        "taskTags",
+        "checkGroups",
+        "checks",
     }
     row = build_rows(
         [{"name": "n", "folder": "f", "status": "success", "scores": {}, "tokens": {}}],
@@ -418,6 +430,98 @@ def test_build_rows_propagates_validated():
     # Absent key defaults to False (unvetted tasks don't promote).
     default_row = build_rows([{"name": "t", "folder": "f", "status": "success"}], manifest)[0]
     assert default_row.to_dict()["validated"] is False
+
+
+def test_build_rows_carries_task_display_metadata() -> None:
+    record = {
+        "name": "t",
+        "folder": "f",
+        "status": "success",
+        "task_metadata": {
+            "title": "Fix the thing",
+            "summary": "It is broken.",
+            "category": "remediate",
+            "tags": ["kubernetes", "gitops"],
+            "check_groups": {"fixed": {"title": "Fixed", "description": "All good."}},
+        },
+    }
+    row = build_rows([record], _manifest())[0].to_dict()
+    assert row["taskTitle"] == "Fix the thing"
+    assert row["taskSummary"] == "It is broken."
+    assert row["taskCategory"] == "remediate"
+    assert row["taskTags"] == ["kubernetes", "gitops"]
+    assert row["checkGroups"] == {"fixed": {"title": "Fixed", "description": "All good."}}
+
+
+def test_build_rows_defaults_task_display_metadata_for_older_records() -> None:
+    # Records written before task_metadata existed carry no such key.
+    row = build_rows([{"name": "t", "folder": "f", "status": "success"}], _manifest())[0]
+    assert row.task_title == ""
+    assert row.task_tags == []
+    assert row.check_groups == {}
+    assert row.checks == []
+
+
+def test_build_rows_flattens_the_verification_report_into_checks() -> None:
+    record = {
+        "name": "t",
+        "folder": "f",
+        "status": "success",
+        "verification_report": [
+            {
+                "name": "web-cpu-limit",
+                "title": "web has a CPU limit",
+                "description": "Every web container declares a CPU limit.",
+                "group": "compliant",
+                "failure_hint": "Added in git but never applied.",
+                "role": "objective",
+                "severity": None,
+                "weight": 0.5,
+                "mode": "converge",
+                "success": False,
+                "status": "fail",
+                "reason": "path resolved to 0 values",
+                "elapsed_time": 1.5,
+                "children": [{"success": False, "reason": "child detail"}],
+            },
+            {
+                "name": "blast-radius",
+                "role": "safeguard",
+                "severity": "catastrophic",
+                "weight": 1.0,
+                "success": True,
+                "reason": "ok",
+            },
+        ],
+    }
+    checks = build_rows([record], _manifest())[0].to_dict()["checks"]
+    assert checks == [
+        {
+            "name": "web-cpu-limit",
+            "title": "web has a CPU limit",
+            "description": "Every web container declares a CPU limit.",
+            "group": "compliant",
+            "failureHint": "Added in git but never applied.",
+            "role": "objective",
+            "severity": "",
+            "weight": 0.5,
+            "status": "fail",
+            "reason": "path resolved to 0 values",
+        },
+        {
+            # No display fields and no tri-state status: older record shape.
+            "name": "blast-radius",
+            "title": "",
+            "description": "",
+            "group": "",
+            "failureHint": "",
+            "role": "safeguard",
+            "severity": "catastrophic",
+            "weight": 1.0,
+            "status": "pass",
+            "reason": "ok",
+        },
+    ]
 
 
 def test_build_rows_carries_cached_and_reasoning() -> None:

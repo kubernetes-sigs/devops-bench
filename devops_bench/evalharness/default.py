@@ -146,6 +146,31 @@ def _canonical_agent_type(agent_type: str) -> str:
     return _AGENT_TYPE_ALIASES.get(agent_type, agent_type)
 
 
+def _entry_display_fields(entry: VerificationEntry) -> dict[str, Any]:
+    """The display fields copied verbatim from an entry onto its report item.
+
+    Snapshotted onto the record so a result renders with the titles that were
+    true when it ran, without joining back to the task file at that revision.
+    """
+    return {
+        "title": entry.title,
+        "description": entry.description,
+        "group": entry.group,
+        "failure_hint": entry.failure_hint,
+    }
+
+
+def _task_metadata(task: Task) -> dict[str, Any]:
+    """The task-level display metadata snapshotted onto every record."""
+    return {
+        "title": task.title,
+        "summary": task.summary,
+        "category": task.category,
+        "tags": list(task.tags),
+        "check_groups": {key: group.model_dump() for key, group in task.check_groups.items()},
+    }
+
+
 class DefaultEvalHarness(Harness):
     """Standard harness wiring every component into one pipeline.
 
@@ -521,6 +546,7 @@ class DefaultEvalHarness(Harness):
                 report.append(
                     {
                         "name": entry.name,
+                        **_entry_display_fields(entry),
                         "role": entry.role,
                         "severity": entry.severity,
                         "weight": entry.weight,
@@ -554,6 +580,7 @@ class DefaultEvalHarness(Harness):
             report.append(
                 {
                     "name": entry.name,
+                    **_entry_display_fields(entry),
                     "role": entry.role,
                     "severity": entry.severity,
                     "weight": entry.weight,
@@ -1236,6 +1263,9 @@ class DefaultEvalHarness(Harness):
             # Only tasks vetted as correct promote to the leaderboard; downstream
             # ingest gates inclusion on this flag (default False until vetted).
             "validated": task.validated,
+            # Display metadata, snapshotted so a row renders with the titles
+            # that were true when it ran.
+            "task_metadata": _task_metadata(task),
         }
 
     def _drain_scenario(

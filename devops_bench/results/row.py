@@ -34,14 +34,16 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-__all__ = ["SCHEMA_VERSION", "Manifest", "ResultRow"]
+__all__ = ["SCHEMA_VERSION", "CheckGroupRow", "CheckRow", "Manifest", "ResultRow"]
 
 #: Version of the ``rows.json`` / ``manifest.json`` contract. Bump on any
 #: breaking field change so a downstream ingest can detect a shape mismatch.
 #: v2 adds the scoring-framework v1 fields (``outcomeScore`` becomes the composite
 #: score; ``correctnessScore`` / ``recoverableSafetyScore`` / ``catastrophic`` /
-#: ``scoringVersion`` are added). ``catastrophicKinds`` was added later within v2:
-#: additive with a default, so not a breaking change.
+#: ``scoringVersion`` are added). ``catastrophicKinds``, the task display
+#: metadata (``taskTitle`` / ``taskSummary`` / ``taskCategory`` / ``taskTags`` /
+#: ``checkGroups``) and the per-check ``checks`` list were added later within
+#: v2: additive with defaults, so not a breaking change.
 SCHEMA_VERSION = 2
 
 # Frozen + camelCase aliases. ``populate_by_name`` keeps the snake_case
@@ -81,6 +83,56 @@ class Manifest(BaseModel):
         return self.model_dump(by_alias=True)
 
 
+class CheckGroupRow(BaseModel):
+    """A display group for checks, as declared under the task's ``check_groups``.
+
+    Attributes:
+        title: Short human label for the group.
+        description: What a run that passes every check in the group achieved.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    title: str = ""
+    description: str = ""
+
+
+class CheckRow(BaseModel):
+    """One verification entry's outcome, flattened for the dashboard.
+
+    Mirrors one item of the record's ``verification_report`` without the
+    per-child diagnostics. The display fields come from the task author and
+    say what the check means; ``reason`` is the verifier's own explanation of
+    what it observed.
+
+    Attributes:
+        name: The entry's stable identity (``verification_spec[*].name``).
+        title: Author-written short label; ``""`` when the task declared none.
+        description: Author-written statement of the passing condition.
+        group: Key into the row's ``check_groups``; ``""`` when ungrouped.
+        failure_hint: Author-written note on what a failure usually means.
+        role: ``objective`` or ``safeguard``.
+        severity: ``recoverable`` or ``catastrophic`` for safeguards; ``""``
+            for objectives.
+        weight: Relative weight within the role.
+        status: ``pass``, ``fail``, or ``error`` (could not be evaluated).
+        reason: The verifier's machine-generated explanation.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    name: str
+    title: str = ""
+    description: str = ""
+    group: str = ""
+    failure_hint: str = ""
+    role: str
+    severity: str = ""
+    weight: float = 1.0
+    status: str
+    reason: str = ""
+
+
 class ResultRow(BaseModel):
     """One flattened iteration row, the producer-side leaderboard contract.
 
@@ -100,6 +152,14 @@ class ResultRow(BaseModel):
         t: UTC ISO-8601 run timestamp; matches :attr:`Manifest.t`.
         task_folder: The task's directory name.
         task_name: The task's human-readable name (the spec ``name:`` field).
+        task_title: Display title from the task's ``title``; ``""`` when unset.
+        task_summary: Plain-English summary from the task's ``summary``.
+        task_category: Primary bucket from the task's ``category``.
+        task_tags: Secondary facets from the task's ``tags``.
+        check_groups: Display groups from the task's ``check_groups``, keyed by
+            the slug each :class:`CheckRow` may reference via ``group``.
+        checks: One :class:`CheckRow` per verification entry, in declaration
+            order; empty when verification did not run.
         iteration: Zero-based repeat index; always ``0`` until multi-iteration
             runs land.
         outcome_score: Composite scoring-framework score in ``[0, 1]``
@@ -160,6 +220,12 @@ class ResultRow(BaseModel):
     t: str
     task_folder: str
     task_name: str
+    task_title: str = ""
+    task_summary: str = ""
+    task_category: str = ""
+    task_tags: list[str] = Field(default_factory=list)
+    check_groups: dict[str, CheckGroupRow] = Field(default_factory=dict)
+    checks: list[CheckRow] = Field(default_factory=list)
     iteration: int
     outcome_score: float | None
     correctness_score: float | None = None

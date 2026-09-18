@@ -74,6 +74,37 @@ def test_report_carries_the_scoring_vocabulary_for_every_entry() -> None:
     assert all(r["success"] is True for r in report)
 
 
+def test_report_carries_the_display_fields_for_every_entry() -> None:
+    """Author-written display fields are copied onto the report verbatim.
+
+    They ride on the record so a viewer can explain a failure without the
+    task file; an entry that declared none reports them as ``None``.
+    """
+    spec = [dict(_SPEC[0]), dict(_SPEC[1])]
+    spec[0].update(
+        title="web is ready",
+        description="Every web pod is Ready.",
+        group="workload",
+        failure_hint="The image tag is usually wrong.",
+    )
+    entries, errors = parse_entries(spec)
+    assert errors == []
+    ok = VerificationResult(success=True, elapsed_time=0.1, reason="fine")
+    with patch("devops_bench.evalharness.default.VerifierAgent.run_entry", return_value=ok):
+        report = _harness()._run_verification(entries)
+
+    assert report[0]["title"] == "web is ready"
+    assert report[0]["description"] == "Every web pod is Ready."
+    assert report[0]["group"] == "workload"
+    assert report[0]["failure_hint"] == "The image tag is usually wrong."
+    assert {k: report[1][k] for k in ("title", "description", "group", "failure_hint")} == {
+        "title": None,
+        "description": None,
+        "group": None,
+        "failure_hint": None,
+    }
+
+
 def test_one_raising_entry_does_not_abort_the_rest() -> None:
     entries, _ = parse_entries(_SPEC)
     ok = VerificationResult(success=True, elapsed_time=0.1, reason="fine")

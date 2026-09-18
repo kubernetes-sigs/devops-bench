@@ -199,6 +199,8 @@ A list of per-task records. The interesting part of each is its `scores` map, wh
 
 A flattened view, one row per setup × task × run × iteration, defined in [`row.py`](../../devops_bench/results/row.py) and produced by [`normalize.py`](../../devops_bench/results/normalize.py). This is what the leaderboard ingests. Each row carries `setupId`, `model`, `harness`, `augmentation`, `outcomeScore`, `correctnessScore`, `recoverableSafetyScore`, `catastrophic`, `catastrophicKinds`, `scoringVersion`, `toolScore`, `latencySec`, input/output tokens, `status`, and `validated`.
 
+A row also carries what the task and each check mean, so a viewer can explain a score without opening the task file. `taskTitle`, `taskSummary`, `taskCategory`, `taskTags`, and `checkGroups` come from the record's `task_metadata`, which the harness snapshots from the task's display fields at run time. `checks` flattens the record's `verification_report` into one entry per verification entry: the author-written `title`, `description`, `group`, and `failureHint`, plus `role`, `severity`, `weight`, the tri-state `status`, and the verifier's own `reason`. All of these default to empty on records written before the fields existed.
+
 Four things are deliberate here:
 
 - Scores are kept **continuous** (never pre-thresholded into pass/fail), so any pass@k formula stays computable downstream.
