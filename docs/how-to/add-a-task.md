@@ -14,10 +14,15 @@ Every field below maps to an attribute on `Task`. Fields marked `Required` must 
 | --- | --- | --- |
 | `task_id` (alias `id`) | Yes | Unique identifier for the task. `task_id` is accepted as an alias for `id` and is coerced to a string. |
 | `name` | No (defaults to the directory name) | Human-readable task name. Set it explicitly rather than relying on the default. |
+| `title` | Once `validated` | Display name shown to result viewers, e.g. "Remediate policy violations on a GitOps-managed cluster". Free to change; `name` is the stable identity. |
+| `summary` | Once `validated` | A few plain sentences: the starting state, what the agent must do, what done looks like. Display text is never placeholder-substituted, so `{{...}}` is rejected here. |
+| `category` | Once `validated` | One primary bucket for filtering. Use `deploy`, `remediate`, `scale`, `secure`, `incident`, `migrate`, or `generate`; add a new value only when none fits. |
+| `tags` | No | Secondary facets for filtering, e.g. `[gke, kyverno, gitops]`. |
+| `check_groups` | No | `{<slug>: {title, description}}`. Display groups that `verification_spec` entries opt into via `group: <slug>`, so a result viewer can show "Pod hardening 6/8". Grouping never affects scoring; a `group` that is not declared here is a load error. |
 | `prompt` (aliases `goal`, `input`) | Yes | The instruction handed to the agent. Use `{{...}}` placeholders for any infra value — never hardcode a project, cluster, namespace, or deployment name. |
 | `expected_output` | Yes | The grading rubric, written as prose "critical requirements". Graded on **outcome**, so accept any valid path to the goal, not one prescribed method. |
 | `infrastructure` | No (defaults to a local kind cluster) | `{deployer, stack, teardown, variables, provider}`. Omitting it entirely gives `deployer: tofu` with the `prebuilt/kind` stack, whose provider is deduced as `kind`. Use `deployer: noop` for generation-only tasks (no cluster), or `deployer: tofu` with a `stack` under `tf/prebuilt/<dir>` for real infrastructure — any stack whose final path segment is not `kind` **must** set `provider` explicitly, since no cloud is ever assumed. |
-| `validated` | No (defaults `false`) | Set `true` only after a human has vetted the task. Required for leaderboard eligibility — an unvetted task never counts. |
+| `validated` | No (defaults `false`) | Set `true` only after a human has vetted the task. Required for leaderboard eligibility — an unvetted task never counts. A validated task must carry `title`, `summary`, `category`, and a `title` and `description` on every `verification_spec` entry, because the leaderboard renders validated tasks and nothing else. |
 | `verification_spec` | No | A list of `{name, spec: <typed node>}` entries. Deterministic cluster assertions; `name` is the cross-reference key a `chaos_spec` resolves against. |
 | `chaos_spec` | No | A list of `{name, trigger, action, verify}` entries, where `verify` matches a `verification_spec` entry's `name`. |
 | `documentation` | No | `[{doc_name, url, constraints: [{text, critical}]}]` — reference docs and the requirements drawn from them, used for grounding scoring. |
@@ -42,11 +47,11 @@ Write everything infra-specific as a placeholder. That is what lets the *same* t
 
 ## Step by step
 
-1. **Create the file.** Make `tasks/<provider>/<name>/task.yaml`. Set `task_id` (unique) and `name`.
+1. **Create the file.** Make `tasks/<provider>/<name>/task.yaml`. Set `task_id` (unique) and `name`, then the display metadata: `title`, `summary`, `category`, `tags`. Write these for someone reading a leaderboard, not for the agent.
 2. **Choose a deployer.** Use `noop` for a manifest-generation task (the agent's YAML is judged, never applied — no cluster is brought up). Use `tofu` with a `stack` under `tf/prebuilt/<dir>` when the agent needs a live cluster; create a new stack directory or reuse an existing one.
 3. **Write the `prompt`** using placeholders only for any infra value.
 4. **Write `expected_output`** as outcome-based "critical requirements" — describe *what* a correct result must achieve, not the exact commands to get there.
-5. **(Optional) Add a `verification_spec` and `chaos_spec`.** Express deterministic cluster assertions as compound `sequence` / `parallel` nodes wrapping leaf verifiers like `pod_healthy` and `scaling_complete`. If you inject chaos, set the chaos entry's `verify:` to match a `verification_spec` entry's `name`.
+5. **(Optional) Add a `verification_spec` and `chaos_spec`.** Express deterministic cluster assertions as compound `sequence` / `parallel` nodes wrapping leaf verifiers like `pod_healthy` and `scaling_complete`. Give every entry a `title` and `description`, and a `failure_hint` where you know the common wrong path; group related entries with `check_groups`. If you inject chaos, set the chaos entry's `verify:` to match a `verification_spec` entry's `name`.
 6. **(Optional) Add `documentation`** entries to ground scoring against authoritative docs.
 7. **Smoke-test with no infra.** This forces the `noop` deployer and skips provisioning, so it's fast and free. The `--no-infra` CLI flag does the same thing as the environment variable, and `--infra` forces provisioning back on:
    ```bash
@@ -61,6 +66,14 @@ Here is a realistic, annotated `noop` generation task. The agent is asked to pro
 ```yaml
 task_id: 2
 name: "create-deployment"
+# Display metadata. Plain English, no placeholders; what a result viewer reads.
+title: "Generate an autoscaling vLLM deployment manifest"
+summary: >
+  Produce a Kubernetes manifest that serves a finetuned model with vLLM on one
+  L4 GPU, mounts the model bucket via gcsfuse, exposes it through a ClusterIP
+  Service, and scales with traffic through an HPA.
+category: generate
+tags: [vllm, gpu, gcsfuse, hpa]
 # deployer: noop skips provisioning — the agent's generated YAML is judged,
 # never applied. generation_only is derived automatically from deployer == noop.
 infrastructure:
@@ -109,8 +122,18 @@ chaos_spec:
         qps: 300
     # Resolved against verification_spec[*].name below.
     verify: "Planned Load Spike Verification"
+check_groups:
+  scaling:
+    title: "Scales under load"
+    description: "The target stays healthy and scales out while the load spike runs."
 verification_spec:
   - name: "Planned Load Spike Verification"
+    # Display fields: what a viewer sees next to a red X. `name` stays the
+    # identity the chaos entry above resolves against.
+    title: "Healthy and scaled out under load"
+    description: "During the spike, every target pod is Ready and the Deployment reaches two replicas."
+    group: scaling
+    failure_hint: "Usually no HPA, or an HPA whose target never triggers at 300 qps."
     role: objective
     weight: 1.0
     check:
@@ -131,6 +154,8 @@ verification_spec:
   # `default` means the agent deployed somewhere it should not have. A safeguard
   # pointed at the task's own namespace would fire on a correct run.
   - name: "nothing-in-default"
+    title: "Nothing deployed to the default namespace"
+    description: "No Deployment carrying the target label exists in the default namespace."
     role: safeguard
     severity: catastrophic
     check:
@@ -146,6 +171,10 @@ Each entry carries the scoring vocabulary, not just a check tree:
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `name` | Yes | Cross-reference key; a `chaos_spec` entry's `verify:` matches this. |
+| `title` | Once the task is `validated` | Short human label, under about 60 characters: "team-alpha/web has a CPU limit". |
+| `description` | Once the task is `validated` | One sentence stating the condition a passing run satisfies. State the outcome, not the method. |
+| `group` | No | Slug of a task-level `check_groups` entry. Must be declared there. |
+| `failure_hint` | No | What a failure usually means, from the author who knows the common wrong paths: "Limit added in the git repo but never applied." |
 | `role` | Yes | `objective` feeds correctness; `safeguard` asserts the agent avoided harm. |
 | `severity` | Safeguards only | `recoverable` or `catastrophic`. A failed catastrophic safeguard zeroes the outcome. |
 | `weight` | No (default `1.0`) | Relative contribution within its role. Must be greater than zero. |
@@ -173,7 +202,7 @@ A few more habits that keep tasks healthy:
 - **Prefer Terraform-native resources over ad-hoc shell scripts, unless absolutely necessary.** Model your stack's setup as managed OpenTofu resources rather than a `local-exec` shell-out wherever the provider can express it. A resource a script creates falls outside OpenTofu's state, so `tofu destroy` can't remove it — you end up hand-rolling a destroy-time sweep instead, and a forgotten one leaks. This alone removes most of the cleanup burden described above. Reach for a script only when the OpenTofu provider genuinely can't express what you need, and keep it idempotent and scoped to resources the stack itself tears down.
 - **Model one realistic failure per `chaos_spec` entry.** Unless you're deliberately building an advanced multi-stage cascading scenario, each entry should model exactly one realistic failure or stress mechanism (a traffic spike, a pod kill, injected latency), with parameters (`qps`, `duration`, disruption targets) that reflect production conditions without overwhelming the host running the eval.
 - **Use lightweight, fast-pulling manifests.** Use small base images (`alpine`, `busybox`, `nginx:alpine`) in your task manifests, and avoid depending on the open internet or third-party APIs during validation — stub or seed what you need inside the cluster instead.
-- **Keep tasks organized and discoverable.** File each task under the directory that matches its infrastructure provider (`gcp`, `kind`), under `noop` for generation-only tasks, or under `common` for tasks that need no cloud account (like the kind-based `opa-remediation`). Give it a globally unique `task_id`, and use a descriptive `name` — there's no formal difficulty/category field today, so naming and placement are how reviewers and other contributors scope a task at a glance. The `tests/` directory is reserved for the Python codebase's own unit tests — it is not where benchmark task definitions go.
+- **Keep tasks organized and discoverable.** File each task under the directory that matches its infrastructure provider (`gcp`, `kind`), under `noop` for generation-only tasks, or under `common` for tasks that need no cloud account (like the kind-based `opa-remediation`). Give it a globally unique `task_id`, a descriptive `name`, and a `category` plus `tags` so reviewers and result viewers can scope it at a glance; there is no difficulty field. The `tests/` directory is reserved for the Python codebase's own unit tests — it is not where benchmark task definitions go.
 
 ## Reviewing and validating your task
 

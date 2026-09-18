@@ -134,3 +134,40 @@ def test_check_is_parsed_into_a_verifier_instance() -> None:
     assert isinstance(entries[0].check, PodHealthyVerifier)
     assert entries[0].check.selector == "app=web"
     assert entries[0].check.namespace == "shop"
+
+
+def test_display_fields_are_accepted_and_default_to_none() -> None:
+    entries, errors = parse_entries([_entry()])
+    assert errors == []
+    entry = entries[0]
+    assert (entry.title, entry.description, entry.group, entry.failure_hint) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_display_fields_are_parsed_verbatim() -> None:
+    entries, errors = parse_entries(
+        [
+            _entry(
+                title="web is healthy",
+                description="Every web pod in shop is Ready.",
+                group="workload",
+                failure_hint="The image tag is usually wrong.",
+            )
+        ]
+    )
+    assert errors == []
+    entry = entries[0]
+    assert entry.title == "web is healthy"
+    assert entry.description == "Every web pod in shop is Ready."
+    assert entry.group == "workload"
+    assert entry.failure_hint == "The image tag is usually wrong."
+
+
+def test_display_fields_do_not_change_scoring_defaults() -> None:
+    entries, _ = parse_entries([_entry(title="t", description="d", group="g")])
+    assert entries[0].weight == 1.0
+    assert entries[0].resolved_mode == "converge"

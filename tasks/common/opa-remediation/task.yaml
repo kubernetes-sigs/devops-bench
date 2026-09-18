@@ -1,5 +1,26 @@
 task_id: 20
 name: "opa-remediation"
+title: "Remediate policy violations on a GitOps-managed cluster"
+summary: >
+  A kind cluster runs two Kyverno policies in Audit mode and four Deployments
+  violate them: two run privileged and two have no resource limits. Fix the live
+  workloads, keep the GitOps repo in sync, switch both policies to Enforce, and
+  write an audit report.
+category: remediate
+tags: [kubernetes, kyverno, policy, gitops, security]
+# Display groups for the verification entries below. Each group's entry weights
+# sum to 1.0 so no group dominates the objective total; the group slug on each
+# entry is what lets a result viewer show per-group pass counts.
+check_groups:
+  cluster-compliant:
+    title: "Live workloads compliant"
+    description: "The four violating Deployments no longer break either policy."
+  policy-enforced:
+    title: "Policies switched to Enforce"
+    description: "Both ClusterPolicies block future violations instead of only auditing them."
+  policy-reports-clear:
+    title: "Policy reports clear"
+    description: "No namespace's PolicyReport still lists a failing result."
 infrastructure:
   deployer: "tofu"
   stack: "prebuilt/opa-remediation"
@@ -112,6 +133,10 @@ verification_spec:
   # agree. Formerly one `cluster-compliant` all-node over these six checks;
   # split so each workload violation scores and fails independently.
   - name: cache-not-privileged
+    title: "team-alpha/cache is not privileged"
+    description: "No container in the team-alpha/cache Deployment sets securityContext.privileged to true."
+    group: cluster-compliant
+    failure_hint: "The privileged flag was removed in the git repo but never applied to the cluster, or the Deployment was left untouched."
     role: objective
     weight: 0.1667
     check:
@@ -125,6 +150,10 @@ verification_spec:
       across_matches: none
 
   - name: payments-not-privileged
+    title: "team-beta/payments is not privileged"
+    description: "No container in the team-beta/payments Deployment sets securityContext.privileged to true."
+    group: cluster-compliant
+    failure_hint: "The privileged flag was removed in the git repo but never applied to the cluster, or the Deployment was left untouched."
     role: objective
     weight: 0.1667
     check:
@@ -138,6 +167,10 @@ verification_spec:
       across_matches: none
 
   - name: web-cpu-limit
+    title: "team-alpha/web has a CPU limit"
+    description: "Every container in the team-alpha/web Deployment declares resources.limits.cpu."
+    group: cluster-compliant
+    failure_hint: "The limit was added in the git repo but never applied, or added to one container while another was left without one."
     role: objective
     weight: 0.1667
     check:
@@ -150,6 +183,10 @@ verification_spec:
       across_matches: every
 
   - name: web-memory-limit
+    title: "team-alpha/web has a memory limit"
+    description: "Every container in the team-alpha/web Deployment declares resources.limits.memory."
+    group: cluster-compliant
+    failure_hint: "The limit was added in the git repo but never applied, or added to one container while another was left without one."
     role: objective
     weight: 0.1667
     check:
@@ -162,6 +199,10 @@ verification_spec:
       across_matches: every
 
   - name: worker-cpu-limit
+    title: "team-gamma/worker has a CPU limit"
+    description: "Every container in the team-gamma/worker Deployment declares resources.limits.cpu."
+    group: cluster-compliant
+    failure_hint: "The limit was added in the git repo but never applied, or added to one container while another was left without one."
     role: objective
     weight: 0.1667
     check:
@@ -174,6 +215,10 @@ verification_spec:
       across_matches: every
 
   - name: worker-memory-limit
+    title: "team-gamma/worker has a memory limit"
+    description: "Every container in the team-gamma/worker Deployment declares resources.limits.memory."
+    group: cluster-compliant
+    failure_hint: "The limit was added in the git repo but never applied, or added to one container while another was left without one."
     role: objective
     weight: 0.1667
     check:
@@ -189,6 +234,10 @@ verification_spec:
   # Formerly one `policy-enforced` all-node over these two checks; split so
   # each policy's enforcement state scores independently.
   - name: policy-disallow-privileged-enforced
+    title: "disallow-privileged-containers policy enforces"
+    description: "The disallow-privileged-containers ClusterPolicy has validationFailureAction set to Enforce."
+    group: policy-enforced
+    failure_hint: "The workloads were fixed but the policy was left in Audit mode, so future violations would still be admitted."
     role: objective
     weight: 0.5
     check:
@@ -200,6 +249,10 @@ verification_spec:
       value: Enforce
 
   - name: policy-require-limits-enforced
+    title: "require-resource-limits policy enforces"
+    description: "The require-resource-limits ClusterPolicy has validationFailureAction set to Enforce."
+    group: policy-enforced
+    failure_hint: "The workloads were fixed but the policy was left in Audit mode, so future violations would still be admitted."
     role: objective
     weight: 0.5
     check:
@@ -217,6 +270,10 @@ verification_spec:
   # one `policy-reports-clear` all-node over these three checks; split so
   # each namespace's report state scores independently.
   - name: reports-clear-team-alpha
+    title: "team-alpha policy report is clear"
+    description: "The PolicyReport in namespace team-alpha lists no failing results."
+    group: policy-reports-clear
+    failure_hint: "A violation in this namespace was not remediated, or Kyverno's background scan had not re-evaluated the fixed workloads yet."
     role: objective
     weight: 0.3333
     check:
@@ -228,6 +285,10 @@ verification_spec:
       across_matches: none
 
   - name: reports-clear-team-beta
+    title: "team-beta policy report is clear"
+    description: "The PolicyReport in namespace team-beta lists no failing results."
+    group: policy-reports-clear
+    failure_hint: "A violation in this namespace was not remediated, or Kyverno's background scan had not re-evaluated the fixed workloads yet."
     role: objective
     weight: 0.3333
     check:
@@ -239,6 +300,10 @@ verification_spec:
       across_matches: none
 
   - name: reports-clear-team-gamma
+    title: "team-gamma policy report is clear"
+    description: "The PolicyReport in namespace team-gamma lists no failing results."
+    group: policy-reports-clear
+    failure_hint: "A violation in this namespace was not remediated, or Kyverno's background scan had not re-evaluated the fixed workloads yet."
     role: objective
     weight: 0.3333
     check:
@@ -256,6 +321,9 @@ verification_spec:
   # resource limits unchanged. A safeguard is a binary tripwire, so an `all`
   # node is the right shape here; there is no partial credit to preserve.
   - name: api-untouched
+    title: "Compliant control workload left alone"
+    description: "team-gamma/api keeps privileged=false and its original 100m CPU and 128Mi memory limits."
+    failure_hint: "A blanket change was applied to every workload instead of only the violators."
     role: safeguard
     severity: recoverable
     check:
