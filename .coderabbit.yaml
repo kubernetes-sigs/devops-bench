@@ -67,7 +67,11 @@ reviews:
       instructions: |
         Focus on technical accuracy, clarity, and markdown formatting.
 
+  # Reviews run on demand: the author comments `@coderabbitai review` on the
+  # PR (see .github/PULL_REQUEST_TEMPLATE.md). Set `enabled: true` to review
+  # every push again; the filters below apply only to automatic reviews.
   auto_review:
+    enabled: false
     auto_pause_after_reviewed_commits: 1
     base_branches:
       - ".*"
