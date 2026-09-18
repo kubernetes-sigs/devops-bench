@@ -505,6 +505,7 @@ def test_build_rows_flattens_the_verification_report_into_checks() -> None:
             "role": "objective",
             "severity": "",
             "weight": 0.5,
+            "mode": "converge",
             "status": "fail",
             "reason": "path resolved to 0 values",
         },
@@ -518,10 +519,44 @@ def test_build_rows_flattens_the_verification_report_into_checks() -> None:
             "role": "safeguard",
             "severity": "catastrophic",
             "weight": 1.0,
+            "mode": "",
             "status": "pass",
             "reason": "ok",
         },
     ]
+
+
+def test_build_rows_passes_a_stored_check_weight_through() -> None:
+    # Only an absent weight takes the default; a stored value is reported as is.
+    report = [
+        {"name": "zero", "role": "objective", "weight": 0, "success": True},
+        {"name": "unset", "role": "objective", "success": True},
+    ]
+    checks = build_rows(
+        [{"name": "t", "folder": "f", "status": "success", "verification_report": report}],
+        _manifest(),
+    )[0].checks
+    assert [c.weight for c in checks] == [0.0, 1.0]
+
+
+def test_build_rows_surfaces_parse_errors_as_error_checks() -> None:
+    record = {
+        "name": "t",
+        "folder": "f",
+        "status": "success",
+        "verification_report": [{"name": "ok-check", "role": "objective", "success": True}],
+        "verification_parse_errors": [
+            {"name": "serving-http", "reason": "unknown verifier type 'external_http_probe'"}
+        ],
+    }
+    checks = build_rows([record], _manifest())[0].to_dict()["checks"]
+    assert [c["name"] for c in checks] == ["ok-check", "serving-http"]
+    assert checks[1]["status"] == "error"
+    assert checks[1]["role"] == "objective"
+    assert checks[1]["weight"] == 1.0
+    assert checks[1]["reason"] == (
+        "spec failed to parse: unknown verifier type 'external_http_probe'"
+    )
 
 
 def test_build_rows_carries_cached_and_reasoning() -> None:

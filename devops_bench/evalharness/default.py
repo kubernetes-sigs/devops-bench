@@ -151,6 +151,9 @@ def _entry_display_fields(entry: VerificationEntry) -> dict[str, Any]:
 
     Snapshotted onto the record so a result renders with the titles that were
     true when it ran, without joining back to the task file at that revision.
+    An undeclared field lands as ``None``, meaning the author wrote nothing,
+    unlike the task-level fields, which default to ``""`` on the schema. The
+    row normalizer maps both to ``""``.
     """
     return {
         "title": entry.title,

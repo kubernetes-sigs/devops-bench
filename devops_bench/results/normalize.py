@@ -296,6 +296,7 @@ def _check_rows(report: Any) -> list[CheckRow]:
         if not isinstance(item, Mapping):
             continue
         status = item.get("status") or ("pass" if item.get("success") else "fail")
+        weight = item.get("weight")
         rows.append(
             CheckRow(
                 name=_text(item.get("name")),
@@ -305,9 +306,35 @@ def _check_rows(report: Any) -> list[CheckRow]:
                 failure_hint=_text(item.get("failure_hint")),
                 role=_text(item.get("role")),
                 severity=_text(item.get("severity")),
-                weight=float(item.get("weight") or 1.0),
+                # Pass the stored value through; only an absent weight takes
+                # the entry default. Rewriting a stored 0 would misreport it.
+                weight=1.0 if weight is None else float(weight),
+                mode=_text(item.get("mode")),
                 status=_text(status),
                 reason=_text(item.get("reason")),
+            )
+        )
+    return rows
+
+
+def _parse_error_rows(errors: Any) -> list[CheckRow]:
+    """Surface each ``verification_parse_errors`` item as an ``error`` check.
+
+    A spec that fails to parse never evaluates, yet it already fails closed
+    into the correctness score. Without a row for it a viewer would see a low
+    score next to an all-green check list. The rollup counts a parse error as
+    one objective at weight 1.0, which is what the row reports.
+    """
+    rows: list[CheckRow] = []
+    for item in errors or []:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            CheckRow(
+                name=_text(item.get("name")),
+                role="objective",
+                status="error",
+                reason=f"spec failed to parse: {_text(item.get('reason'))}",
             )
         )
     return rows
@@ -365,7 +392,8 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 task_category=_text(task_meta.get("category")),
                 task_tags=[str(tag) for tag in (task_meta.get("tags") or [])],
                 check_groups=_check_groups(task_meta.get("check_groups")),
-                checks=_check_rows(record.get("verification_report")),
+                checks=_check_rows(record.get("verification_report"))
+                + _parse_error_rows(record.get("verification_parse_errors")),
                 iteration=0,
                 outcome_score=extract_score(scores, OUTCOME_SCORE_KEY),
                 correctness_score=correctness,

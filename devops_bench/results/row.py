@@ -37,13 +37,10 @@ from pydantic.alias_generators import to_camel
 __all__ = ["SCHEMA_VERSION", "CheckGroupRow", "CheckRow", "Manifest", "ResultRow"]
 
 #: Version of the ``rows.json`` / ``manifest.json`` contract. Bump on any
-#: breaking field change so a downstream ingest can detect a shape mismatch.
-#: v2 adds the scoring-framework v1 fields (``outcomeScore`` becomes the composite
-#: score; ``correctnessScore`` / ``recoverableSafetyScore`` / ``catastrophic`` /
-#: ``scoringVersion`` are added). ``catastrophicKinds``, the task display
-#: metadata (``taskTitle`` / ``taskSummary`` / ``taskCategory`` / ``taskTags`` /
-#: ``checkGroups``) and the per-check ``checks`` list were added later within
-#: v2: additive with defaults, so not a breaking change.
+#: breaking field change (a rename, a removal, a changed meaning) so a
+#: downstream ingest can detect a shape mismatch. A field added with a default
+#: is additive within the current version and does not bump it. v2 made
+#: ``outcomeScore`` the scoring-framework composite and added its sub-scores.
 SCHEMA_VERSION = 2
 
 # Frozen + camelCase aliases. ``populate_by_name`` keeps the snake_case
@@ -115,7 +112,12 @@ class CheckRow(BaseModel):
         severity: ``recoverable`` or ``catastrophic`` for safeguards; ``""``
             for objectives.
         weight: Relative weight within the role.
-        status: ``pass``, ``fail``, or ``error`` (could not be evaluated).
+        mode: ``converge`` (polled until true) or ``assert`` (evaluated once);
+            ``""`` on records that predate it. Explains why a safeguard was
+            single-shot.
+        status: ``pass``, ``fail``, or ``error`` (could not be evaluated). A
+            parse error on the task's spec surfaces here as an ``error`` row
+            too, since it already counts against the correctness score.
         reason: The verifier's machine-generated explanation.
     """
 
@@ -129,6 +131,7 @@ class CheckRow(BaseModel):
     role: str
     severity: str = ""
     weight: float = 1.0
+    mode: str = ""
     status: str
     reason: str = ""
 
