@@ -253,8 +253,11 @@ Defaults live in `scripts/bastion/_matrix_lib.sh` and `run_matrix.sh`.
 > provisioning anything, so you confirm the combo count — and therefore the
 > cluster count — before committing quota to a typo in `MATRIX_MODELS`.
 
-The `run-eval` and `run-parallel-evals` skills, which orchestrate these runs end
-to end, are landing in a separate PR alongside `.agents/references/running-evals.md`.
+The `run-eval` and `run-parallel-evals` skills (`.agents/skills/run-eval/`,
+`.agents/skills/run-parallel-evals/`) orchestrate these runs end to end. Both
+read `.agents/references/running-evals.md`, the single home for the shared run
+mechanics: where to run, how to authenticate, how to launch detached, and where
+results land.
 
 ---
 
