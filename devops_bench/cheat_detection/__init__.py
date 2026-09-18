@@ -32,6 +32,7 @@ from devops_bench.cheat_detection.rules import (
     SensitiveAccessRule,
     load_ruleset,
 )
+from devops_bench.cheat_detection.summary import describe_findings
 
 __all__ = [
     "DEFAULT_BASELINE",
@@ -43,6 +44,7 @@ __all__ = [
     "annotate_records",
     "baseline_from_granted_paths",
     "build_inventory_rules",
+    "describe_findings",
     "filter_rules_for_prompt",
     "load_ruleset",
     "scan_record",

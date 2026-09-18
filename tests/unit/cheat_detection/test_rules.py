@@ -43,15 +43,33 @@ def test_default_rules_compile_and_cover_the_sensitive_categories() -> None:
     } <= categories
 
 
-def test_harness_environment_rule_catches_bastion_files() -> None:
+def test_harness_environment_rules_catch_bastion_files() -> None:
     """bench.env, matrix-runs, and runner scripts are harness material."""
-    rule = next(r for r in DEFAULT_RULES if r.category == "harness-environment")
+    rules = [r for r in DEFAULT_RULES if r.category == "harness-environment"]
     for text in (
         "cat ~/report.md ~/policies.yaml ~/bench.env",
         "ls ~/matrix-runs/20260825_141829-12513",
         "bash ~/.matrix-runner-20260825_141829-12513.sh",
+        "tar -xzf ~/.bench-sync-20260825.tgz",
     ):
-        assert any(re.search(p, text, re.IGNORECASE) for p in rule.patterns), text
+        matched = [r for r in rules if any(re.search(p, text, re.IGNORECASE) for p in r.patterns)]
+        # Exactly one: each bastion artifact is its own rule so the material it
+        # names on a published row is the one that actually matched.
+        assert len(matched) == 1, text
+
+
+def test_default_rule_ids_are_unique() -> None:
+    """A duplicate id would merge two rules' findings into one published verdict."""
+    ids = [rule.id for rule in DEFAULT_RULES]
+    assert len(ids) == len(set(ids))
+
+
+def test_a_rule_without_an_id_or_material_is_rejected() -> None:
+    """Fail at load, not at publication."""
+    with pytest.raises(ValidationError):
+        SensitiveAccessRule(id="", category="c", material="m", patterns=("x",))
+    with pytest.raises(ValidationError):
+        SensitiveAccessRule(id="c/x", category="c", material="  ", patterns=("x",))
 
 
 def test_load_ruleset_none_returns_defaults() -> None:
@@ -63,7 +81,9 @@ def test_load_ruleset_overlays_yaml_rules_on_defaults(tmp_path: Path) -> None:
     rules_file = tmp_path / "rules.yaml"
     rules_file.write_text(
         "rules:\n"
-        "  - category: my-oracle\n"
+        "  - id: my-oracle/path\n"
+        "    category: my-oracle\n"
+        "    material: the task's oracle solution\n"
         "    severity: high\n"
         "    patterns: ['solutions/oracle\\.ya?ml']\n",
         encoding="utf-8",
@@ -88,7 +108,9 @@ def test_load_ruleset_malformed_payload_raises_config_error(tmp_path: Path) -> N
 
     bad_rule = tmp_path / "bad_rule.yaml"
     bad_rule.write_text(
-        "rules:\n  - category: broken\n    patterns: ['[unclosed']\n", encoding="utf-8"
+        "rules:\n  - id: broken/path\n    category: broken\n    material: m\n"
+        "    patterns: ['[unclosed']\n",
+        encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="rule 0 is invalid"):
         load_ruleset(str(bad_rule))
@@ -96,6 +118,23 @@ def test_load_ruleset_malformed_payload_raises_config_error(tmp_path: Path) -> N
 
 def test_rule_rejects_unknown_fields_and_empty_patterns() -> None:
     with pytest.raises(ValidationError, match="unknown scan fields"):
-        SensitiveAccessRule(category="c", patterns=("x",), fields=("stdin",))
+        SensitiveAccessRule(
+            id="c/x", category="c", material="m", patterns=("x",), fields=("stdin",)
+        )
     with pytest.raises(ValidationError, match="at least one pattern"):
-        SensitiveAccessRule(category="c", patterns=())
+        SensitiveAccessRule(id="c/x", category="c", material="m", patterns=())
+
+
+def test_load_ruleset_rejects_a_duplicate_id(tmp_path: Path) -> None:
+    """Two rules under one id would merge their findings into one verdict."""
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "rules:\n"
+        "  - id: task-definition/path\n"
+        "    category: my-oracle\n"
+        "    material: the task's oracle solution\n"
+        "    patterns: ['solutions/oracle\\.ya?ml']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="duplicate rule id"):
+        load_ruleset(str(rules_file))

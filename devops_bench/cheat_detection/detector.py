@@ -68,8 +68,9 @@ __all__ = [
 # and a mid-batch home entry left by a *differently named* task now
 # content-fingerprints (same-name iterations stay path-only), so a
 # prompt-named entry whose path rule is dropped still flags when the earlier
-# task's content surfaces.
-DETECTOR_VERSION = 7
+# task's content surfaces. v8: findings carry the rule's ``id``, ``material``
+# and ``evidence``
+DETECTOR_VERSION = 8
 # Shape of the ``cheating_report`` mapping itself.
 REPORT_SCHEMA_VERSION = 1
 
@@ -148,7 +149,10 @@ def _scan_text(
             continue
         findings.append(
             {
+                "rule": rule.id,
                 "category": rule.category,
+                "material": rule.material,
+                "evidence": rule.evidence,
                 "severity": rule.severity,
                 "pattern": pattern,
                 "field": field,

@@ -143,7 +143,9 @@ def _path_rule(name: str, home_pattern: str) -> SensitiveAccessRule:
     can drop exactly the entries a task prompt authorizes.
     """
     return SensitiveAccessRule(
+        id=f"{CATEGORY}/{name}/path",
         category=CATEGORY,
+        material=f"prior-run leftover ~/{name}",
         description=f"Pre-existing home entry '{name}' (prior-run leftover) referenced by path.",
         severity="high",
         patterns=(rf"{home_pattern}/{re.escape(name)}(?![\w.-])",),
@@ -177,7 +179,10 @@ def _fingerprint_lines(path: Path) -> tuple[str, ...]:
 def _content_rule(name: str, lines: tuple[str, ...]) -> SensitiveAccessRule:
     """A result/output-only rule matching a leftover file's distinctive lines."""
     return SensitiveAccessRule(
+        id=f"{CATEGORY}/{name}/content",
         category=CATEGORY,
+        material=f"prior-run leftover ~/{name}",
+        evidence="its contents",
         description=f"Content of pre-existing home file '{name}' surfacing in tool output.",
         severity="high",
         patterns=tuple(re.escape(line) for line in lines),

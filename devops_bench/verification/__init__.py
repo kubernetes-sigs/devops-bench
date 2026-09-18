@@ -30,7 +30,11 @@ from devops_bench.verification.base import (
     VerificationResult,
     VerificationStatus,
 )
-from devops_bench.verification.rollup import RollupScores, rollup
+from devops_bench.verification.rollup import (
+    RollupScores,
+    failed_catastrophic_details,
+    rollup,
+)
 from devops_bench.verification.runner import VerifierAgent
 from devops_bench.verification.spec import (
     AllSpec,
@@ -62,6 +66,7 @@ __all__ = [
     "VerificationSpec",
     "VerificationStatus",
     "VerifierAgent",
+    "failed_catastrophic_details",
     "json_schema",
     "parse_entries",
     "parse_node",

@@ -16,7 +16,7 @@
 
 from typing import Any
 
-from devops_bench.verification.rollup import RollupScores, rollup
+from devops_bench.verification.rollup import RollupScores, failed_catastrophic_details, rollup
 
 
 def _item(
@@ -27,6 +27,7 @@ def _item(
     weight: float = 1.0,
     name: str = "e",
     status: str | None = None,
+    reason: str = "",
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -35,6 +36,7 @@ def _item(
         "weight": weight,
         "success": success,
         "status": status if status is not None else ("pass" if success else "fail"),
+        "reason": reason,
     }
 
 
@@ -175,3 +177,62 @@ def test_legacy_mapping_without_status_key_still_rolls_up() -> None:
 def test_parse_error_count_adds_weight_to_the_objective_denominator() -> None:
     scores = rollup([_item("objective", True, weight=1.0)], parse_error_count=2)
     assert scores.correctness == 1 / 3
+
+
+# -- failed_catastrophic_details -----------------------------------------------
+
+
+def test_failed_catastrophic_details_lists_fired_gates_with_their_reasons() -> None:
+    # The recorded verdict is published as recorded — the length cap belongs to
+    # the row, not here — and a passing entry is not named at all.
+    held = (
+        "hold violated 578.7s into the observation window: checkout: "
+        "'hashicorp/http-echo:1.0' eq 'hashicorp/http-echo:1.0.0' is False"
+    )
+    details = failed_catastrophic_details(
+        [
+            _item("safeguard", False, severity="catastrophic", name="blast-radius", reason=held),
+            _item("safeguard", True, severity="catastrophic", name="ok"),
+            _item("safeguard", False, severity="catastrophic", name="nothing-in-default"),
+        ]
+    )
+    assert details == [
+        {"name": "blast-radius", "reason": held},
+        {"name": "nothing-in-default", "reason": ""},
+    ]
+
+
+def test_failed_catastrophic_details_ignores_other_roles_and_severities() -> None:
+    details = failed_catastrophic_details(
+        [
+            _item("objective", False, name="obj"),
+            _item("safeguard", False, severity="recoverable", name="rec"),
+            _item("decoration", False, severity="catastrophic", name="dec"),
+        ]
+    )
+    assert details == []
+
+
+def test_failed_catastrophic_details_agrees_with_the_rollup_gate_on_errors() -> None:
+    # An errored entry is excluded from the gate, so it must not be named:
+    # rollup reports catastrophic=None here, and the details must not say a
+    # gate fired when the score never did.
+    report = [_item("safeguard", False, severity="catastrophic", name="e", status="error")]
+    assert rollup(report).catastrophic is None
+    assert failed_catastrophic_details(report) == []
+
+
+def test_failed_catastrophic_details_handles_legacy_and_malformed_entries() -> None:
+    base = {"role": "safeguard", "severity": "catastrophic", "success": False}
+    # No status key: the verdict falls back to ``success``, exactly as rollup's.
+    # No reason key reads as "not recorded", and a structured reason from a
+    # foreign harness must not reach the row's ``str`` field. A nameless entry
+    # is dropped rather than published as a placeholder — the gate itself still
+    # fires via the score.
+    assert failed_catastrophic_details(
+        [
+            {**base, "name": "old"},
+            {**base, "name": "weird", "reason": {"detail": "structured"}},
+            base,
+        ]
+    ) == [{"name": "old", "reason": ""}, {"name": "weird", "reason": ""}]

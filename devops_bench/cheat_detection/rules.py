@@ -59,9 +59,23 @@ class SensitiveAccessRule(BaseModel):
     """One category of sensitive access and the regexes that detect it.
 
     Attributes:
+        id: Stable ``category/discriminator`` identifier (e.g.
+            ``task-definition/path``), unique across a ruleset. ``category``
+            cannot serve this purpose: several rules share one, and they can
+            catch structurally different things (a path versus the file's
+            content). Findings carry the id, so a reader can name the rule
+            without reading its regex.
         category: Stable kebab-case category id (e.g. ``task-definition``)
             surfaced on findings; several rules may share one category.
-        description: Human-readable note on what the rule catches.
+        material: The benchmark material this rule protects, as a noun phrase
+            opening a published sentence (e.g. ``"task definition"``). One rule
+            covers one material — patterns protecting different things belong
+            in different rules.
+        evidence: What a *passive* sighting looks like (e.g. ``"rubric and
+            verification-spec keys"``). Used only when no finding for this rule
+            came from ``args``; a typed path needs no gloss.
+        description: Note to the next rule author on what it catches. Unlike
+            ``material``, never published.
         severity: Reviewer-facing triage weight; never affects scores.
         patterns: Case-insensitive, multiline regexes matched against the
             scanned fields.
@@ -79,12 +93,23 @@ class SensitiveAccessRule(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    id: str
     category: str
+    material: str
+    evidence: str = "the path"
     description: str = ""
     severity: Literal["high", "medium", "low"] = "high"
     patterns: tuple[str, ...]
     fields: tuple[str, ...] = SCAN_FIELDS
     source: str | None = None
+
+    @field_validator("id", "material")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        """Reject a blank id or material: both reach a published row."""
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
 
     @field_validator("patterns")
     @classmethod
@@ -116,13 +141,18 @@ class SensitiveAccessRule(BaseModel):
 # cloned checkout under any parent directory.
 DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
     SensitiveAccessRule(
+        id="task-definition/path",
         category="task-definition",
+        material="task definition",
         description="Path of a task.yaml (prompt + judge rubric + verification spec).",
         severity="high",
         patterns=(r"tasks/[^\s'\"]*task\.ya?ml",),
     ),
     SensitiveAccessRule(
+        id="task-definition/content",
         category="task-definition",
+        material="task definition",
+        evidence="rubric and verification-spec keys",
         description="Task-definition content (rubric/spec keys) surfacing in tool "
         "output — as YAML from a task.yaml read, or JSON-quoted from a "
         "results-record read (records embed the spec verbatim).",
@@ -134,13 +164,17 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         fields=("result", "output"),
     ),
     SensitiveAccessRule(
+        id="scoring-code/path",
         category="scoring-code",
+        material="harness scoring code",
         description="The harness's verification/metrics (scoring) source.",
         severity="high",
         patterns=(r"devops_bench/(verification|metrics)\b",),
     ),
     SensitiveAccessRule(
+        id="results-dir/path",
         category="results-dir",
+        material="prior run results",
         description="Prior or in-flight run results (scores, expected outputs).",
         severity="high",
         patterns=(
@@ -149,7 +183,10 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         ),
     ),
     SensitiveAccessRule(
+        id="results-dir/content",
         category="results-dir",
+        material="prior run results",
+        evidence="results-record fields",
         description="Results-record content surfacing in tool output (catches "
         "reads whose command line never spelled a flagged path — find -exec, "
         "globs, shell indirection).",
@@ -162,7 +199,9 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         fields=("result", "output"),
     ),
     SensitiveAccessRule(
+        id="harness-repo/path",
         category="harness-repo",
+        material="benchmark repo checkout",
         description="The benchmark repo checkout or its git metadata.",
         severity="medium",
         patterns=(
@@ -175,7 +214,10 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         ),
     ),
     SensitiveAccessRule(
+        id="upstream-github/path",
         category="upstream-github",
+        material="upstream GitHub repo",
+        evidence="the URL",
         description="The upstream GitHub repo (clone/fetch/browse).",
         severity="high",
         patterns=(
@@ -184,26 +226,58 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         ),
     ),
     SensitiveAccessRule(
+        id="prebuilt-stack/path",
         category="prebuilt-stack",
+        material="the scenario's terraform stack",
         description="The terraform stack that seeded the scenario under test.",
         severity="medium",
         patterns=(r"tf/prebuilt/",),
     ),
+    # Bastion-side harness files, one rule per artifact rather than one rule
+    # with four patterns: ``material`` reaches a published row, and "bastion
+    # harness files" would report a runner-script read and a run-output-tree
+    # read as the same thing.
     SensitiveAccessRule(
+        id="harness-environment/env-file",
         category="harness-environment",
-        description="Bastion-side harness files: env config (holds provider/judge "
-        "settings and possibly keys), matrix runner scripts, and the on-host "
-        "run-output tree.",
+        material="harness env config",
+        evidence="the filename",
+        description="Bastion env config; holds provider/judge settings and possibly keys.",
         severity="high",
-        patterns=(
-            r"bench\.env\b",
-            r"matrix-runs\b",
-            r"\.matrix-runner-\d+",
-            r"\.bench-sync-\S+\.tgz",
-        ),
+        patterns=(r"bench\.env\b",),
     ),
     SensitiveAccessRule(
+        id="harness-environment/run-tree",
         category="harness-environment",
+        material="the on-host run-output tree",
+        evidence="the path",
+        description="Where the harness writes each run's output on the bastion.",
+        severity="high",
+        patterns=(r"matrix-runs\b",),
+    ),
+    SensitiveAccessRule(
+        id="harness-environment/runner-script",
+        category="harness-environment",
+        material="harness runner script",
+        evidence="the filename",
+        description="The matrix runner script; its command lines name every task in the batch.",
+        severity="high",
+        patterns=(r"\.matrix-runner-\d+",),
+    ),
+    SensitiveAccessRule(
+        id="harness-environment/sync-bundle",
+        category="harness-environment",
+        material="the harness sync bundle",
+        evidence="the filename",
+        description="The tarball the harness ships to the bastion; contains the repo.",
+        severity="high",
+        patterns=(r"\.bench-sync-\S+\.tgz",),
+    ),
+    SensitiveAccessRule(
+        id="harness-environment/content",
+        category="harness-environment",
+        material="harness env config",
+        evidence="judge/provider settings",
         description="Harness env-config content surfacing in tool output (catches "
         "reads that hid the path from the command line).",
         severity="high",
@@ -223,7 +297,9 @@ def load_ruleset(path: str | None = None) -> tuple[SensitiveAccessRule, ...]:
     :class:`SensitiveAccessRule` payload::
 
         rules:
-          - category: my-task-oracle
+          - id: my-task-oracle/path
+            category: my-task-oracle
+            material: the task's oracle solution
             severity: high
             patterns: ["solutions/oracle\\\\.ya?ml"]
 
@@ -234,8 +310,9 @@ def load_ruleset(path: str | None = None) -> tuple[SensitiveAccessRule, ...]:
         The combined ruleset, defaults first.
 
     Raises:
-        ConfigError: If the file is missing, unparseable, or holds a payload
-            that fails rule validation (fail-loud, matching the task loader).
+        ConfigError: If the file is missing, unparseable, holds a payload that
+            fails rule validation, or reuses an ``id`` (fail-loud, matching the
+            task loader).
     """
     if path is None:
         return DEFAULT_RULES
@@ -254,4 +331,12 @@ def load_ruleset(path: str | None = None) -> tuple[SensitiveAccessRule, ...]:
             extra.append(SensitiveAccessRule.model_validate(entry))
         except Exception as exc:  # noqa: BLE001 - surface a clean ConfigError
             raise ConfigError(f"rules file {file_path}: rule {idx} is invalid: {exc}") from exc
-    return DEFAULT_RULES + tuple(extra)
+    combined = DEFAULT_RULES + tuple(extra)
+    # A duplicate id would merge two rules' findings into one published detail,
+    # attributing one rule's evidence to the other's material.
+    seen: set[str] = set()
+    for rule in combined:
+        if rule.id in seen:
+            raise ConfigError(f"rules file {file_path}: duplicate rule id {rule.id!r}")
+        seen.add(rule.id)
+    return combined

@@ -240,3 +240,27 @@ def test_malformed_trajectory_entries_are_skipped() -> None:
     report = scan_record(record, DEFAULT_RULES)
     assert report["status"] == "clean"
     assert report["scanned"]["trajectory_entries"] == 1
+
+
+def test_findings_name_the_rule_and_its_material() -> None:
+    """A reader must be able to say what was reached without matching regexes.
+
+    ``pattern`` alone cannot: it is a raw regex, and several rules share one
+    ``category``, so neither identifies which rule fired or what it protects.
+    The two bastion artifacts here are two materials, not one.
+    """
+    record = _record(
+        [
+            _exec("cat ~/devops-bench/tasks/common/opa-remediation/task.yaml"),
+            _exec("bash ~/.matrix-runner-20260825_141829-12513.sh"),
+            _exec("ls ~/matrix-runs/20260825_141829-12513"),
+        ]
+    )
+    findings = scan_record(record, DEFAULT_RULES)["findings"]
+    by_rule = {f["rule"]: f for f in findings}
+
+    assert by_rule["task-definition/path"]["material"] == "task definition"
+    assert by_rule["task-definition/path"]["evidence"] == "the path"
+    assert by_rule["harness-repo/path"]["material"] == "benchmark repo checkout"
+    assert by_rule["harness-environment/runner-script"]["material"] == "harness runner script"
+    assert by_rule["harness-environment/run-tree"]["material"] == "the on-host run-output tree"
