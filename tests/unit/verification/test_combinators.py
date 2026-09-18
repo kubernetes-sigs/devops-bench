@@ -18,7 +18,7 @@ import time
 from typing import Any, Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from devops_bench.verification.base import VERIFIERS, BaseVerifier, VerificationResult
 from devops_bench.verification.runner import VerifierAgent
@@ -41,7 +41,7 @@ class _Always(BaseVerifier):
     type: Literal["always"]
     ok: bool = True
     status: Literal["pass", "fail", "error"] | None = None
-    calls: list[float] = []
+    calls: list[float] = Field(default_factory=list)
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         self.calls.append(timeout_sec)

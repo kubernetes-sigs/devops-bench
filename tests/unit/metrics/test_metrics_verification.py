@@ -63,8 +63,9 @@ def test_it_applies_on_parse_errors_alone() -> None:
 
 def test_it_evaluates_parse_errors_alone_with_an_empty_report() -> None:
     # applies() lets this run without a report at all: an empty
-    # verification_report plus parse errors alone must still fail closed into
-    # correctness, keep coverage a full 1.0 (nothing declared errored, since
+    # verification_report plus parse errors alone must refuse to produce a
+    # correctness score (a spec that never parsed might have declared
+    # anything), keep coverage a full 1.0 (nothing declared errored, since
     # nothing declared parsed), and omit the safeguard keys entirely.
     ctx = _ctx(
         {
@@ -73,7 +74,8 @@ def test_it_evaluates_parse_errors_alone_with_an_empty_report() -> None:
         }
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
-    assert scores == {"VerificationCorrectness": 0.0, "VerificationCoverage": 1.0}
+    assert scores == {"VerificationCoverage": 1.0}
+    assert "VerificationCorrectness" not in scores
     assert "VerificationRecoverable" not in scores
     assert "VerificationCatastrophic" not in scores
 
@@ -156,7 +158,11 @@ def test_catastrophic_serialises_as_the_float_gate() -> None:
     assert entries["VerificationCatastrophic"] == 1.0
 
 
-def test_correctness_reflects_fail_closed_parse_errors() -> None:
+def test_correctness_is_withheld_when_the_spec_has_parse_errors() -> None:
+    # A parse error means the spec itself could not be understood, so a
+    # partial correctness computed only over the entries that happened to
+    # parse would be a worthless number indistinguishable from a real one.
+    # The rollup refuses to emit VerificationCorrectness at all in this case.
     ctx = _ctx(
         {
             "verification_report": [_item("objective", True)],
@@ -164,17 +170,17 @@ def test_correctness_reflects_fail_closed_parse_errors() -> None:
         }
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
-    assert scores["VerificationCorrectness"] == 1 / 3
+    assert "VerificationCorrectness" not in scores
 
 
-def test_parse_errors_sink_correctness_but_do_not_count_against_coverage() -> None:
+def test_parse_errors_withhold_correctness_but_do_not_count_against_coverage() -> None:
     # Parse errors and coverage measure different things and must not be
     # conflated. A parse error is a deterministic authoring bug (the spec is
-    # malformed), not an environmental non-evaluation, so it fails closed into
-    # VerificationCorrectness (an unparseable objective is scored as not met)
-    # while leaving VerificationCoverage, which tracks whether declared checks
-    # actually got to run, at a full 1.0: the one entry that did parse ran and
-    # was observed cleanly.
+    # malformed), not an environmental non-evaluation, so it withholds
+    # VerificationCorrectness entirely (an unparseable spec might have
+    # declared anything) while leaving VerificationCoverage, which tracks
+    # whether declared checks actually got to run, at a full 1.0: the one
+    # entry that did parse ran and was observed cleanly.
     ctx = _ctx(
         {
             "verification_report": [_item("objective", True)],
@@ -182,7 +188,7 @@ def test_parse_errors_sink_correctness_but_do_not_count_against_coverage() -> No
         }
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
-    assert scores["VerificationCorrectness"] == 1 / 3
+    assert "VerificationCorrectness" not in scores
     assert scores["VerificationCoverage"] == 1.0
 
 

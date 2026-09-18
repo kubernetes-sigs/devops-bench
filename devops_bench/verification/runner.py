@@ -195,17 +195,22 @@ class VerifierAgent:
         what an objective wants: the agent is working toward the state and the
         check should wait for it. ``assert`` evaluates once with a zero budget,
         which is what a safeguard wants: a violation that has already happened
-        will not heal, and polling one would only waste the run's time.
+        will not heal, and polling one would only waste the run's time. ``hold``
+        also evaluates once with a zero budget per call: continuous holding is
+        not achieved by polling inside this one call, it is achieved by the
+        caller (the background safeguard monitor or the post-run hold window;
+        see ``devops_bench.evalharness.hold``) invoking ``run_entry``
+        repeatedly over the entry's hold window and aggregating the samples.
 
         Args:
             entry: The parsed entry to evaluate.
             timeout_sec: Total budget for a converging entry. Ignored under
-                ``assert``.
+                ``assert`` and ``hold``.
 
         Returns:
             The subtree's result, including per-child results.
         """
-        single_shot = entry.resolved_mode == "assert"
+        single_shot = entry.resolved_mode in ("assert", "hold")
         deadline = time.monotonic() + (0.0 if single_shot else timeout_sec)
         return self._run(entry.check, deadline, single_shot=single_shot)
 
