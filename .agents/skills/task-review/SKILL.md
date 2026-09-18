@@ -53,14 +53,15 @@ resolves to an existing `tf/prebuilt/<dir>` (confirm the directory exists).
 
 ### Display metadata
 
-The task carries `title`, `summary`, `category`, and every `verification_spec`
-entry carries `title` and `description` (the schema only enforces this once
-`validated: true`, so flag it on an unvalidated task as a major finding, not a
-blocker). Written for a result viewer, not the agent: plain English, outcome not
-method, no `{{placeholders}}` (the schema rejects those). Every `group` names a
-declared `check_groups` key. A `failure_hint` should describe the common wrong
-path, not restate the description. *Why:* these fields are the only thing a
-leaderboard can show next to a failed check.
+A validated task carries `title`, `summary`, `category`, and every
+`verification_spec` entry carries `title` and `description`; an unvalidated task
+may omit them, and that is not a finding. Where present they are written for a
+result viewer, not the agent: plain English, outcome not method, no
+`{{placeholders}}` and a `category` from the schema's `CATEGORIES` (the schema
+rejects both). Every `group` names a declared `check_groups` key. A
+`failure_hint` should describe the common wrong path, not restate the
+description. *Why:* these fields are the only thing a leaderboard can show next
+to a failed check.
 
 ### Spec parsing
 

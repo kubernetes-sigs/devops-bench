@@ -20,6 +20,25 @@ from pydantic import ValidationError
 from devops_bench.tasks.schema import Task
 
 
+def _entry(**overrides):
+    base = {"name": "e1", "role": "objective", "check": {"type": "pod_healthy"}}
+    base.update(overrides)
+    return base
+
+
+def _validated_raw(**overrides):
+    raw = {
+        "name": "n",
+        "validated": True,
+        "title": "T",
+        "summary": "S",
+        "category": "deploy",
+        "verification_spec": [_entry(title="Ready", description="Two replicas ready.")],
+    }
+    raw.update(overrides)
+    return raw
+
+
 def test_from_dict_full():
     raw = {
         "task_id": 7,
@@ -261,12 +280,6 @@ def test_safety_checklists_empty_block_coalesces_to_empty_list():
 # -- display metadata --------------------------------------------------------
 
 
-def _entry(**overrides):
-    base = {"name": "e1", "role": "objective", "check": {"type": "pod_healthy"}}
-    base.update(overrides)
-    return base
-
-
 def test_display_metadata_defaults_empty():
     task = Task.from_dict({"name": "n"}, name_default="d")
     assert task.title == ""
@@ -340,19 +353,6 @@ def test_unvalidated_task_may_omit_display_metadata():
     assert task.validated is False
 
 
-def _validated_raw(**overrides):
-    raw = {
-        "name": "n",
-        "validated": True,
-        "title": "T",
-        "summary": "S",
-        "category": "deploy",
-        "verification_spec": [_entry(title="Ready", description="Two replicas ready.")],
-    }
-    raw.update(overrides)
-    return raw
-
-
 def test_validated_task_with_full_metadata_loads():
     assert Task.from_dict(_validated_raw()).validated is True
 
@@ -369,3 +369,32 @@ def test_validated_task_requires_entry_title_and_description():
         Task.from_dict(
             _validated_raw(verification_spec=[_entry(title="  ", description="Two ready.")])
         )
+
+
+def test_validated_task_rejects_whitespace_only_task_fields_on_direct_validate():
+    # from_dict strips text; the direct entry point does not, so the rule
+    # must not be satisfied by whitespace alone.
+    with pytest.raises(ValidationError, match="requires title"):
+        Task.model_validate(_validated_raw(title="   "))
+
+
+def test_category_must_be_a_documented_value():
+    with pytest.raises(ValidationError, match="category 'ops' is not one of"):
+        Task.from_dict({"name": "n", "category": "ops"})
+    assert Task.from_dict({"name": "n", "category": "incident"}).category == "incident"
+    # Unset is fine on an unvalidated task.
+    assert Task.from_dict({"name": "n"}).category == ""
+
+
+def test_tags_reject_placeholders():
+    with pytest.raises(ValidationError, match="tags must not contain a placeholder"):
+        Task.from_dict({"name": "n", "tags": ["{{CLUSTER_NAME}}"]})
+
+
+def test_entry_group_must_be_a_string():
+    # A list or mapping is unhashable; the rule must name the problem rather
+    # than let the membership test raise a TypeError.
+    with pytest.raises(ValidationError, match="'e1': group must be a string"):
+        Task.from_dict({"name": "n", "verification_spec": [_entry(group=[])]})
+    with pytest.raises(ValidationError, match="'e1': group must be a string"):
+        Task.from_dict({"name": "n", "verification_spec": [_entry(group=1)]})

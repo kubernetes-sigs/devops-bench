@@ -18,19 +18,24 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-__all__ = ["Task", "DocumentationEntry", "Constraint", "CheckGroup"]
+__all__ = ["Task", "DocumentationEntry", "Constraint", "CheckGroup", "CATEGORIES"]
 
 # Strict validation: reject implicit type coercion (e.g. the string ``"yes"``
 # is not a bool), and ignore unknown keys in source specs.
 _STRICT = ConfigDict(strict=True, extra="ignore")
 
-# Display text is rendered as-is, never placeholder-substituted, so a
-# ``{{CLUSTER_NAME}}`` in it would reach the reader verbatim.
+# Display text must be run-invariant: it is snapshotted onto every result
+# record and rendered across runs, so a per-run value such as
+# ``{{CLUSTER_NAME}}`` has no stable meaning in it.
 _PLACEHOLDER_MARKER = "{{"
 
 # Display fields a verification entry may carry. Their types live on
 # ``VerificationEntry``; the task-level checks below only need the names.
 _ENTRY_DISPLAY_FIELDS = ("title", "description", "failure_hint")
+
+# The primary buckets a task may declare as ``category``. Closed so filters
+# downstream see one spelling per bucket; extend here when none fits.
+CATEGORIES = ("deploy", "remediate", "scale", "secure", "incident", "migrate", "generate")
 
 
 def _text(value: Any) -> Any:
@@ -149,8 +154,9 @@ class Task(BaseModel):
             the source is not a directory-backed spec.
         title: Display name for the task; free to change, unlike ``name``.
         summary: A few plain sentences on the starting state, what the agent
-            must do, and what done looks like. Never placeholder-substituted.
-        category: Primary bucket for filtering (``deploy``, ``remediate``, ...).
+            must do, and what done looks like. Run-invariant, like every
+            display field: no placeholders.
+        category: Primary bucket for filtering; one of :data:`CATEGORIES`.
         tags: Secondary facets for filtering.
         check_groups: Display groups that ``verification_spec`` entries may
             reference via ``group``; keyed by the group slug.
@@ -233,8 +239,10 @@ class Task(BaseModel):
         cannot see the task's ``check_groups`` or its ``validated`` flag, so the
         cross-cutting rules live here and run over the raw entry mappings:
 
-        * No display field carries a ``{{placeholder}}``; display text is never
-          substituted, so it would reach the reader verbatim.
+        * No display field carries a ``{{placeholder}}``: display text is
+          snapshotted onto every record and rendered across runs, so a per-run
+          value has no stable meaning in it.
+        * ``category`` is one of :data:`CATEGORIES`.
         * Every ``group`` an entry names is declared under ``check_groups``.
         * A validated task carries ``title``, ``summary``, ``category``, and a
           ``title`` and ``description`` on every entry. Unvalidated tasks may
@@ -243,9 +251,13 @@ class Task(BaseModel):
         for field in ("title", "summary", "category"):
             if _PLACEHOLDER_MARKER in getattr(self, field):
                 raise ValueError(f"{field} must not contain a placeholder")
+        if any(_PLACEHOLDER_MARKER in tag for tag in self.tags):
+            raise ValueError("tags must not contain a placeholder")
         for key, group in self.check_groups.items():
             if _PLACEHOLDER_MARKER in group.title or _PLACEHOLDER_MARKER in group.description:
                 raise ValueError(f"check_groups[{key!r}] must not contain a placeholder")
+        if self.category and self.category not in CATEGORIES:
+            raise ValueError(f"category {self.category!r} is not one of {', '.join(CATEGORIES)}")
 
         entries = self.verification_spec or []
         for entry in entries:
@@ -257,7 +269,15 @@ class Task(BaseModel):
                         f"verification entry {label!r}: {field} must not contain a placeholder"
                     )
             group = entry.get("group")
-            if group is not None and group not in self.check_groups:
+            if group is None:
+                continue
+            # Raw mappings, so the value can be anything YAML produced. A
+            # non-string is unhashable or meaningless as a key, and would be
+            # rejected by parse_entries anyway; say so here instead of raising
+            # a TypeError from the membership test.
+            if not isinstance(group, str):
+                raise ValueError(f"verification entry {label!r}: group must be a string")
+            if group not in self.check_groups:
                 raise ValueError(
                     f"verification entry {label!r} names group {group!r}, "
                     f"which is not declared under check_groups"
@@ -265,7 +285,7 @@ class Task(BaseModel):
 
         if not self.validated:
             return self
-        missing = [f for f in ("title", "summary", "category") if not getattr(self, f)]
+        missing = [f for f in ("title", "summary", "category") if not getattr(self, f).strip()]
         if missing:
             raise ValueError(f"a validated task requires {', '.join(missing)}")
         for entry in entries:
