@@ -161,8 +161,11 @@ class ResultRow(BaseModel):
         task_tags: Secondary facets from the task's ``tags``.
         check_groups: Display groups from the task's ``check_groups``, keyed by
             the slug each :class:`CheckRow` may reference via ``group``.
-        checks: One :class:`CheckRow` per verification entry, in declaration
-            order; empty when verification did not run.
+        checks: One :class:`CheckRow` per verification entry: the evaluated
+            entries in declaration order, then any entry that never evaluated
+            because it failed to parse or was dropped as a duplicate name.
+            Empty when the task declared no entries or the record predates
+            verification.
         iteration: Zero-based repeat index; always ``0`` until multi-iteration
             runs land.
         outcome_score: Composite scoring-framework score in ``[0, 1]``

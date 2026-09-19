@@ -546,17 +546,23 @@ def test_build_rows_surfaces_parse_errors_as_error_checks() -> None:
         "status": "success",
         "verification_report": [{"name": "ok-check", "role": "objective", "success": True}],
         "verification_parse_errors": [
-            {"name": "serving-http", "reason": "unknown verifier type 'external_http_probe'"}
+            {"name": "serving-http", "reason": "unknown verifier type 'external_http_probe'"},
+            {
+                "name": "blast-radius",
+                "reason": "unknown verifier type 'resource_propertie'",
+                "role": "safeguard",
+                "severity": "catastrophic",
+            },
         ],
     }
     checks = build_rows([record], _manifest())[0].to_dict()["checks"]
-    assert [c["name"] for c in checks] == ["ok-check", "serving-http"]
-    assert checks[1]["status"] == "error"
-    assert checks[1]["role"] == "objective"
+    assert [c["name"] for c in checks] == ["ok-check", "serving-http", "blast-radius"]
+    assert [c["status"] for c in checks[1:]] == ["error", "error"]
+    assert checks[1]["role"] == "objective"  # declared nothing usable: the fallback
     assert checks[1]["weight"] == 1.0
-    assert checks[1]["reason"] == (
-        "spec failed to parse: unknown verifier type 'external_http_probe'"
-    )
+    assert checks[1]["reason"] == "not evaluated: unknown verifier type 'external_http_probe'"
+    # A safeguard that never ran reads as one, not as an objective.
+    assert (checks[2]["role"], checks[2]["severity"]) == ("safeguard", "catastrophic")
 
 
 def test_build_rows_carries_cached_and_reasoning() -> None:

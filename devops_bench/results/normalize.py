@@ -320,10 +320,13 @@ def _check_rows(report: Any) -> list[CheckRow]:
 def _parse_error_rows(errors: Any) -> list[CheckRow]:
     """Surface each ``verification_parse_errors`` item as an ``error`` check.
 
-    A spec that fails to parse never evaluates, yet it already fails closed
-    into the correctness score. Without a row for it a viewer would see a low
-    score next to an all-green check list. The rollup counts a parse error as
-    one objective at weight 1.0, which is what the row reports.
+    An entry that fails to parse, or is dropped as a duplicate name, never
+    evaluates, yet it already fails closed into the correctness score. Without
+    a row for it a viewer would see a low score next to an all-green check
+    list. The row carries the role and severity the entry declared, so a
+    safeguard that went unrun reads as one; ``objective`` is the fallback for
+    an entry that declared nothing usable, and is also what the rollup charges
+    every such entry as, at weight 1.0.
     """
     rows: list[CheckRow] = []
     for item in errors or []:
@@ -332,9 +335,10 @@ def _parse_error_rows(errors: Any) -> list[CheckRow]:
         rows.append(
             CheckRow(
                 name=_text(item.get("name")),
-                role="objective",
+                role=_text(item.get("role")) or "objective",
+                severity=_text(item.get("severity")),
                 status="error",
-                reason=f"spec failed to parse: {_text(item.get('reason'))}",
+                reason=f"not evaluated: {_text(item.get('reason'))}",
             )
         )
     return rows
