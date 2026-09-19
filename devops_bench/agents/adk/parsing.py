@@ -36,6 +36,11 @@ An event from a remote A2A agent also carries the raw task envelope under
 answer lives in the task's ``status.message``, while the ``content.parts`` ADK
 builds alongside it hold a *mirror of the last artifact* — so the envelope, not
 the content, is what the judge should grade.
+
+That envelope is also the only place a remote's *sub-agents* are visible. They
+run on the far side of the boundary and never reach the event stream as ADK
+parts, but a remote that tags each artifact with its producer lets the parser
+report which sub-agent ran, in what order, and what it contributed.
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from devops_bench.agents.result import ToolCall, empty_tokens
+from devops_bench.agents.result import ROOT_ACTOR, ToolCall, empty_tokens
 
 __all__: list[str] = ["parse_event_stream"]
 
@@ -75,6 +80,12 @@ _A2A_FAILURE_STATES: frozenset[str] = frozenset({"failed", "canceled", "rejected
 # answer in the output the judge grades. A failure state's message is a failure
 # notice, which is not an answer either; it goes to ``errors`` instead.
 _A2A_ANSWER_STATE: str = "completed"
+
+# Artifact-metadata key naming the sub-agent that produced an artifact. A2A
+# leaves ``Artifact.metadata`` free-form, so this is a convention a remote opts
+# into rather than a guarantee of the protocol; an artifact without it falls
+# back to the artifact's own ``name``, and one with neither is skipped.
+_A2A_SUBAGENT_KEY: str = "sub_agent"
 
 
 def _int_or_none(value: object) -> int | None:
@@ -141,6 +152,165 @@ def _a2a_status(task: Mapping[str, Any]) -> tuple[str | None, str | None]:
         else []
     )
     return state, ("".join(texts) or None)
+
+
+def _artifact_actor(artifact: Mapping[str, Any]) -> str | None:
+    """Name the sub-agent that produced an artifact, or ``None`` if unnamed.
+
+    Prefers the ``metadata`` tag over the artifact's ``name``: the tag is what a
+    remote sets deliberately to identify a producer, whereas ``name`` is a free
+    label that often repeats the artifact's purpose rather than its author.
+    """
+    metadata = artifact.get("metadata")
+    if isinstance(metadata, Mapping):
+        tagged = metadata.get(_A2A_SUBAGENT_KEY)
+        if isinstance(tagged, str) and tagged:
+            return tagged
+    name = artifact.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _artifact_text(artifact: Mapping[str, Any]) -> str:
+    """Concatenate an artifact's text parts."""
+    parts = artifact.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    return "".join(
+        part["text"]
+        for part in parts
+        if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+    )
+
+
+def _artifact_key(task: Mapping[str, Any], artifact: Mapping[str, Any], position: int) -> tuple:
+    """Return the identity of an artifact, stable across snapshots of one task.
+
+    ADK re-emits a task envelope as it progresses, and each snapshot repeats the
+    artifacts already produced, so identity is what stops one sub-agent being
+    folded once per snapshot it survived into.
+
+    ``artifactId`` is that identity when present. It is not guaranteed — A2A
+    leaves the field optional — so an artifact without one falls back to its
+    position, which is stable for the same reason the repetition happens: a
+    snapshot appends to the artifact list rather than rewriting it.
+
+    Args:
+        task: The A2A task envelope the artifact came from.
+        artifact: The artifact itself.
+        position: Its index within the envelope's artifact list.
+
+    Returns:
+        A hashable key scoped to the task, so two concurrent remote tasks never
+        collide on a shared artifact id.
+    """
+    artifact_id = artifact.get("artifactId")
+    identity = artifact_id if isinstance(artifact_id, str) and artifact_id else position
+    return (str(task.get("id", "")), identity)
+
+
+def _fold_a2a_artifacts(
+    task: Mapping[str, Any],
+    author: object,
+    trajectory: list[ToolCall],
+    folded: set[tuple],
+) -> bool:
+    """Append one attributed entry per sub-agent artifact on a task envelope.
+
+    A remote agent runs its fleet on the far side of the boundary, so none of it
+    reaches the event stream as ADK parts — the sub-agents would otherwise be
+    invisible. What does cross is one artifact per producer, which is enough to
+    report *that* a sub-agent ran, in what order, and what it contributed.
+
+    The entry is a sub-agent *contribution*, not a tool invocation: ``name``
+    repeats the producer and ``args`` is empty, because no tool call was
+    observed. The trajectory carries it anyway because that is the only channel
+    the judge reads. Tool-level detail inside a sub-agent — the calls its own
+    loop made — is not recoverable this way and is deliberately not guessed at;
+    it needs the remote to emit function parts, which no recorded run does.
+
+    Artifacts are folded whatever the task's state. Unlike ``output``, where a
+    failed task must contribute nothing (its artifacts would be graded as the
+    answer), knowing which sub-agents ran before a failure is exactly the
+    diagnostic a failed run is inspected for. That makes deduplication load-
+    bearing rather than defensive: ADK emits a ``working`` snapshot and then a
+    ``completed`` one for the same task, both carrying the artifacts produced so
+    far, so folding every snapshot unguarded reports each sub-agent once per
+    snapshot it appeared in — and "which sub-agents ran, in what order" is
+    exactly what the trajectory is read for.
+
+    Args:
+        task: The A2A task envelope.
+        author: The event's ``author`` — the remote agent itself, which is the
+            root that its sub-agents are distinguished from.
+        trajectory: Accumulator appended to in artifact order.
+        folded: Keys of the artifacts already folded from earlier snapshots,
+            extended in place. See :func:`_artifact_key`.
+
+    Returns:
+        Whether any artifact named a producer other than ``author``. That is the
+        evidence the remote actually delegated; a single artifact the remote
+        tagged with its own name is one agent reporting its own work. Reported
+        for every artifact examined, including ones skipped as already folded —
+        a repeat snapshot must not retract the run's attribution.
+    """
+    artifacts = task.get("artifacts")
+    if not isinstance(artifacts, list):
+        return False
+
+    root = author if isinstance(author, str) else None
+    delegated = False
+
+    for position, artifact in enumerate(artifacts):
+        if not isinstance(artifact, Mapping):
+            continue
+        label = _artifact_actor(artifact)
+        if label is None:
+            continue
+        if label != root:
+            delegated = True
+        key = _artifact_key(task, artifact, position)
+        if key in folded:
+            continue
+        folded.add(key)
+        trajectory.append(
+            ToolCall(
+                name=label,
+                args={},
+                result=_artifact_text(artifact) or None,
+                status="completed",
+                # An artifact the remote tagged with its own name is the remote
+                # reporting its own work, so it is left unstamped and resolved
+                # by the run-level pass exactly like the remote's own calls:
+                # ``ROOT_ACTOR`` if the run delegated, cleared if it did not.
+                # Stamping the author here would give one agent two labels on
+                # the same run — its own name on the artifact, ``root`` on the
+                # calls.
+                actor=None if label == root else label,
+            )
+        )
+
+    return delegated
+
+
+def _apply_a2a_attribution(trajectory: Sequence[ToolCall], delegated: bool) -> None:
+    """Resolve the run's attribution once the whole stream has been folded.
+
+    Attribution is all-or-nothing per run, and the decision cannot be made until
+    the last event is in: a delegating artifact on the final event still has to
+    attribute calls folded from the first. So ``actor`` is stamped provisionally
+    while folding and reconciled here.
+
+    With no delegation the field is *cleared* rather than defaulted to
+    ``ROOT_ACTOR``, so the entry serializes exactly as it did before this
+    existed. The judge re-reads the serialized trajectory, so stamping a key on
+    every entry of every single-agent run would move scores that have no fleet
+    to describe.
+    """
+    for entry in trajectory:
+        if not delegated:
+            entry.actor = None
+        elif entry.actor is None:
+            entry.actor = ROOT_ACTOR
 
 
 def _response_text(response: Any) -> tuple[str, bool]:
@@ -239,7 +409,10 @@ def parse_event_stream(
 
     An event carrying an A2A task envelope is read from the envelope instead: its
     ``status.message`` is the remote agent's answer, and a terminal state other
-    than completed lands on ``errors``.
+    than completed lands on ``errors``. Artifacts the remote tagged with a
+    producing sub-agent become attributed trajectory entries; if none name a
+    producer other than the remote itself, the run is reported unattributed and
+    serializes exactly as it did before attribution existed.
 
     Args:
         events: Serialized ``Event`` mappings in the order ADK yielded them.
@@ -258,6 +431,12 @@ def parse_event_stream(
     pending_unkeyed: deque[ToolCall] = deque()
     sums: dict[str, int] = {}
     seen: set[str] = set()
+    # Whether any remote task reported an artifact from a sub-agent. Resolved
+    # into ``actor`` once the stream is exhausted; see _apply_a2a_attribution.
+    delegated = False
+    # Artifacts already folded, so a task's later snapshots do not re-report the
+    # sub-agents its earlier ones already did; see _artifact_key.
+    folded_artifacts: set[tuple] = set()
 
     for index, event in enumerate(events):
         if not isinstance(event, Mapping):
@@ -301,6 +480,11 @@ def parse_event_stream(
                 a2a_text = status_text
             if a2a_text and not partial:
                 output_parts.append(a2a_text)
+            # Fold the fleet the remote ran behind the boundary. Deliberately
+            # not gated on the state, and deduplicated across the task's
+            # snapshots: see _fold_a2a_artifacts.
+            if _fold_a2a_artifacts(task, event.get("author"), trajectory, folded_artifacts):
+                delegated = True
 
         for part in _parts(event):
             if not isinstance(part, Mapping):
@@ -341,6 +525,7 @@ def parse_event_stream(
 
     output = "".join(output_parts)
     tokens = _canonical_tokens(sums, seen)
+    _apply_a2a_attribution(trajectory, delegated)
     return output, [entry.to_dict() for entry in trajectory], tokens, errors
 
 
