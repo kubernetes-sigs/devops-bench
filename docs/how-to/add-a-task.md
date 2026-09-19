@@ -22,6 +22,7 @@ Every field below maps to an attribute on `Task`. Fields marked `Required` must 
 | `chaos_spec` | No | A list of `{name, trigger, action, verify}` entries, where `verify` matches a `verification_spec` entry's `name`. |
 | `documentation` | No | `[{doc_name, url, constraints: [{text, critical}]}]` — reference docs and the requirements drawn from them, used for grounding scoring. |
 | `retrieval_context` | No | A list of supporting passages for retrieval-based (RAG) scoring. |
+| `agent_pod_security` | No (defaults `baseline`) | Pod-security level enforced on the namespaces a sandboxed agent can reach — `baseline` or `privileged`, and nothing else (any other value fails validation at load time). `baseline` denies privileged containers, host namespaces, and `hostPath` volumes. Set `privileged` **only** if your task's own subject matter is privileged workloads — it removes the control that denies the observed privileged-pod escape, so expect to justify it in review. |
 
 > [!NOTE]
 > An empty YAML block (`key:` with no value) is treated as the field's empty default rather than an error, so you can stub out an optional field without breaking validation.
