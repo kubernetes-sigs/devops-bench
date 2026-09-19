@@ -1,0 +1,114 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sandbox image for the Antigravity CLI agent harness (BENCH_SANDBOX_IMAGE).
+#
+# One image per harness: a CLI version bump here must not invalidate the A/B
+# baselines of the other agents under test, so the images are deliberately not
+# a shared multi-stage build with per-agent targets.
+#
+# Contents are the tools a task may legitimately need inside the boundary. The
+# agent's cluster credential, workspace, and fixtures are mounted at run time
+# by devops_bench/agents/sandbox.py — never baked in here. Nor is the OAuth
+# token the CLI authenticates with: the harness copies that into the per-run
+# workspace and points agy at it with --gemini_dir, so it arrives on the
+# workspace mount and is deleted when the run ends.
+
+# node, not plain debian: agy itself is a static-ish Go binary and needs no
+# runtime, but MCP server bindings are conventionally launched with npx, and a
+# task that declares one would otherwise fail inside the boundary. Pinned by
+# manifest-list digest (covers amd64 and arm64) so the base cannot drift under
+# an unchanged Dockerfile; bump the digest together with the tool pins below.
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+
+# Everything that defines the arm under test is pinned and checksummed: the
+# base image by digest above, the cluster tools and the agent CLI by version +
+# sha below. Bump them deliberately and re-baseline. The apt layer's support
+# packages (git/jq/ripgrep) deliberately track Debian security updates
+# instead — a scored baseline is identified by the digest of the built image
+# it actually ran, not by a byte-identical rebuild.
+ARG KUBECTL_VERSION=v1.31.0
+ARG KUBECTL_SHA256_AMD64=7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437
+ARG KUBECTL_SHA256_ARM64=f42832db7d77897514639c6df38214a6d8ae1262ee34943364ec1ffaee6c009c
+ARG HELM_VERSION=v3.16.3
+ARG HELM_SHA256_AMD64=f5355c79190951eed23c5432a3b920e071f4c00a64f75e077de0dd4cb7b294ea
+ARG HELM_SHA256_ARM64=5bd34ed774df6914b323ff84a0a156ea6ff2ba1eaf0113962fa773f3f9def798
+# AGY_BUILD is the build id that follows the version in the release path; the
+# two together address one immutable artifact.
+ARG AGY_VERSION=1.2.0
+ARG AGY_BUILD=5210873191596032
+ARG AGY_SHA512_AMD64=d190b25a04ed2a03b0587838476494ae59d0d324ee6373263cabe584352c254f9051f3689c79ac4add8817ff6eb34b11694acd77002c55e91bd1d28b6dfdae22
+ARG AGY_SHA512_ARM64=5ad72fba8c8e915c59c5505dc99116058352b8eba7f141d7ed220256788bada30df8b5af65c0d931ff10bbc661c0f5fe83931c58071fe3063a809bbeda7f59f9
+
+# Modern Git comes from backports for reftable support; ripgrep and jq are
+# what the agent's own search and JSON handling reach for.
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        jq \
+        ripgrep \
+    && apt-get install -y -t bookworm-backports --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# kubectl and helm: resolve the arch from the build platform rather than
+# hardcoding amd64, so the image builds on an arm64 laptop as well as the
+# x86 bastion. Both artifacts are checksum-verified before install, same as
+# the agy tarball below — a tampered or truncated payload fails the build
+# rather than silently scoring a run. The pins are per-arch because the
+# vendors publish per-arch sums.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) kubectl_sha="${KUBECTL_SHA256_AMD64}"; helm_sha="${HELM_SHA256_AMD64}" ;; \
+        arm64) kubectl_sha="${KUBECTL_SHA256_ARM64}"; helm_sha="${HELM_SHA256_ARM64}" ;; \
+        *) echo "unsupported architecture for kubectl/helm: ${arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+    && echo "${kubectl_sha}  kubectl" | sha256sum -c - \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl \
+    && curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" \
+    && echo "${helm_sha}  /tmp/helm.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/helm.tar.gz -C /tmp \
+    && install -o root -g root -m 0755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm \
+    && rm -rf /tmp/helm.tar.gz "/tmp/linux-${arch}"
+
+# The upstream bootstrapper (https://antigravity.google/cli/install.sh) is
+# deliberately not piped to a shell here. It resolves whatever the release
+# manifest calls *latest*, which defeats the pinning above; it also installs
+# into $HOME and then rewrites shell profiles, both meaningless in an image
+# whose HOME is container-owned and replaced per run. What it does that we do
+# keep is the sha512 check, so a tampered or truncated payload fails the build
+# rather than silently scoring a run.
+#
+# Release paths are inconsistent between arches upstream (linux-x64 vs
+# linux-arm, cli_linux_x64 vs cli_linux_arm64), hence the explicit mapping
+# rather than a substitution. The archive member is named `antigravity`; it is
+# installed as `agy` because that is the name the harness invokes and, inside
+# the boundary, the image resolves argv[0].
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) agy_path="linux-x64/cli_linux_x64.tar.gz"; agy_sha="${AGY_SHA512_AMD64}" ;; \
+        arm64) agy_path="linux-arm/cli_linux_arm64.tar.gz"; agy_sha="${AGY_SHA512_ARM64}" ;; \
+        *) echo "unsupported architecture for the Antigravity CLI: ${arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/agy.tar.gz \
+        "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}-${AGY_BUILD}/${agy_path}" \
+    && echo "${agy_sha}  /tmp/agy.tar.gz" | sha512sum -c - \
+    && tar -xzf /tmp/agy.tar.gz -C /tmp antigravity \
+    && install -o root -g root -m 0755 /tmp/antigravity /usr/local/bin/agy \
+    && rm -f /tmp/agy.tar.gz /tmp/antigravity \
+    && agy --version
+
+WORKDIR /workspace
