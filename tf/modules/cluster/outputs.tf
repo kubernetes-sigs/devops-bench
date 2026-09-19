@@ -27,6 +27,15 @@ output "endpoint" {
   description = "Cluster control plane endpoint"
 }
 
+# The kind or GKE endpoint without the vcluster fallback that `endpoint` has. A
+# root kubernetes provider configured from `endpoint` would depend on
+# module.vcluster's resources, which that provider serves, and tofu rejects the
+# cycle. Stacks that do not use vcluster read this instead.
+output "managed_endpoint" {
+  value       = var.infra_provider == "gcp" ? try(module.gke[0].endpoint, "") : try(module.kind[0].endpoint, "")
+  description = "Control plane endpoint for the kind/GKE providers (no vcluster fallback)"
+}
+
 output "cluster_ca_certificate" {
   value       = var.infra_provider == "gcp" ? try(module.gke[0].cluster_ca_certificate, "") : (var.infra_provider == "kind" ? try(module.kind[0].cluster_ca_certificate, "") : "")
   description = "Cluster CA certificate"

@@ -25,11 +25,23 @@ resource "kind_cluster" "default" {
   name            = var.cluster_name
   node_image      = var.node_image
   kubeconfig_path = pathexpand(var.kubeconfig_path)
-  wait_for_ready  = true
+
+  # Without a CNI no node reports Ready; null_resource.calico waits after installing one.
+  wait_for_ready = !var.disable_default_cni
 
   kind_config {
     kind        = "Cluster"
     api_version = "kind.x-k8s.io/v1alpha4"
+
+    # pod_subnet matches Calico's default pool; with kind's 10.244.0.0/16 Calico
+    # would hand out addresses kube-proxy does not expect.
+    dynamic "networking" {
+      for_each = var.disable_default_cni ? [1] : []
+      content {
+        disable_default_cni = true
+        pod_subnet          = "192.168.0.0/16"
+      }
+    }
 
     node {
       role = "control-plane"
@@ -44,12 +56,38 @@ resource "kind_cluster" "default" {
   }
 }
 
+# Installs Calico when kindnet is disabled. Nodes stay NotReady until a CNI is
+# up, so this runs before any later provisioner.
+resource "null_resource" "calico" {
+  count = var.disable_default_cni ? 1 : 0
+
+  depends_on = [kind_cluster.default]
+
+  triggers = {
+    cluster = kind_cluster.default.name
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml"
+      kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
+      kubectl wait --for=condition=Ready nodes --all --timeout=300s
+    EOT
+
+    environment = {
+      KUBECONFIG = pathexpand(var.kubeconfig_path)
+    }
+  }
+}
+
 # Duplicates the KinD context to match a GKE-like name pattern.
 # This is required for third-party gke-mcp tools to resolve the context when
 # running tasks against local KinD clusters, as the MCP client expects the
 # context to conform to the "gke_{project}_{location}_{cluster}" format.
 resource "null_resource" "duplicate_context" {
-  depends_on = [kind_cluster.default]
+  depends_on = [kind_cluster.default, null_resource.calico]
 
   triggers = {
     kubeconfig   = pathexpand(var.kubeconfig_path)
