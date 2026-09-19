@@ -29,6 +29,7 @@ from devops_bench.core.subprocess import CompletedProcess, _build_env, run
 
 __all__ = [
     "apply",
+    "exec_pod",
     "get_resource",
     "is_not_found",
     "port_forward",
@@ -209,6 +210,53 @@ def get_resource(
     ]
     completed = _run_kubectl(argv, kubeconfig, timeout=timeout)
     return json.loads(completed.stdout)
+
+
+def exec_pod(
+    pod: str,
+    command: list[str],
+    *,
+    container: str | None = None,
+    namespace: str | None = None,
+    kubeconfig: KubeconfigSource = None,
+    timeout: float | None = None,
+) -> CompletedProcess:
+    """Run a command inside a running pod via ``kubectl exec``.
+
+    Reads real in-container state (a served HTTP response, a binary's own
+    version output, an appended log file) that no ``kubectl get`` field can
+    see, which is the point: a Deployment's declared spec and even its
+    ``status`` conditions can look fully healthy while the workload actually
+    serving traffic is something else entirely (see
+    ``devops_bench.verification.verifiers.pod_exec``).
+
+    Args:
+        pod: Exact pod name to exec into (no selector; the caller resolves one).
+        command: Argv to run inside the container, never a shell string
+            (callers needing shell features pass ``["sh", "-c", "..."]``
+            explicitly).
+        container: Optional container name, required when the pod has more
+            than one container.
+        namespace: Optional namespace (``-n``).
+        kubeconfig: Kubeconfig path or context-like object.
+        timeout: Optional seconds before the subprocess is killed.
+
+    Returns:
+        The completed process; ``stdout`` carries the command's output.
+
+    Raises:
+        SubprocessError: If kubectl exits non-zero or times out.
+    """
+    argv = [
+        "kubectl",
+        "exec",
+        pod,
+        *(["-c", container] if container else []),
+        *_namespace_args(namespace),
+        "--",
+        *command,
+    ]
+    return _run_kubectl(argv, kubeconfig, timeout=timeout)
 
 
 def apply(
