@@ -78,6 +78,15 @@ _SINGLE_SHOT_WAIT_CEILING_SEC = 120.0
 # path and the single-shot wait-ceiling path in :meth:`VerifierAgent._run_parallel`.
 _PARALLEL_INCOMPLETE_REASON = "evaluation did not complete before the deadline"
 
+# After the parent's initial wait, converge-mode children still pending are
+# given one short additional pass to land, so a child that finishes just
+# after the parent's ``futures_wait`` returns is still picked up instead of
+# falling back to the placeholder. This is a straggler catch for the
+# collection race at the deadline instant, not a second polling budget: the
+# child is handed the parent's own deadline and keeps polling right up to
+# it, same as any other node.
+_STRAGGLER_GRACE_SEC = 0.5
+
 
 def _node_name(node: Any) -> str | None:
     """Echo the optional ``name`` label from a spec node, if any."""
@@ -506,6 +515,23 @@ class VerifierAgent:
         by up to the ceiling, defeating the total-budget bound; the wait is
         clamped to whichever of the ceiling and the remaining deadline is
         smaller.
+
+        Under converge, children are submitted against the same shared
+        ``deadline`` the parent itself waits on, so a child keeps polling
+        right up to it instead of losing part of its budget to an earlier
+        cutoff. If any are still pending once the parent's wait returns,
+        one short additional grace pass (see :data:`_STRAGGLER_GRACE_SEC`)
+        is given before falling back to the placeholder: a child converging
+        right at the shared deadline can still race the parent for the same
+        instant and not yet be in ``done`` when the parent's ``futures_wait``
+        returns, even though it already has a real observed result. The
+        grace pass exists to collect that result, not to extend how long a
+        child gets to converge. ``single_shot`` keeps racing the same
+        ceiling-bound instant on purpose: the ceiling is already the hard
+        backstop against a hung safeguard leaf stalling the run, and
+        stretching it with a grace period would blur that bound for the sake
+        of a mode where a late "error" verdict is already the correct, safe
+        answer.
         """
         start = time.monotonic()
         results: list[VerificationResult] = [
@@ -531,7 +557,9 @@ class VerifierAgent:
                 )
             else:
                 wait_timeout = max(0.0, deadline - time.monotonic())
-            done, _ = futures_wait(futs, timeout=wait_timeout)
+            done, pending = futures_wait(futs, timeout=wait_timeout)
+            if pending and not single_shot:
+                done, _ = futures_wait(futs, timeout=_STRAGGLER_GRACE_SEC)
             for f, i in futs.items():
                 if f not in done:
                     continue
