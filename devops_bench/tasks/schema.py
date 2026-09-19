@@ -169,7 +169,14 @@ class Task(BaseModel):
         tags: Secondary facets for filtering.
         check_groups: Display groups that ``verification_spec`` entries may
             reference via ``group``; keyed by the group slug.
-        prompt: Instruction text driving the agent.
+        prompt: Instruction text driving the agent. The first turn of the
+            conversation, and the only one unless ``turns`` adds more.
+        turns: Follow-up turns sent after ``prompt``, in order, within the
+            *same* agent session. Empty for the single-turn tasks that are
+            the norm, so every existing spec is a one-turn conversation and
+            nothing about it changes. A task that sets this requires a
+            harness able to hold a session across turns; one that cannot
+            errors rather than answering each turn from a blank slate.
         expected_output: Reference output the result is judged against.
         retrieval_context: Supporting passages for retrieval-based scoring.
         chaos_spec: Opaque chaos-injection specification parsed by the chaos
@@ -201,6 +208,7 @@ class Task(BaseModel):
     tags: list[str] = Field(default_factory=list)
     check_groups: dict[str, CheckGroup] = Field(default_factory=dict)
     prompt: str = ""
+    turns: list[str] = Field(default_factory=list)
     expected_output: str = ""
     retrieval_context: list[str] = Field(default_factory=list)
     chaos_spec: Any = None
@@ -231,6 +239,7 @@ class Task(BaseModel):
                 "tags": [],
                 "check_groups": {},
                 "prompt": "",
+                "turns": [],
                 "expected_output": "",
                 "retrieval_context": [],
                 "recoverable_safety": [],
@@ -337,6 +346,13 @@ class Task(BaseModel):
             prompt = raw.get("goal")
         if prompt is None:
             prompt = raw.get("input")
+        turns = raw.get("turns", [])
+        if turns is None:
+            turns = []
+        elif isinstance(turns, list):
+            # Stripped like ``prompt``. A wrong type is left intact for strict
+            # validation to reject, rather than iterated into characters here.
+            turns = [_text(turn) for turn in turns]
         retrieval = raw.get("retrieval_context", [])
         recoverable_safety = raw.get("recoverable_safety", [])
         infrastructure = raw.get("infrastructure", {})
@@ -356,6 +372,7 @@ class Task(BaseModel):
                 "tags": [] if tags is None else tags,
                 "check_groups": {} if check_groups is None else check_groups,
                 "prompt": _text(prompt),
+                "turns": turns,
                 "expected_output": _text(raw.get("expected_output", "")),
                 # An empty YAML block (``key:`` with no value) parses to None;
                 # treat it as the field's empty default rather than rejecting it.

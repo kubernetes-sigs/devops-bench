@@ -24,7 +24,7 @@ import json
 import os
 import pathlib
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
@@ -476,7 +476,9 @@ async def _close_quietly(runner: Any) -> None:
         await closing
 
 
-def _drive(root_agent: Any, prompt: str, timeout_sec: float | None) -> tuple[list[dict], list[str]]:
+def _drive(
+    root_agent: Any, prompts: Sequence[str], timeout_sec: float | None
+) -> tuple[list[dict], list[str]]:
     """Run the agent to completion and collect its serialized event stream.
 
     ``events`` is populated as the stream arrives rather than at the end: ADK
@@ -485,10 +487,19 @@ def _drive(root_agent: Any, prompt: str, timeout_sec: float | None) -> tuple[lis
     worth scoring. Both the timeout and the failure are recorded as errors and
     returned alongside whatever was collected.
 
+    Every turn is sent through **one** ADK session, which is what makes a
+    multi-turn run a conversation rather than a series of amnesiac restarts.
+    The session is also where a ``RemoteA2aAgent`` holds its A2A ``ContextId``,
+    so keeping one session is exactly what keeps the remote on one context.
+
+    ``timeout_sec`` is the budget for the whole conversation, not per turn: it
+    bounds the agent's total wall-clock cost, and a per-turn budget would let an
+    N-turn task quietly cost N times what the same budget buys a single-turn one.
+
     Args:
         root_agent: The prepared ADK agent.
-        prompt: Task prompt to send as the user message.
-        timeout_sec: Wall-clock budget, or ``None`` for no limit.
+        prompts: Turn texts to send as user messages, in order.
+        timeout_sec: Wall-clock budget for all turns, or ``None`` for no limit.
 
     Returns:
         A ``(events, errors)`` tuple.
@@ -505,11 +516,12 @@ def _drive(root_agent: Any, prompt: str, timeout_sec: float | None) -> tuple[lis
             session = await runner.session_service.create_session(
                 app_name=_APP_NAME, user_id=_USER_ID
             )
-            message = types.Content(role="user", parts=[types.Part(text=prompt)])
-            async for event in runner.run_async(
-                user_id=_USER_ID, session_id=session.id, new_message=message
-            ):
-                events.append(_dump_event(event))
+            for prompt in prompts:
+                message = types.Content(role="user", parts=[types.Part(text=prompt)])
+                async for event in runner.run_async(
+                    user_id=_USER_ID, session_id=session.id, new_message=message
+                ):
+                    events.append(_dump_event(event))
         finally:
             await _close_quietly(runner)
 
@@ -597,6 +609,21 @@ class AdkAgent(base.AgentHarness):
     def _execute(
         self, prompt: str, workspace_path: pathlib.Path | None = None
     ) -> agents_result.AgentResult:
+        return self._execute_turns([prompt], workspace_path)
+
+    def _execute_turns(
+        self, prompts: Sequence[str], workspace_path: pathlib.Path | None = None
+    ) -> agents_result.AgentResult:
+        """Drive every turn through one ADK session.
+
+        Overrides the single-turn default because this harness *can* hold a
+        session: ADK keeps conversation state per session id, and a
+        ``RemoteA2aAgent`` keys its A2A ``ContextId`` off the same session, so
+        one session is all it takes for the remote to see a continuing
+        conversation rather than N unrelated ones.
+        """
+        if not prompts:
+            return agents_result.AgentResult.errored("no turns to run")
         try:
             import google.adk  # noqa: F401
         except ImportError as exc:
@@ -623,7 +650,7 @@ class AdkAgent(base.AgentHarness):
         if workspace_path is not None:
             metadata["workspace"] = str(workspace_path)
         with _in_workspace(workspace_path):
-            events, run_errors = _drive(prepared, prompt, self.config.timeout_sec)
+            events, run_errors = _drive(prepared, prompts, self.config.timeout_sec)
         errors.extend(run_errors)
 
         output, trajectory, tokens, parse_errors = parsing.parse_event_stream(events)

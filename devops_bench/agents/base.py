@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult
@@ -127,20 +128,77 @@ class AgentHarness(ABC):
             An :class:`AgentResult` with ``latency`` always populated. A
             subclass crash produces ``AgentResult.errored(msg)``.
         """
+        return self._guarded(_maybe_observe(self._execute), prompt, workspace_path)
+
+    def run_turns(self, prompts: Sequence[str], workspace_path: Path | None = None) -> AgentResult:
+        """Execute an ordered multi-turn conversation and return one result.
+
+        The turns are a *single* conversation, not independent runs: the agent
+        keeps whatever session state it maintains across them, and the whole
+        exchange folds into one :class:`AgentResult`. That is what a remote
+        agent needs in order to hold its own session — an A2A service keyed on
+        ``ContextId``, for example, only stays on one context while the caller
+        stays in one session.
+
+        Args:
+            prompts: Turn texts in the order they should be sent. A one-element
+                sequence is exactly :meth:`run`.
+            workspace_path: As :meth:`run`.
+
+        Returns:
+            An :class:`AgentResult` covering the whole conversation, with
+            ``latency`` always populated.
+        """
+        return self._guarded(_maybe_observe(self._execute_turns), list(prompts), workspace_path)
+
+    def _guarded(
+        self,
+        call: Callable[[Any, Path | None], AgentResult],
+        payload: Any,
+        workspace_path: Path | None,
+    ) -> AgentResult:
+        """Run one execution hook under the latency stamp and the safety net."""
         start = time.monotonic()
         try:
-            traced = _maybe_observe(self._execute)
-            result = traced(prompt, workspace_path)
+            result = call(payload, workspace_path)
             elapsed = time.monotonic() - start
-            # Trust _execute when it already stamped latency (e.g. it has finer
+            # Trust the hook when it already stamped latency (e.g. it has finer
             # timing for a sub-step it wants surfaced); only fill in when zero.
             if not result.latency:
                 result.latency = elapsed
             return result
         except Exception as exc:  # noqa: BLE001 - safety net for the whole benchmark
             elapsed = time.monotonic() - start
-            _log.exception("agent _execute raised; converting to errored result")
+            _log.exception("agent execution raised; converting to errored result")
             return AgentResult.errored(f"{type(exc).__name__}: {exc}", latency=elapsed)
+
+    def _execute_turns(
+        self, prompts: Sequence[str], workspace_path: Path | None = None
+    ) -> AgentResult:
+        """Run a multi-turn conversation; override to support more than one turn.
+
+        The default is deliberately not a loop over :meth:`_execute`. Replaying
+        a harness that holds no session would restart the conversation on every
+        turn, and the agent would answer turn *n* having forgotten turns 1..n-1
+        — a plausible-looking transcript that silently means nothing. A harness
+        that cannot hold a session says so instead, and the task fails loudly.
+
+        Args:
+            prompts: Turn texts in order.
+            workspace_path: As :meth:`_execute`.
+
+        Returns:
+            An :class:`AgentResult`; errored when this harness is single-turn
+            and more than one turn was asked for.
+        """
+        if not prompts:
+            return AgentResult.errored("no turns to run")
+        if len(prompts) == 1:
+            return self._execute(prompts[0], workspace_path)
+        return AgentResult.errored(
+            f"{type(self).__name__} is single-turn, but the task asked for "
+            f"{len(prompts)} turns; it cannot hold a session across them"
+        )
 
     @abstractmethod
     def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
@@ -165,8 +223,8 @@ class AgentHarness(ABC):
 
 
 def _maybe_observe(
-    func: Callable[[str, Path | None], AgentResult],
-) -> Callable[[str, Path | None], AgentResult]:
+    func: Callable[[Any, Path | None], AgentResult],
+) -> Callable[[Any, Path | None], AgentResult]:
     """Return ``func`` wrapped in ``deepeval.tracing.observe`` when available.
 
     The wrap is performed once per ``run()`` call rather than at import time so

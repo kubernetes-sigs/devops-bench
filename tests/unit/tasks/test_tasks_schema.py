@@ -95,6 +95,28 @@ def test_prompt_is_stripped():
     assert task.prompt == "hello"
 
 
+def test_turns_are_parsed_and_stripped():
+    task = Task.from_dict({"prompt": "first", "turns": ["  second  ", "third"]}, name_default="d")
+    assert task.turns == ["second", "third"]
+
+
+def test_turns_default_to_empty():
+    # Every existing single-turn spec omits the key; it must stay a one-turn
+    # conversation rather than becoming a zero-turn one.
+    assert Task.from_dict({"prompt": "x"}, name_default="d").turns == []
+    assert Task.from_dict({"prompt": "x", "turns": None}, name_default="d").turns == []
+
+
+def test_non_list_turns_raises():
+    with pytest.raises(ValidationError):
+        Task.from_dict({"turns": "just one"}, name_default="d")
+
+
+def test_non_string_turn_raises():
+    with pytest.raises(ValidationError):
+        Task.from_dict({"turns": ["ok", 3]}, name_default="d")
+
+
 def test_goal_alias_maps_to_prompt():
     task = Task.from_dict({"goal": "  goal text  "}, name_default="d")
     assert task.prompt == "goal text"
@@ -240,6 +262,7 @@ def test_to_dict_roundtrip_fields():
         "tags",
         "check_groups",
         "prompt",
+        "turns",
         "expected_output",
         "retrieval_context",
         "chaos_spec",

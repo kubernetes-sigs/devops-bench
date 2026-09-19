@@ -20,6 +20,7 @@ Every field below maps to an attribute on `Task`. Fields marked `Required` must 
 | `tags` | No | Secondary facets for filtering, e.g. `[kubernetes, kyverno, gitops]`. |
 | `check_groups` | No | `{<slug>: {title, description}}`. Display groups that `verification_spec` entries opt into via `group: <slug>`, so a result viewer can show "Pod hardening 6/8". Grouping never affects scoring; a `group` that is not declared here is a load error. |
 | `prompt` (aliases `goal`, `input`) | Yes | The instruction handed to the agent. Use `{{...}}` placeholders for any infra value — never hardcode a project, cluster, namespace, or deployment name. |
+| `turns` | No (defaults to none) | Follow-up turns sent after `prompt`, in order, within the **same** agent session — so the agent answers each one knowing the ones before it. Placeholders are substituted here exactly as in `prompt`. Requires a harness that can hold a session across turns (today: `adk`); any other harness errors rather than answering each turn from a blank slate. |
 | `expected_output` | Yes | The grading rubric, written as prose "critical requirements". Graded on **outcome**, so accept any valid path to the goal, not one prescribed method. |
 | `infrastructure` | No (defaults to a local kind cluster) | `{deployer, stack, teardown, variables, provider}`. Omitting it entirely gives `deployer: tofu` with the `prebuilt/kind` stack, whose provider is deduced as `kind`. Use `deployer: noop` for generation-only tasks (no cluster), or `deployer: tofu` with a `stack` under `tf/prebuilt/<dir>` for real infrastructure — any stack whose final path segment is not `kind` **must** set `provider` explicitly, since no cloud is ever assumed. |
 | `validated` | No (defaults `false`) | Set `true` only after a human has vetted the task. Required for leaderboard eligibility — an unvetted task never counts. A validated task must carry `title`, `summary`, `category`, and a `title` and `description` on every `verification_spec` entry, because the leaderboard renders validated tasks and nothing else. |
@@ -33,7 +34,7 @@ Every field below maps to an attribute on `Task`. Fields marked `Required` must 
 
 ## Placeholders
 
-The harness substitutes a fixed set of `{{...}}` placeholders into your `prompt` and `expected_output` (and into chaos/verification spec string leaves) just before the agent runs, using the live cluster and project for that run. The table below is the complete set — a `{{...}}` name that is not listed is left in the prompt verbatim rather than reported as an error, so check it against `_substitute_placeholders` in `devops_bench/evalharness/default.py` if in doubt.
+The harness substitutes a fixed set of `{{...}}` placeholders into your `prompt`, `turns`, and `expected_output` (and into chaos/verification spec string leaves) just before the agent runs, using the live cluster and project for that run. The table below is the complete set — a `{{...}}` name that is not listed is left in the prompt verbatim rather than reported as an error, so check it against `_substitute_placeholders` in `devops_bench/evalharness/default.py` if in doubt.
 
 | Placeholder | Resolves to |
 | --- | --- |
