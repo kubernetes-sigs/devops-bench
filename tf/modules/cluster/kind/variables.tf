@@ -25,8 +25,13 @@ variable "kubeconfig_path" {
 
 variable "node_image" {
   type        = string
-  description = "The kind node image to use"
-  default     = "kindest/node:v1.29.2"
+  description = "The kind node image to use (v1.30+; see the floor below)"
+  # 1.30 is a floor, not a preference. The sandbox's pod-security backstop is a
+  # ValidatingAdmissionPolicy, and `admissionregistration.k8s.io/v1` only went
+  # GA in 1.30 -- on 1.29 the apply fails with "no matches for kind", the
+  # provisioner refuses to run unguarded, and every sandboxed kind task fails.
+  # Digest-pinned to the same image tf/prebuilt/opa-remediation already uses.
+  default = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
 }
 
 variable "project_id" {

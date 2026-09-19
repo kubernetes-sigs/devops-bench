@@ -1,0 +1,80 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sandbox image for the Gemini CLI agent harness (BENCH_SANDBOX_IMAGE).
+#
+# One image per harness: a CLI version bump here must not invalidate the A/B
+# baselines of the other agents under test, so the images are deliberately not
+# a shared multi-stage build with per-agent targets.
+#
+# Contents are the tools a task may legitimately need inside the boundary. The
+# agent's cluster credential, workspace, and fixtures are mounted at run time
+# by devops_bench/agents/sandbox.py — never baked in here.
+
+# Digest-pinned (multi-arch manifest list, amd64 + arm64) so the floating tag
+# cannot move the base under a rebuild.
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+
+# The base digest and these ARGs pin what a Dockerfile can pin; APT contents
+# may still drift between rebuilds (Debian archives move), so the digest of
+# the *built* image — not this file — is the identity of what an A/B arm was
+# scored with. Bump the pins deliberately and re-baseline.
+ARG KUBECTL_VERSION=v1.31.0
+ARG HELM_VERSION=v3.16.3
+ARG GEMINI_CLI_VERSION=0.54.4
+
+# Checksums for the two raw-download binaries — the only executables here
+# that neither apt (GPG) nor npm (registry integrity metadata) vouches for.
+# Pinned in this file rather than fetched at build time: a checksum retrieved
+# over the same channel as the artifact verifies nothing. Bumping a version
+# above without repinning these fails the build, which is the point.
+ARG KUBECTL_SHA256_AMD64=7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437
+ARG KUBECTL_SHA256_ARM64=f42832db7d77897514639c6df38214a6d8ae1262ee34943364ec1ffaee6c009c
+ARG HELM_SHA256_AMD64=f5355c79190951eed23c5432a3b920e071f4c00a64f75e077de0dd4cb7b294ea
+ARG HELM_SHA256_ARM64=5bd34ed774df6914b323ff84a0a156ea6ff2ba1eaf0113962fa773f3f9def798
+
+# Modern Git comes from backports for reftable support; ripgrep and jq are
+# what the agent's own search and JSON handling reach for.
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        jq \
+        ripgrep \
+    && apt-get install -y -t bookworm-backports --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# kubectl and helm: resolve the arch from the build platform rather than
+# hardcoding amd64, so the image builds on an arm64 laptop as well as the
+# x86 bastion. Verified against the arch's pinned checksum before install;
+# an arch with no pin fails the build rather than installing unverified.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) kubectl_sha="${KUBECTL_SHA256_AMD64}"; helm_sha="${HELM_SHA256_AMD64}" ;; \
+        arm64) kubectl_sha="${KUBECTL_SHA256_ARM64}"; helm_sha="${HELM_SHA256_ARM64}" ;; \
+        *) echo "no checksum pinned for ${arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+    && echo "${kubectl_sha}  kubectl" | sha256sum -c - \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl \
+    && curl -fsSLo helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" \
+    && echo "${helm_sha}  helm.tar.gz" | sha256sum -c - \
+    && tar -xzf helm.tar.gz -C /tmp \
+    && install -o root -g root -m 0755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm \
+    && rm -rf helm.tar.gz "/tmp/linux-${arch}"
+
+RUN npm install -g "@google/gemini-cli@${GEMINI_CLI_VERSION}"
+
+WORKDIR /workspace

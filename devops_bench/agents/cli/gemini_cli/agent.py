@@ -48,7 +48,7 @@ from devops_bench.agents.shared.cli_capabilities import (
     materialize_skills,
 )
 from devops_bench.core import SubprocessError, get_logger
-from devops_bench.core.model_providers import resolve_provider
+from devops_bench.core.model_providers import resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -151,7 +151,18 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
     ``config.model`` onto ``GEMINI_MODEL``. OTLP telemetry exporters are disabled
     so they don't hang on broken endpoints. The model is never hardcoded; it
     flows from ``config.model``. A keyless backend (e.g. Vertex/ADC) writes no
-    key.
+    key. A Vertex backend additionally writes the google-genai routing vars
+    (``GOOGLE_GENAI_USE_VERTEXAI`` plus project/location), since the SDK
+    otherwise talks to the Gemini API regardless of the configured provider.
+
+    Vertex is also keyless: it authenticates through Application Default
+    Credentials, which exist for a host process and deliberately do not exist
+    inside the sandbox. A sandboxed Vertex run therefore additionally gets the
+    backend's mint-and-inject credential recipe
+    (:func:`~devops_bench.core.model_providers.sandbox_credential_env`) — the
+    metadata-emulator vars pointing at a host-side server serving a narrowly
+    scoped, short-lived token. An unsandboxed run does not call it at all, so
+    the flag-off path stays byte-for-byte unchanged.
 
     Args:
         config: Resolved :class:`AgentConfig` for this run.
@@ -160,7 +171,8 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
         A mapping suitable for ``core.subprocess.run``'s ``extra_env``.
 
     Raises:
-        ConfigError: If ``config.provider`` is not a known provider.
+        ConfigError: If ``config.provider`` is not a known provider, or a
+            sandboxed keyless run cannot be given a model credential.
     """
     # Resolve unconditionally so an unknown provider fails loud even on a keyless
     # (Vertex/ADC) run, not only when a key happens to be set.
@@ -173,6 +185,22 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
         "OTEL_LOGS_EXPORTER": "none",
         "OTEL_SDK_DISABLED": "true",
     }
+    if spec.backend == "vertex":
+        # The google-genai SDK the CLI embeds reads these three; without the
+        # switch it defaults to the Gemini API and ignores the Vertex routing.
+        # Project/location env spellings follow the antigravity harness so an
+        # operator configures both agents the same way.
+        overlay["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+        if project:
+            overlay["GOOGLE_CLOUD_PROJECT"] = project
+        overlay["GOOGLE_CLOUD_LOCATION"] = (
+            os.environ.get("GOOGLE_CLOUD_LOCATION")
+            or os.environ.get("GCP_LOCATION")
+            or "us-central1"
+        )
+        if config.sandbox is not None:
+            overlay.update(sandbox_credential_env(spec, project=project))
     if config.api_key:
         for var in spec.api_key_envs:
             overlay[var] = config.api_key
@@ -204,6 +232,11 @@ class GeminiCliAgent(AgentHarness):
     ``--output-format stream-json`` event stream; no session files are read
     from disk.
     """
+
+    # Every agent-owned subprocess here goes through run_agent_cmd, so a
+    # sandboxed run is actually contained. Unmigrated harnesses keep the base
+    # False and are refused by AgentHarness.run when the sandbox flag is on.
+    supports_sandbox = True
 
     def __init__(self, config: AgentConfig | None = None) -> None:
         AgentHarness.__init__(self, config)
@@ -249,12 +282,20 @@ class GeminiCliAgent(AgentHarness):
                     json.dumps(settings, indent=2), encoding="utf-8"
                 )
             try:
-                completed = run(
+                # Through the sandbox seam: containerised when
+                # ``config.sandbox`` is set, byte-identical to a direct
+                # ``run(...)`` call otherwise. The module-level ``run`` rides
+                # along as the host-path executor. The overlay is the RESOLVED
+                # configuration (provider-routed api key, GEMINI_MODEL, the
+                # OTLP disables), so it is exactly what should cross a sandbox
+                # boundary — by value, never as inherited process env.
+                completed = self.run_agent_cmd(
                     argv,
                     extra_env=env_overlay,
                     cwd=workdir,
                     check=False,
                     timeout=self.config.timeout_sec,
+                    host_run=run,
                 )
             except SubprocessError as exc:
                 return AgentResult.errored(f"gemini subprocess error: {exc}")

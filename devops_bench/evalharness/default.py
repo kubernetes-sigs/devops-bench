@@ -23,11 +23,13 @@ import shutil
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import replace
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
 
 from devops_bench.agents import AGENTS, AgentConfig, AgentResult
+from devops_bench.agents import sandbox as agent_sandbox
 from devops_bench.agents.capabilities import (
     AgentRules,
     AllCapabilities,
@@ -41,10 +43,12 @@ from devops_bench.cheat_detection import (
     annotate_records,
     baseline_from_granted_paths,
     build_inventory_rules,
+    build_mount_rules,
     filter_rules_for_prompt,
     load_ruleset,
 )
 from devops_bench.core import (
+    ClusterInfo,
     ConfigError,
     MissingDependencyError,
     NotRegisteredError,
@@ -63,6 +67,7 @@ from devops_bench.evalharness.scenario import (
     ScenarioManager,
     pick_free_port,
 )
+from devops_bench.k8s import agent_credentials
 from devops_bench.tasks import Task
 from devops_bench.verification import (
     MIN_LEAF_BUDGET_SECONDS,
@@ -70,6 +75,9 @@ from devops_bench.verification import (
     VerifierAgent,
     parse_entries,
 )
+
+if TYPE_CHECKING:
+    from devops_bench.providers.base import Provider
 
 __all__ = ["DefaultEvalHarness"]
 
@@ -225,6 +233,16 @@ class DefaultEvalHarness(Harness):
         # the lifetime of this harness, so every agent run and every record's
         # ``capabilities_granted`` field reads the same object.
         self._agent_config: AgentConfig = self._build_agent_config_snapshot()
+        # Per-task sandbox state. The snapshot's ``sandbox`` field records the
+        # opt-in (image only); the full spec — workspace, kubeconfig, network
+        # plan, fixture mounts — only exists after provisioning, so
+        # ``_run_one`` completes it per task into ``_active_sandbox_spec`` and
+        # ``build_agent_config`` overlays it. ``_sandbox_inventory_rules``
+        # holds the per-task detection inventory of the sandbox home (keyed by
+        # task name), replacing the operator-home inventory that no longer
+        # describes what the agent can see.
+        self._active_sandbox_spec: agent_sandbox.SandboxSpec | None = None
+        self._sandbox_inventory_rules: dict[str, tuple[SensitiveAccessRule, ...]] = {}
         self.default_target_deployment = default_target_deployment
         self.default_namespace = default_namespace
         # Resolve the run-level placeholder inputs once into instance
@@ -290,8 +308,13 @@ class DefaultEvalHarness(Harness):
 
         Returns:
             The :class:`AgentConfig` snapshot. The same object is handed to
-            every agent the harness constructs.
+            every agent the harness constructs. During a sandboxed task the
+            snapshot's skeletal ``sandbox`` field is replaced with the
+            task-completed spec ``_run_one`` prepared; everything else is
+            unchanged.
         """
+        if self._active_sandbox_spec is not None:
+            return replace(self._agent_config, sandbox=self._active_sandbox_spec)
         return self._agent_config
 
     def _build_agent_config_snapshot(self) -> AgentConfig:
@@ -315,6 +338,7 @@ class DefaultEvalHarness(Harness):
             max_turns=base.max_turns,
             capabilities=capabilities,
             extra_env=base.extra_env,
+            sandbox=base.sandbox,
         )
 
     @staticmethod
@@ -695,14 +719,40 @@ class DefaultEvalHarness(Harness):
             The detailed per-task result dicts, scored in place, in the
             ``results.json`` schema.
         """
+        sandboxed = self._agent_config.sandbox is not None
+        if sandboxed:
+            self._sandbox_inventory_rules.clear()
+            if self.parallel:
+                # The sweep matches on the shared name prefix and cannot tell a
+                # crashed run's stray from a sibling harness's *live* agent
+                # container, so under BENCH_PARALLEL it would reap a concurrent
+                # run mid-task.
+                _log.info(
+                    "BENCH_PARALLEL set: skipping the stray sandbox-container "
+                    "sweep; reap leftovers manually with `docker ps --filter "
+                    "name=devops-bench-agent-` once no benchmark is running"
+                )
+            else:
+                # A container the harness starts is normally reaped around its
+                # own run, but a harness process killed outright (Ctrl-C, OOM,
+                # a host reboot) never gets to run that ``finally``. Sweeping
+                # once here, before this batch's own containers exist, catches
+                # exactly that leak without risking a live container from the
+                # run in progress.
+                try:
+                    agent_sandbox.sweep_stray_containers()
+                except Exception:  # noqa: BLE001 - a sweep failure must not block the run
+                    _log.exception("stray sandbox container sweep failed; continuing")
+
         run_dir = self.reporter.new_run_dir()
 
         # Snapshot the home once before anything runs, purely to record which
         # leftovers predate the batch. Those are genuine prior-run artifacts
-        # and may always fingerprint.
-        pre_existing: frozenset[str] = frozenset(
-            rule.source for rule in self._inventory_home() if rule.source
-        )
+        # and may always fingerprint. Skipped entirely when sandboxed: the
+        # operator home is not what the agent sees.
+        pre_existing: frozenset[str] = frozenset()
+        if not sandboxed:
+            pre_existing = frozenset(rule.source for rule in self._inventory_home() if rule.source)
 
         # Re-inventory before *each* task's agent executes, so a deliverable
         # an earlier task left in the home is covered for every task after
@@ -719,36 +769,52 @@ class DefaultEvalHarness(Harness):
         # can name the entry (a colliding deliverable filename), which drops
         # its path rule, leaving the fingerprint as the only thing that still
         # catches a read of the earlier task's file.
+        #
+        # A sandboxed task inventories a different root, and only ``_run_one``
+        # knows it: the agent's home is that task's ``<workspace>/home`` plus
+        # whatever was bind-mounted into it, neither of which exists until the
+        # workspace is built. So the rules are collected *after* the call, from
+        # what ``_inventory_sandbox_home`` recorded, into the same positional
+        # list — the pairing contract is identical either way. The mid-batch
+        # attribution above is ambient-only: every sandboxed task starts from
+        # its own fresh home, so an earlier task's deliverable is never in
+        # view to begin with.
         created_by: dict[str, str] = {}
         prev_task_name: str | None = None
         task_inventories: list[tuple[SensitiveAccessRule, ...]] = []
         detailed_results: list[dict[str, Any]] = []
         for task in tasks:
-            if prev_task_name is not None:
-                # An empty ``fingerprint_only`` skips every file read, so this
-                # extra enumeration is a bare directory listing.
-                current = {
-                    rule.source
-                    for rule in self._inventory_home(fingerprint_only=frozenset())
-                    if rule.source
-                }
-                for name in current - pre_existing - created_by.keys():
-                    created_by[name] = prev_task_name
-            fingerprintable = pre_existing | frozenset(
-                name for name, creator in created_by.items() if creator != task.name
-            )
-            rules = self._inventory_home(fingerprint_only=fingerprintable)
-            appeared = {rule.source for rule in rules if rule.source} - pre_existing
-            if appeared:
-                _log.info(
-                    "cheat detection: %d home entr(ies) appeared during this batch and "
-                    "are covered for %s: %s",
-                    len(appeared),
-                    task.name,
-                    ", ".join(sorted(appeared)),
+            if sandboxed:
+                rules: tuple[SensitiveAccessRule, ...] = ()
+            else:
+                if prev_task_name is not None:
+                    # An empty ``fingerprint_only`` skips every file read, so this
+                    # extra enumeration is a bare directory listing.
+                    current = {
+                        rule.source
+                        for rule in self._inventory_home(fingerprint_only=frozenset())
+                        if rule.source
+                    }
+                    for name in current - pre_existing - created_by.keys():
+                        created_by[name] = prev_task_name
+                fingerprintable = pre_existing | frozenset(
+                    name for name, creator in created_by.items() if creator != task.name
                 )
+                rules = self._inventory_home(fingerprint_only=fingerprintable)
+                appeared = {rule.source for rule in rules if rule.source} - pre_existing
+                if appeared:
+                    _log.info(
+                        "cheat detection: %d home entr(ies) appeared during this batch and "
+                        "are covered for %s: %s",
+                        len(appeared),
+                        task.name,
+                        ", ".join(sorted(appeared)),
+                    )
+            record = self._run_one(task, run_dir)
+            if sandboxed:
+                rules = self._sandbox_inventory_rules.get(task.name, ())
             task_inventories.append(rules)
-            detailed_results.append(self._run_one(task, run_dir))
+            detailed_results.append(record)
             prev_task_name = task.name
 
         # Annotate sensitive-access flags before the first write so both the
@@ -865,6 +931,7 @@ class DefaultEvalHarness(Harness):
         scenario_thread: threading.Thread | None = None
         result: dict[str, Any] | None = None
         workspace_path: Path | None = None
+        creds_dir: Path | None = None
         verification_parse_errors: list[dict[str, str]] = []
         entries: list[VerificationEntry] = []
         # Track the substituted prompt / expectation / safety checklists as they
@@ -893,6 +960,26 @@ class DefaultEvalHarness(Harness):
             # the directory the agent actually writes to (its CLI wrapper's
             # working directory), not the harness process's launch cwd.
             workspace_path = Path(tempfile.mkdtemp(prefix="devops-bench-workspace-"))
+            if self._agent_config.sandbox is not None:
+                # First moment both the cluster endpoint and the workspace
+                # exist. The kubeconfig lands in its own temp dir, NOT the
+                # workspace: the workspace is mounted read-write, and the
+                # credential must only enter through its read-only bind. A
+                # failure here (an unreachable endpoint, no CA) raises into
+                # this try and becomes a failed record — never a silent
+                # unsandboxed run.
+                creds_dir = Path(tempfile.mkdtemp(prefix="devops-bench-creds-"))
+                completed_spec = self._prepare_sandbox_spec(
+                    workspace_path,
+                    creds_dir,
+                    replace(cluster_info, name=active_cluster_name),
+                    deployer.provider,
+                    task.agent_pod_security,
+                )
+                self._active_sandbox_spec = completed_spec
+                self._inventory_sandbox_home(
+                    task.name, workspace_path / "home", completed_spec.fixture_mounts
+                )
             context = self.make_context(task, cluster=cluster_info, workspace_path=workspace_path)
 
             target_dep, ns = self._resolve_deployment_and_namespace(task)
@@ -1039,8 +1126,118 @@ class DefaultEvalHarness(Harness):
                 self._teardown(deployer, infra_config, task.name)
             if workspace_path is not None:
                 shutil.rmtree(workspace_path, ignore_errors=True)
+            # The completed spec is task-scoped state; the generated
+            # kubeconfig it points at dies with the task either way.
+            self._active_sandbox_spec = None
+            if creds_dir is not None:
+                shutil.rmtree(creds_dir, ignore_errors=True)
 
         return result
+
+    def _prepare_sandbox_spec(
+        self,
+        workspace_path: Path,
+        creds_dir: Path,
+        cluster_info: ClusterInfo,
+        provider: Provider | None,
+        pod_security: str,
+    ) -> agent_sandbox.SandboxSpec:
+        """Complete the skeletal sandbox spec for one provisioned task.
+
+        Creates the sandbox home (``<workspace>/home`` — the container's
+        ``HOME``, kept under the workspace so everything the agent writes
+        stays inside the directory the harness already diffs), asks the
+        provider how a container reaches *this run's* cluster, provisions the
+        agent's scoped ServiceAccount credential and renders a single-cluster
+        kubeconfig from that plan, and discovers the task's seeded fixture
+        mounts keyed on the cluster name. Fixture completeness
+        is part of the boundary, not a convenience: an under-provisioned agent
+        hunts for its missing input (see the proposal doc's first observed
+        incident).
+
+        The plan carries a context pin, so a current-context switched after
+        provisioning (an operator mid-run, a parallel harness's ``up()``) can
+        never hand the container another cluster's credential.
+
+        Args:
+            workspace_path: This task's freshly-created workspace.
+            creds_dir: Directory (outside the workspace) for the generated
+                kubeconfig and the rendered agent RBAC manifest.
+            cluster_info: This run's cluster, with ``name`` already resolved
+                to the deployer's own; also the fixture-discovery token.
+            provider: The deployer's provider, or ``None`` when it has none.
+            pod_security: The task's declared ``agent_pod_security`` level.
+
+        Returns:
+            The completed :class:`~devops_bench.agents.sandbox.SandboxSpec`.
+
+        Raises:
+            SandboxError: When no plan can be built for this cluster, or no
+                scoped credential can be minted for it; the caller turns that
+                into a failed record rather than falling back to an
+                unsandboxed run.
+        """
+        (workspace_path / "home").mkdir(parents=True, exist_ok=True)
+        plan = agent_sandbox.build_network_plan(provider, cluster_info)
+        kubeconfig = agent_credentials.provision_agent_credentials(
+            plan,
+            creds_dir,
+            token_ttl_sec=agent_credentials.token_ttl_for(self._agent_config.timeout_sec),
+            pod_security=pod_security,
+        )
+        return replace(
+            self._agent_config.sandbox,
+            network=plan,
+            workspace=workspace_path,
+            kubeconfig=kubeconfig,
+            fixture_mounts=agent_sandbox.discover_fixture_mounts(cluster_info.name),
+        )
+
+    def _inventory_sandbox_home(
+        self,
+        task_name: str,
+        home: Path,
+        fixture_mounts: Mapping[str, str] | None = None,
+    ) -> None:
+        """Point the pre-run detection inventory at the sandbox home.
+
+        Same tripwire, different root: on a sandboxed task the agent's home is
+        ``<workspace>/home``, not the operator's, so the inventory that feeds
+        :func:`~devops_bench.cheat_detection.build_inventory_rules` snapshots that
+        directory instead. Freshly created it is empty — an empty ruleset is
+        the correct result, not a skipped scan: the sandbox home has no
+        prior-run leftovers *by construction*, and anything that does show up
+        here (a future harness step seeding the home) gets covered
+        automatically.
+
+        Fixture mounts are covered separately: they only materialize inside
+        the container, so the host-side scan above cannot see them. Each
+        mounted name gets a container-path rule
+        (:func:`~devops_bench.cheat_detection.build_mount_rules`); the per-record
+        prompt filter then authorizes the ones the task itself names, leaving
+        anything the discovery glob swept in that the prompt never asked for
+        — a prior run's leftover on a reused cluster name — flagged.
+        Best-effort, like the run-level inventory.
+        """
+        if not (self.cheat_detect and self.cheat_inventory):
+            return
+        try:
+            rules = build_inventory_rules(
+                home,
+                baseline=DEFAULT_BASELINE
+                | baseline_from_granted_paths(home, self._granted_skill_paths),
+            )
+            mounted_names = [
+                PurePosixPath(container_path).name
+                for container_path in (fixture_mounts or {}).values()
+            ]
+            if mounted_names:
+                rules += build_mount_rules(agent_sandbox.CONTAINER_HOME, mounted_names)
+            self._sandbox_inventory_rules[task_name] = rules
+        except Exception:  # noqa: BLE001 - detection must never block execution
+            _log.exception(
+                "sandbox-home inventory failed for %s; static cheat rules only", task_name
+            )
 
     def _build_success_record(
         self,

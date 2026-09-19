@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from devops_bench.core import ClusterInfo, get_env
+from devops_bench.core import ClusterInfo, NetworkPlan, get_env
 from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
 
 __all__ = ["KindProvider"]
@@ -62,6 +62,29 @@ class KindProvider(Provider):
                 "project": project,
                 "kubeconfig_path": variables.get("kubeconfig_path"),
             }
+        )
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Reach a KinD apiserver from inside a container over KinD's own network.
+
+        KinD writes ``https://127.0.0.1:<port>`` as the server, which from a
+        container means the container itself. KinD also creates a Docker
+        network named ``kind``, and a container joined to it reaches the
+        apiserver directly at ``https://<cluster>-control-plane:6443``. That
+        beats the generic loopback rewrite because the apiserver certificate
+        already covers the control-plane node name, so TLS verifies with no
+        ``tls-server-name`` override.
+
+        Args:
+            cluster_info: The provisioned cluster to reach.
+
+        Returns:
+            The KinD plan, pinned to this cluster's ``kind-<name>`` context.
+        """
+        return NetworkPlan(
+            docker_network="kind",
+            rewrite_server=f"https://{cluster_info.name}-control-plane:6443",
+            kubectl_context=f"kind-{cluster_info.name}",
         )
 
     def cleanup(
