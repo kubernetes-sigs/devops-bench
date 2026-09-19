@@ -23,6 +23,7 @@ import shutil
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -662,21 +663,28 @@ class DefaultEvalHarness(Harness):
 
     # -- agent execution --------------------------------------------------
 
-    def execute_agent(self, prompt: str, ctx: RunContext) -> AgentResult:
+    def execute_agent(self, prompt: str, ctx: RunContext, turns: Sequence[str] = ()) -> AgentResult:
         """Run the configured agent against ``prompt`` through the registry.
 
         Args:
-            prompt: The (placeholder-resolved) task prompt.
+            prompt: The (placeholder-resolved) task prompt — the first turn.
             ctx: The per-task run context. ``ctx.workspace_path`` is handed to
                 the agent so a CLI wrapper executes in the harness-owned
                 workspace instead of a throwaway directory the harness never
                 inspects.
+            turns: Placeholder-resolved follow-up turns. Empty for a
+                single-turn task, which takes :meth:`~AgentHarness.run`
+                unchanged — the multi-turn entry point is only used when a task
+                actually asks for more than one turn, so nothing about an
+                existing task's execution moves.
 
         Returns:
             The typed :class:`AgentResult` the agent emitted.
         """
         agent = self.resolve_agent(self.agent_type)
-        return agent.run(prompt, workspace_path=ctx.workspace_path)
+        if not turns:
+            return agent.run(prompt, workspace_path=ctx.workspace_path)
+        return agent.run_turns([prompt, *turns], workspace_path=ctx.workspace_path)
 
     # -- pipeline ---------------------------------------------------------
 
@@ -928,6 +936,10 @@ class DefaultEvalHarness(Harness):
             target_dep, ns = self._resolve_deployment_and_namespace(task)
 
             prompt = self.replace_placeholders(task.prompt, active_cluster_name, target_dep, ns)
+            turns = [
+                self.replace_placeholders(turn, active_cluster_name, target_dep, ns)
+                for turn in task.turns
+            ]
             # Resolved here, before the agent runs, so a failure mid-execution
             # still records the substituted checklists rather than raw
             # placeholders.
@@ -984,7 +996,7 @@ class DefaultEvalHarness(Harness):
 
             _log.info("executing agent for prompt: %s", prompt)
             before_files = snapshot_dir(workspace_path)
-            agent_res = self.execute_agent(prompt, context)
+            agent_res = self.execute_agent(prompt, context, turns)
             # NOTE/TODO: This collects ALL frontmatter from bootstrapping, not just generated files.
             # Consider a more targeted filter in a future iteration.
             # Best-effort: a collection failure (I/O, permissions, a bad link in the

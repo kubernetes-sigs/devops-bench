@@ -920,6 +920,54 @@ _AGENT_FIXTURE = textwrap.dedent(
 )
 
 
+#: A stub that reports, on every turn, how many user turns it was handed. The
+#: count is the evidence of session reuse: a fresh session per turn would hand
+#: the model one user turn every time.
+_HISTORY_FIXTURE = textwrap.dedent(
+    '''
+    """An ADK agent whose stub model reports how much history it was given."""
+
+    from google.adk.agents import LlmAgent
+    from google.adk.models import BaseLlm, LlmResponse
+    from google.genai import types
+
+
+    def record(user_turns: int) -> dict:
+        """Record how many user turns the model was handed."""
+        return {"user_turns": user_turns}
+
+
+    class HistoryLlm(BaseLlm):
+        model: str = "stub-model"
+
+        async def generate_content_async(self, llm_request, stream=False):
+            usage = types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=100, candidates_token_count=10, total_token_count=110
+            )
+            contents = llm_request.contents or []
+            tail = contents[-1].parts if contents else None
+            if any(part.function_response is not None for part in (tail or [])):
+                yield LlmResponse(
+                    content=types.Content(role="model", parts=[types.Part(text="Recorded.")]),
+                    usage_metadata=usage,
+                )
+                return
+            seen = sum(
+                1
+                for content in contents
+                if content.role == "user" and any(part.text for part in (content.parts or []))
+            )
+            part = types.Part.from_function_call(name="record", args={"user_turns": seen})
+            yield LlmResponse(
+                content=types.Content(role="model", parts=[part]), usage_metadata=usage
+            )
+
+
+    root_agent = LlmAgent(name="history_agent", model=HistoryLlm(), tools=[record])
+    '''
+)
+
+
 @pytest.fixture
 def agent_dir(tmp_path: pathlib.Path) -> pathlib.Path:
     """Write an ADK agent directory laid out the way ADK expects."""
@@ -1118,6 +1166,30 @@ def test_execute_drives_a_real_adk_agent_end_to_end(agent_dir: pathlib.Path) -> 
     assert result.latency > 0
     assert result.metadata["agent_name"] == "fixture_agent"
     assert result.metadata["event_count"] == 3
+
+
+@requires_adk
+def test_execute_turns_drives_every_turn_through_one_session(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Turn 2 must see turn 1, or it is not a conversation.
+
+    Session reuse is the whole mechanism: ADK keeps history per session id, and
+    a ``RemoteA2aAgent`` keys its A2A ``ContextId`` off the same session. Driving
+    a real agent is what makes this evidence rather than a mock echoing back the
+    session id it was handed.
+    """
+    directory = tmp_path / "history_agent"
+    directory.mkdir()
+    (directory / "agent.py").write_text(_HISTORY_FIXTURE, encoding="utf-8")
+    config = agents_config.AgentConfig(target=str(directory), model=None)
+
+    result = adk_mod.AdkAgent(config).run_turns(["scale web to 3", "and again"])
+
+    assert result.errors == []
+    # Both turns ran, and the second one was handed the first: one session, one
+    # accumulating conversation. Per-turn sessions would report ``[1, 1]``.
+    assert [entry["args"]["user_turns"] for entry in result.trajectory] == [1, 2]
 
 
 @requires_adk

@@ -209,3 +209,75 @@ def test_uppercase_explicit_registration_raises() -> None:
         AGENTS.register("Dummy-Uppercase")(_Dummy)
     assert "lowercase" in str(exc_info.value)
     assert "Dummy-Uppercase" not in AGENTS._items  # noqa: SLF001 - test-only assertion
+
+
+# --------------------------------------------------------------------------
+# Multi-turn conversations
+# --------------------------------------------------------------------------
+
+
+def test_run_turns_on_a_single_turn_is_exactly_run() -> None:
+    """One turn takes the plain ``_execute`` path, so no harness needs updating."""
+
+    class _Stub(AgentHarness):
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
+            return AgentResult(output=f"echo:{prompt}", trajectory=[])
+
+    result = _Stub().run_turns(["hi"])
+    assert result.output == "echo:hi"
+    assert result.latency > 0.0
+
+
+def test_run_turns_errors_when_the_harness_cannot_hold_a_session() -> None:
+    """A single-turn harness fails loudly rather than answering turn 1 only.
+
+    Looping ``_execute`` would restart the conversation each turn, so the agent
+    would answer turn n having forgotten 1..n-1 — a transcript that looks fine
+    and means nothing.
+    """
+
+    class _Stub(AgentHarness):
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
+            return AgentResult(output=f"echo:{prompt}", trajectory=[])
+
+    result = _Stub().run_turns(["one", "two"])
+    assert result.has_errors()
+    assert "single-turn" in result.errors[0]
+    assert "2 turns" in result.errors[0]
+
+
+def test_run_turns_errors_on_no_turns() -> None:
+    class _Stub(AgentHarness):
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
+            return AgentResult(output="unused", trajectory=[])
+
+    assert _Stub().run_turns([]).has_errors()
+
+
+def test_run_turns_uses_the_override_when_a_harness_holds_a_session() -> None:
+    """A session-holding harness sees every turn in one call."""
+
+    class _Session(AgentHarness):
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
+            raise AssertionError("must not fall back to the single-turn path")
+
+        def _execute_turns(self, prompts, workspace_path=None) -> AgentResult:
+            return AgentResult(output="|".join(prompts), trajectory=[])
+
+    result = _Session().run_turns(["one", "two", "three"])
+    assert result.output == "one|two|three"
+    assert result.latency > 0.0
+
+
+def test_run_turns_keeps_the_safety_net() -> None:
+    class _Boom(AgentHarness):
+        def _execute(self, prompt: str, workspace_path=None) -> AgentResult:
+            raise AssertionError("unused")
+
+        def _execute_turns(self, prompts, workspace_path=None) -> AgentResult:
+            raise RuntimeError("kaboom")
+
+    result = _Boom().run_turns(["one", "two"])
+    assert result.has_errors()
+    assert "RuntimeError" in result.errors[0]
+    assert "kaboom" in result.errors[0]

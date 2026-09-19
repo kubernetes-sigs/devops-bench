@@ -16,6 +16,31 @@ agent.run(prompt) -> AgentResult     # base: latency + safety net
    └─ agent._execute(prompt)         # subclass: build invocation, parse, return
 ```
 
+### Multi-turn conversations
+
+A task that sets `turns:` is one conversation, not a series of runs. The harness
+sends the first turn (`prompt`) and each follow-up through `run_turns()`, and the
+whole exchange folds into a single `AgentResult` — one trajectory, one token
+total, one latency.
+
+```text
+agent.run_turns([prompt, *turns]) -> AgentResult
+   └─ agent._execute_turns(prompts)   # subclass: drive every turn in one session
+```
+
+Holding a session across turns is the point. It is what lets the agent answer
+turn *n* knowing turns 1..n-1, and for a remote agent it is also what keeps the
+far side on one conversation: the `adk` harness drives every turn through one
+ADK session, and a `RemoteA2aAgent` keys its A2A `ContextId` off that session, so
+the remote sees one continuing context rather than N unrelated ones.
+
+The base `_execute_turns()` is deliberately **not** a loop over `_execute()`. A
+harness with no session would restart the conversation on every turn and answer
+each one from a blank slate — a transcript that looks like a conversation and is
+not. A harness that has not overridden `_execute_turns()` errors instead when a
+task asks for more than one turn. Today only `adk` overrides it; single-turn
+tasks (every task in the repo) go through `run()` unchanged on every harness.
+
 ## Supported harnesses
 
 Five harnesses ship today. Each self-registers under a canonical key.

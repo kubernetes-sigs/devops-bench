@@ -34,7 +34,7 @@ import pytest
 
 from devops_bench.agents import AGENTS, AgentHarness
 from devops_bench.agents.result import AgentResult, ToolCall
-from devops_bench.core import ConfigError, MissingDependencyError
+from devops_bench.core import ConfigError, MissingDependencyError, RunContext
 from devops_bench.core.score_keys import INTEGRITY_CATASTROPHIC_KEY, OUTCOME_SCORE_KEY
 from devops_bench.evalharness import default as harness_default
 from devops_bench.evalharness.default import DefaultEvalHarness
@@ -461,7 +461,7 @@ def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
     """
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
 
-    def _boom(prompt: str, ctx: Any) -> Any:
+    def _boom(prompt: str, ctx: Any, turns: Any = ()) -> Any:
         raise RuntimeError("agent crashed")
 
     # ``execute_agent`` is patched directly, not the agent itself: AgentHarness.run()
@@ -505,7 +505,7 @@ def test_run_one_reports_evaluated_on_the_exception_path_with_no_entries_declare
     """
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
 
-    def _boom(prompt: str, ctx: Any) -> Any:
+    def _boom(prompt: str, ctx: Any, turns: Any = ()) -> Any:
         raise RuntimeError("agent crashed")
 
     monkeypatch.setattr(harness, "execute_agent", _boom)
@@ -1240,3 +1240,90 @@ def test_same_task_repeat_is_not_fingerprinted(
 
     assert results[0]["cheating_report"]["status"] == "clean"
     assert results[1]["cheating_report"]["status"] == "clean"
+
+
+class _RecordingAgent(AgentHarness):
+    """Agent that records which entry point the harness reached for."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.entry = ""
+        self.seen: list[str] = []
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        self.entry = "run"
+        self.seen = [prompt]
+        return AgentResult(output="ok", trajectory=[])
+
+    def _execute_turns(self, prompts: Any, workspace_path: Path | None = None) -> AgentResult:
+        self.entry = "run_turns"
+        self.seen = list(prompts)
+        return AgentResult(output="ok", trajectory=[])
+
+
+def test_execute_agent_keeps_a_single_turn_task_on_the_single_turn_path(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every task in the repo has no ``turns``; none of them may move.
+
+    The multi-turn entry point is strictly opt-in, so a task that does not ask
+    for it goes through ``run()`` exactly as before.
+    """
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    agent = _RecordingAgent()
+    monkeypatch.setattr(harness, "resolve_agent", lambda _type: agent)
+
+    harness.execute_agent("first", RunContext(task_id="t"))
+
+    assert agent.entry == "run"
+    assert agent.seen == ["first"]
+
+
+def test_execute_agent_sends_the_prompt_as_the_first_turn(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``turns`` are follow-ups: the prompt leads, in order, in one conversation."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    agent = _RecordingAgent()
+    monkeypatch.setattr(harness, "resolve_agent", lambda _type: agent)
+
+    harness.execute_agent("first", RunContext(task_id="t"), ["second", "third"])
+
+    assert agent.entry == "run_turns"
+    assert agent.seen == ["first", "second", "third"]
+
+
+def test_pipeline_substitutes_placeholders_in_every_turn(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolved ``{{...}}`` in a follow-up turn would be sent verbatim.
+
+    Turns are agent-facing text like the prompt, so they take the same
+    substitution — a turn naming the wrong deployment addresses a workload the
+    verifier never looks at.
+    """
+    harness = DefaultEvalHarness(
+        project_id="p",
+        cluster_name="c",
+        default_target_deployment="my-app",
+        default_namespace="custom-ns",
+    )
+    agent = _RecordingAgent()
+    monkeypatch.setattr(harness, "resolve_agent", lambda _type: agent)
+    task = Task.from_dict(
+        {
+            "task_id": "t",
+            "name": "demo",
+            "prompt": "scale {{TARGET_DEPLOYMENT_NAME}}",
+            "turns": ["now check ns {{NAMESPACE}}"],
+            "infrastructure": {"deployer": "noop"},
+        },
+        name_default="demo",
+    )
+
+    turns = [harness.replace_placeholders(turn, "cl") for turn in task.turns]
+    harness.execute_agent(
+        harness.replace_placeholders(task.prompt, "cl"), RunContext(task_id="t"), turns
+    )
+
+    assert agent.seen == ["scale my-app", "now check ns custom-ns"]
