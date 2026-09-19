@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import time
 from typing import TYPE_CHECKING
@@ -77,12 +78,81 @@ def _read_db_tokens(db_path: pathlib.Path) -> dict | None:
     return None
 
 
-def _resolve_model_name(model: str) -> str:
-    """Resolve a provider-qualified model id to the bare name ``agy`` expects.
+# agy names the reasoning tier separately from the model: every selection in its
+# catalogue is a base model plus one of these, and there is no untiered form --
+# a bare slug is refused with "requires --effort".
+_AGY_EFFORT_TIERS: tuple[str, ...] = ("low", "medium", "high")
 
-    e.g. ``"google/gemini-3.5-flash"`` -> ``"gemini-3.5-flash"``.
+# Vertex publishes preview model ids with this suffix. agy's catalogue does not
+# carry it and rejects the suffixed id outright, with or without --effort.
+_VERTEX_PREVIEW_SUFFIX: str = "-preview"
+
+# A display-name selection ("Gemini 3.1 Pro (Low)") already names its tier, and
+# agy errors if --effort is passed alongside one. Recognize it so it survives
+# untouched: it is the spelling ``agy --help`` steers operators towards.
+_DISPLAY_TIER_RE: re.Pattern[str] = re.compile(r"\((?:low|medium|high)\)\s*$", re.IGNORECASE)
+
+# The tier is a scoring variable, not a formatting detail -- `low` and `high`
+# are materially different agents. `high` is the least surprising default
+# because the other harnesses run their model with no reasoning throttle, so
+# anything lower would hand the agy arm a handicap that reads as a capability
+# gap in the results rather than as the configuration choice it is.
+_DEFAULT_AGY_EFFORT: str = "high"
+_EFFORT_ENV: str = "AGENT_MODEL_EFFORT"
+
+
+def _default_effort() -> str:
+    """Resolve the reasoning tier to request when the model id names none.
+
+    Returns:
+        The tier from ``AGENT_MODEL_EFFORT``, or ``high``.
+
+    Raises:
+        core.ConfigError: If ``AGENT_MODEL_EFFORT`` names an unknown tier.
+            Rejected here rather than passed through, so a typo fails on the
+            misconfiguration itself instead of surfacing seconds later as agy's
+            own startup error in the middle of a scored arm.
     """
-    return model.split("/")[-1]
+    effort = os.environ.get(_EFFORT_ENV, "").strip()
+    if not effort:
+        return _DEFAULT_AGY_EFFORT
+    if effort.lower() not in _AGY_EFFORT_TIERS:
+        raise core.ConfigError(
+            f"{_EFFORT_ENV}={effort!r} is not a reasoning tier agy accepts "
+            f"(known: {', '.join(_AGY_EFFORT_TIERS)})"
+        )
+    return effort.lower()
+
+
+def _resolve_model_name(model: str) -> tuple[str, str | None]:
+    """Resolve a matrix model id to the ``(model, effort)`` pair ``agy`` expects.
+
+    ``AGENT_MODEL`` is one value shared by every arm and by the judge, and it is
+    spelled for Vertex -- ``google/gemini-3.1-pro-preview``. agy accepts neither
+    the provider prefix nor the ``-preview`` suffix, and refuses any selection
+    that does not name a reasoning tier exactly once. Normalizing here confines
+    the quirk to the one harness that has it; respelling ``AGENT_MODEL`` instead
+    would desynchronize the agy arm's label from every other arm in the matrix.
+
+    e.g. ``"google/gemini-3.1-pro-preview"`` -> ``("gemini-3.1-pro", "high")``.
+
+    Args:
+        model: The configured model id, optionally provider-qualified.
+
+    Returns:
+        The id to pass as ``--model``, and the tier to pass as ``--effort`` --
+        or ``None`` for the tier when the id already names its own, in which
+        case ``--effort`` must be omitted or agy rejects the pair.
+    """
+    name = model.split("/")[-1].strip()
+    if _DISPLAY_TIER_RE.search(name):
+        return name, None
+    if name.endswith(_VERTEX_PREVIEW_SUFFIX):
+        name = name[: -len(_VERTEX_PREVIEW_SUFFIX)]
+    for tier in _AGY_EFFORT_TIERS:
+        if name.lower().endswith(f"-{tier}"):
+            return name[: -len(tier) - 1], tier
+    return name, _default_effort()
 
 
 def _build_settings(
@@ -93,7 +163,16 @@ def _build_settings(
     *,
     skills_enabled: bool = False,
 ) -> dict:
-    """Assemble the Antigravity ``settings.json`` payload for a run."""
+    """Assemble the Antigravity ``settings.json`` payload for a run.
+
+    ``model`` must already be the resolved spelling from
+    ``_resolve_model_name``, identical to the one passed as ``--model``. agy
+    does not validate ``defaultModel`` -- an unknown value there is ignored in
+    silence and the run falls back to a default model -- so the flag's loud
+    validation is the only guard, and it only guards a value settings agrees
+    with. The tier is deliberately not written here: it rides on ``--effort``,
+    and agy exposes no verified settings key for it.
+    """
     settings: dict = {}
     servers = cli_capabilities.build_mcp_servers(mcp_servers)
     if servers:
@@ -101,7 +180,7 @@ def _build_settings(
     if skills_enabled:
         settings["experimental"] = {"skills": True}
     if model:
-        settings["modelConfigs"] = {"defaultModel": _resolve_model_name(model)}
+        settings["modelConfigs"] = {"defaultModel": model}
 
     # Add GCP block if project/location are provided (needed for GCA/GKE tools)
     if project or location:
@@ -132,8 +211,11 @@ def _build_env(config: agents_config.AgentConfig) -> dict[str, str]:
     if config.api_key:
         overlay["GEMINI_API_KEY"] = config.api_key
         overlay["GOOGLE_API_KEY"] = config.api_key
-    if config.model:
-        overlay["GEMINI_MODEL"] = _resolve_model_name(config.model)
+
+    # No GEMINI_MODEL here. It is a Gemini CLI variable; agy ignores it
+    # entirely -- verified against 1.2.0, where a garbage value raises no error
+    # and a valid one does not change the model the run reports. The model
+    # travels on --model, which is also the only spelling agy validates.
 
     if config.extra_env:
         overlay.update(config.extra_env)
@@ -206,6 +288,21 @@ class AgyCliAgent(base.AgentHarness):
         caps = self.config.capabilities
         binary = self._resolve_binary()
 
+        # Resolved once so the --model flag and settings.json cannot disagree,
+        # and before any workspace is built so a bad AGENT_MODEL_EFFORT fails
+        # here rather than after the run has started costing something.
+        model_name: str | None = None
+        effort: str | None = None
+        if self.config.model:
+            model_name, effort = _resolve_model_name(self.config.model)
+            if model_name != self.config.model:
+                _log.warning(
+                    "agy does not accept the configured model id %r; running --model %s%s",
+                    self.config.model,
+                    model_name,
+                    f" --effort {effort}" if effort else "",
+                )
+
         env_overlay = _build_env(self.config)
 
         with cli_capabilities.agent_workdir(workspace_path, prefix="agy-run-") as workdir:
@@ -246,8 +343,12 @@ class AgyCliAgent(base.AgentHarness):
             ]
             if project:
                 argv.append(f"--project={project}")
-            if self.config.model:
-                argv.append(f"--model={_resolve_model_name(self.config.model)}")
+            if model_name:
+                argv.append(f"--model={model_name}")
+                # Omitted when the id already names its tier: agy rejects the
+                # two spellings together.
+                if effort:
+                    argv.append(f"--effort={effort}")
             if self.config.extra_flags:
                 argv.extend(self.config.extra_flags)
             argv.append(f"--prompt={prompt}")
@@ -267,7 +368,7 @@ class AgyCliAgent(base.AgentHarness):
 
             settings = _build_settings(
                 caps.mcp_servers,
-                self.config.model,
+                model_name,
                 project,
                 location,
                 skills_enabled=bool(skill_names),
