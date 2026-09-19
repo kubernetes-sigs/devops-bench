@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import textwrap
 import threading
@@ -57,8 +58,39 @@ _log = get_logger("chaos.generate_load")
 # active. The harness watches the shared event to coordinate measurements.
 _LOAD_MARKER = "fortio load"
 
-# Wall-clock ceiling for a single chaos command.
+# Wall-clock ceiling for a single chaos command that is not a load spike.
 _COMMAND_TIMEOUT = 40
+
+# A load spike has to outlive its own ``-t`` duration, so its ceiling is derived
+# from the command rather than fixed. The flat 40s ceiling silently killed every
+# spike a task declared for longer than that: optimize-scale asks for 300s
+# deliberately (so the spike is still running when verification starts), fortio
+# was SIGKILLed at 40s, the fault recorded exit -1, and the run was scored
+# ``chaos_invalidated`` with the reason "load did not reach the workload" — which
+# reads as unreachable rather than cut short.
+_LOAD_TIMEOUT_SLACK_SEC = 60
+_LOAD_TIMEOUT_CEILING_SEC = 900
+
+# Per-stream bound on what a tool result hands back to the model.
+#
+# fortio prints one line per failed request, and a saturating spike is the
+# point of this fault, so the volume scales with the spike's duration — which
+# the timeout fix above has just made much longer. Uncapped, a single 300s
+# spike returned one tool result that overflowed the model's context outright:
+#
+#     ClientError: 400 INVALID_ARGUMENT ... 'The input token count exceeds the
+#     maximum number of tokens allowed 1048576.'
+#
+# The load itself had run fine; the model call *after* it died, so the harness
+# recorded the disruption as never injected and withheld the score. Raising the
+# timeout without this clamp trades one dead-spike mode for another.
+#
+# The tail is the part worth keeping: fortio's summary histogram — the response
+# codes and percentiles the model is asked to analyse — is printed at the end,
+# while the head is banner and configuration echo. Keep a little of both, drop
+# the middle, and say so where it was cut.
+_OUTPUT_HEAD_CHARS = 4_000
+_OUTPUT_TAIL_CHARS = 12_000
 
 # The workload's in-cluster (remote) port for chaos load generation, and the
 # default local side of the port-forward. Parallel runs override only the local
@@ -83,6 +115,65 @@ _ENV_LOCAL_PORT = "CHAOS_LOCAL_PORT"
 # limits) just before the spike, triggering a rolling update; without this wait
 # the port-forward can race a not-yet-Ready pod and exit early (code 1).
 _TARGET_READY_TIMEOUT_SEC = 120
+
+
+def _go_duration_seconds(value: str) -> float | None:
+    """Parse a Go-style duration (``300s``, ``5m``, ``1h30m``) into seconds.
+
+    fortio takes its ``-t`` in Go's format. Returns ``None`` for anything not
+    understood, so the caller falls back to the fixed ceiling rather than
+    inventing a budget from a value it misread.
+    """
+    parts = re.findall(r"([0-9]*\.?[0-9]+)\s*(ms|h|m|s)", value.strip())
+    if not parts:
+        return None
+    unit = {"h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+    total = 0.0
+    for amount, suffix in parts:
+        total += float(amount) * unit[suffix]
+    return total or None
+
+
+def _command_timeout(argv: list[str], *, is_load: bool) -> float:
+    """Wall-clock ceiling for this command.
+
+    A load spike gets its declared duration plus slack (bounded), so the
+    generator is never killed mid-spike. Everything else keeps the flat
+    ceiling.
+    """
+    if not is_load:
+        return _COMMAND_TIMEOUT
+    for index, token in enumerate(argv):
+        if token == "-t" and index + 1 < len(argv):
+            declared = _go_duration_seconds(argv[index + 1])
+            if declared is None:
+                break
+            return min(declared + _LOAD_TIMEOUT_SLACK_SEC, _LOAD_TIMEOUT_CEILING_SEC)
+    return _COMMAND_TIMEOUT
+
+
+def _clamp_tool_output(stream: str) -> str:
+    """Bound one captured stream to a head and a tail, noting what was cut.
+
+    Args:
+        stream: Raw captured ``stdout`` or ``stderr``.
+
+    Returns:
+        ``stream`` unchanged when it already fits, otherwise its first
+        :data:`_OUTPUT_HEAD_CHARS` and last :data:`_OUTPUT_TAIL_CHARS`
+        characters joined by an explicit elision marker. The marker matters:
+        without it the model reads a spliced head and tail as one continuous
+        log and can draw conclusions about request counts from it.
+    """
+    if len(stream) <= _OUTPUT_HEAD_CHARS + _OUTPUT_TAIL_CHARS:
+        return stream
+    dropped = len(stream) - _OUTPUT_HEAD_CHARS - _OUTPUT_TAIL_CHARS
+    return (
+        f"{stream[:_OUTPUT_HEAD_CHARS]}\n"
+        f"... [{dropped} characters elided by the harness; "
+        f"the tail below is fortio's summary] ...\n"
+        f"{stream[-_OUTPUT_TAIL_CHARS:]}"
+    )
 
 
 def build_system_instruction(target_url: str = _DEFAULT_TARGET_URL) -> str:
@@ -199,14 +290,19 @@ def run_chaos_command(
             _log.info("load spike detected; signaling harness via chaos event")
             chaos_active_event.set()
 
-        completed = run(argv, check=False, timeout=_COMMAND_TIMEOUT)
+        completed = run(argv, check=False, timeout=_command_timeout(argv, is_load=is_load))
         if is_load and load_result is not None:
             # Record the spike's real exit status so the fault can fail closed:
             # a non-zero fortio exit means it could not reach the workload.
             load_result["attempted"] = True
             load_result["returncode"] = completed.returncode
             load_result["ok"] = completed.returncode == 0
-        return f"Stdout:\n{completed.stdout}\nStderr:\n{completed.stderr}"
+        # Clamp per stream, not on the joined string: a flood on stderr must not
+        # be able to push stdout's summary out of the result.
+        return (
+            f"Stdout:\n{_clamp_tool_output(completed.stdout or '')}\n"
+            f"Stderr:\n{_clamp_tool_output(completed.stderr or '')}"
+        )
     except Exception as exc:  # noqa: BLE001 - surface any failure back to the LLM
         if is_load and load_result is not None:
             load_result["attempted"] = True
