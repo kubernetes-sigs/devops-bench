@@ -403,6 +403,18 @@ def test_tags_reject_placeholders():
         Task.from_dict({"name": "n", "tags": ["{{CLUSTER_NAME}}"]})
 
 
+def test_entry_group_is_stripped_before_the_declaration_lookup():
+    # VerificationEntry strips group on parse; the task-level lookup must agree.
+    task = Task.from_dict(
+        {
+            "name": "n",
+            "check_groups": {"g": {"title": "G"}},
+            "verification_spec": [_entry(group="  g ")],
+        }
+    )
+    assert task.verification_spec[0]["group"] == "  g "
+
+
 def test_entry_group_must_be_a_string():
     # A list or mapping is unhashable; the rule must name the problem rather
     # than let the membership test raise a TypeError.

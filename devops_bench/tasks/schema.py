@@ -24,9 +24,8 @@ __all__ = ["Task", "DocumentationEntry", "Constraint", "CheckGroup", "CATEGORIES
 # is not a bool), and ignore unknown keys in source specs.
 _STRICT = ConfigDict(strict=True, extra="ignore")
 
-# Display text must be run-invariant: it is snapshotted onto every result
-# record and rendered across runs, so a per-run value such as
-# ``{{CLUSTER_NAME}}`` has no stable meaning in it.
+# Display text must be run-invariant: it is rendered across runs, so a
+# per-run value such as ``{{CLUSTER_NAME}}`` has no stable meaning in it.
 _PLACEHOLDER_MARKER = "{{"
 
 # Display fields a verification entry may carry. Their types live on
@@ -250,8 +249,7 @@ class Task(BaseModel):
         cross-cutting rules live here and run over the raw entry mappings:
 
         * No display field carries a ``{{placeholder}}``: display text is
-          snapshotted onto every record and rendered across runs, so a per-run
-          value has no stable meaning in it.
+          rendered across runs, so a per-run value has no stable meaning in it.
         * ``category`` is one of :data:`CATEGORIES`.
         * Every ``group`` an entry names is declared under ``check_groups``.
         * A validated task carries ``title``, ``summary``, ``category``, and a
@@ -287,6 +285,8 @@ class Task(BaseModel):
             # a TypeError from the membership test.
             if not isinstance(group, str):
                 raise ValueError(f"verification entry {label!r}: group must be a string")
+            # Stripped here as VerificationEntry strips it, so the two agree.
+            group = group.strip()
             if group not in self.check_groups:
                 raise ValueError(
                     f"verification entry {label!r} names group {group!r}, "
