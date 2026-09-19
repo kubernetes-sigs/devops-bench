@@ -34,7 +34,18 @@ TOFU_VERSION="1.8.8"
 NODE_MAJOR="22"
 # Pin openclaw so VM rebuilds are reproducible; bump deliberately when adopting a
 # new release rather than tracking @latest.
-OPENCLAW_VERSION="2026.6.10"
+#
+# 2026.8.1 or newer is a floor, not a preference: an incoming harness change
+# (PR #149, already proven on the integration staging fork) writes a `memory`
+# section into every per-run openclaw.json to keep runs from recalling each
+# other's transcripts, and that section only exists from openclaw 2026.8.1
+# (where the memory subsystem ships) on. oc rejects a config carrying a section it does not recognize
+# instead of ignoring the key: on the old 2026.6.10 pin the run fails with
+# `OpenClaw config is invalid ... memory: Invalid input` and the agent exits 1
+# having done nothing, which scores as a null row rather than an error. The bump
+# is forward-compatible (newer oc accepts today's configs), so it can land ahead
+# of that config write; it must land no later.
+OPENCLAW_VERSION="2026.8.2"
 # Pin gke-mcp too. The upstream install.sh always resolves @latest, so we fetch
 # the tagged release tarball directly instead of running it.
 GKE_MCP_VERSION="0.14.0"
