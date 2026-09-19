@@ -31,6 +31,10 @@ Calls and responses are correlated by the ``id`` ADK stamps on both sides, so a
 call and its result fold into one :class:`~devops_bench.agents.result.ToolCall`
 rather than two trajectory entries.
 
+Telemetry rides outside ``content``: ``timestamp`` (epoch seconds, every event),
+``usage_metadata`` (one block per LLM call), and ``model_version`` (only on the
+events the model authored).
+
 An event from a remote A2A agent also carries the raw task envelope under
 ``custom_metadata['a2a:response']``. That matters because the agent's actual
 answer lives in the task's ``status.message``, while the ``content.parts`` ADK
@@ -46,6 +50,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from devops_bench.agents.result import ToolCall, empty_tokens
+from devops_bench.agents.shared.telemetry import ParsedRun, int_or_none, note_model
+from devops_bench.agents.shared.timing import merged_span_sec, parse_event_time
 
 __all__: list[str] = ["parse_event_stream"]
 
@@ -75,11 +81,6 @@ _A2A_FAILURE_STATES: frozenset[str] = frozenset({"failed", "canceled", "rejected
 # answer in the output the judge grades. A failure state's message is a failure
 # notice, which is not an answer either; it goes to ``errors`` instead.
 _A2A_ANSWER_STATE: str = "completed"
-
-
-def _int_or_none(value: object) -> int | None:
-    """Coerce to ``int``, rejecting ``bool`` (a JSON ``true`` is not a count)."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _parts(event: Mapping[str, Any]) -> list[Any]:
@@ -189,7 +190,7 @@ def _accumulate_usage(usage: Any, sums: dict[str, int], seen: set[str]) -> None:
     if not isinstance(usage, Mapping):
         return
     for field, slot in _USAGE_FIELDS.items():
-        count = _int_or_none(usage.get(field))
+        count = int_or_none(usage.get(field))
         if count is None:
             continue
         sums[slot] = sums.get(slot, 0) + count
@@ -223,9 +224,7 @@ def _canonical_tokens(sums: Mapping[str, int], seen: set[str]) -> dict[str, int 
     return tokens
 
 
-def parse_event_stream(
-    events: Sequence[Any],
-) -> tuple[str, list[dict], dict[str, int | None], list[str]]:
+def parse_event_stream(events: Sequence[Any]) -> ParsedRun:
     """Fold a serialized ADK event stream into the canonical result shape.
 
     The parser is lenient by design — an unrecognized part shape is skipped
@@ -245,19 +244,21 @@ def parse_event_stream(
         events: Serialized ``Event`` mappings in the order ADK yielded them.
 
     Returns:
-        A ``(output, trajectory, tokens, errors)`` tuple. ``trajectory`` is a
-        list of ``ToolCall.to_dict()`` mappings in call order; a call whose
-        result never arrived stays ``status="called"`` with ``result=None``.
+        A :class:`~devops_bench.agents.shared.telemetry.ParsedRun`. A call whose
+        result never arrived stays ``status="called"``. ``served_models`` reads
+        ``model_version``; ``model_turns`` counts ``usage_metadata`` events.
     """
     output_parts: list[str] = []
     errors: list[str] = []
     trajectory: list[ToolCall] = []
-    # Calls still awaiting a result: keyed by ADK's correlation id, with a FIFO
-    # queue for the id-less calls some models emit.
-    pending_by_id: dict[str, ToolCall] = {}
-    pending_unkeyed: deque[ToolCall] = deque()
+    # FIFO per id (plus one for id-less calls): reused ids match in emission order.
+    pending_by_id: dict[str, list[tuple[ToolCall, float | None]]] = {}
+    pending_unkeyed: deque[tuple[ToolCall, float | None]] = deque()
     sums: dict[str, int] = {}
     seen: set[str] = set()
+    served_models: list[str] = []
+    turns = 0
+    spans: list[tuple[float, float]] = []
 
     for index, event in enumerate(events):
         if not isinstance(event, Mapping):
@@ -271,10 +272,15 @@ def parse_event_stream(
                 f"event {index} reported {code or 'an error'}: {message or '<no detail>'}"
             )
 
-        _accumulate_usage(event.get("usage_metadata"), sums, seen)
+        usage = event.get("usage_metadata")
+        if isinstance(usage, Mapping):
+            turns += 1
+        _accumulate_usage(usage, sums, seen)
+        note_model(served_models, event.get("model_version"))
 
         partial = bool(event.get("partial"))
         user_content = _is_user_content(event)
+        event_time = parse_event_time(event.get("timestamp"))
 
         # A remote agent's answer is the A2A task's status message. Take it in
         # place of the event's own text, which mirrors the trailing artifact.
@@ -310,20 +316,22 @@ def parse_event_stream(
             if isinstance(call, Mapping):
                 args = call.get("args")
                 entry = ToolCall(
-                    name=str(call.get("name", "")),
+                    name=str(call.get("name") or ""),
                     args=dict(args) if isinstance(args, Mapping) else {},
                 )
                 trajectory.append(entry)
                 call_id = call.get("id")
                 if call_id is None:
-                    pending_unkeyed.append(entry)
+                    pending_unkeyed.append((entry, event_time))
                 else:
-                    pending_by_id[str(call_id)] = entry
+                    pending_by_id.setdefault(str(call_id), []).append((entry, event_time))
                 continue
 
             response = part.get("function_response")
             if isinstance(response, Mapping):
-                _fold_response(response, pending_by_id, pending_unkeyed, errors, index)
+                started = _fold_response(response, pending_by_id, pending_unkeyed, errors, index)
+                if started is not None and event_time is not None:
+                    spans.append((started, event_time))
                 continue
 
             # ``thought`` marks a reasoning part: it is not the answer.
@@ -339,38 +347,46 @@ def parse_event_stream(
             ):
                 output_parts.append(text)
 
-    output = "".join(output_parts)
-    tokens = _canonical_tokens(sums, seen)
-    return output, [entry.to_dict() for entry in trajectory], tokens, errors
+    return ParsedRun(
+        output="".join(output_parts),
+        trajectory=[entry.to_dict() for entry in trajectory],
+        tokens=_canonical_tokens(sums, seen),
+        errors=errors,
+        tool_wait_sec=merged_span_sec(spans),
+        served_models=served_models,
+        # 0 turns means no usage was reported; a stream exists only if a model ran.
+        model_turns=turns or None,
+    )
 
 
 def _fold_response(
     response: Mapping[str, Any],
-    pending_by_id: dict[str, ToolCall],
-    pending_unkeyed: deque[ToolCall],
+    pending_by_id: dict[str, list[tuple[ToolCall, float | None]]],
+    pending_unkeyed: deque[tuple[ToolCall, float | None]],
     errors: list[str],
     index: int,
-) -> None:
-    """Attach one ``function_response`` to the call it answers.
+) -> float | None:
+    """Attach one ``function_response`` to the call it answers; return its start time.
 
-    Matching is by ADK's correlation ``id``; a response with no id is paired
-    with the oldest id-less call still awaiting a result, which is exact for a
-    stream that answers calls in the order they were made. A response matching
-    nothing is reported on ``errors`` rather than dropped.
+    Matching is by ADK's correlation ``id``, falling back to the oldest id-less
+    call. A response matching nothing is reported on ``errors``, not dropped.
     """
     call_id = response.get("id")
-    entry: ToolCall | None = None
+    matched: tuple[ToolCall, float | None] | None = None
     if call_id is not None:
-        entry = pending_by_id.pop(str(call_id), None)
+        queue = pending_by_id.get(str(call_id))
+        matched = queue.pop(0) if queue else None
     elif pending_unkeyed:
-        entry = pending_unkeyed.popleft()
+        matched = pending_unkeyed.popleft()
 
-    if entry is None:
+    if matched is None:
         name = response.get("name") or "<unnamed>"
         errors.append(
             f"event {index}: tool response for {name!r} (id={call_id!r}) matched no pending call"
         )
-        return
+        return None
 
+    entry, started = matched
     entry.result, is_error = _response_text(response.get("response"))
     entry.status = "error" if is_error else "completed"
+    return started

@@ -1,0 +1,53 @@
+# Scales on queue depth, not CPU. A saturated GPU does not show up as CPU
+# pressure, so CPU-based HPA is effectively blind for LLM serving.
+# vllm:num_requests_waiting is the number of requests queued but not yet
+# scheduled onto the GPU — it rises the moment the fleet is over capacity and
+# drains to zero when it is not, which is exactly the signal we want.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gemma3-12b-ft
+  namespace: ml-serving
+  labels:
+    app.kubernetes.io/name: gemma3-12b-ft
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gemma3-12b-ft
+  minReplicas: 1
+  maxReplicas: 8
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: prometheus.googleapis.com|vllm:num_requests_waiting|gauge
+          selector:
+            matchLabels:
+              resource.labels.namespace_name: ml-serving
+              metric.labels.model_name: gemma3-12b-ft
+        target:
+          # Average queued requests per replica. ~10 keeps the GPUs busy
+          # without letting time-to-first-token blow out; tune against your
+          # own latency SLO once you have load-test numbers.
+          type: AverageValue
+          averageValue: "10"
+  behavior:
+    scaleUp:
+      # React to a traffic spike immediately.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      # Each replica costs a GPU node and ~10 min to replace, so be slow and
+      # certain on the way down: 15 min of sustained low queue, one pod at a
+      # time.
+      stabilizationWindowSeconds: 900
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+      selectPolicy: Min

@@ -1,0 +1,15 @@
+# Keeps node upgrades and cluster-autoscaler bin-packing from draining the
+# last serving replica. maxUnavailable (not minAvailable) so the budget still
+# makes sense when the HPA has scaled the fleet down to minReplicas.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gemma3-12b-ft
+  namespace: ml-serving
+  labels:
+    app.kubernetes.io/name: gemma3-12b-ft
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gemma3-12b-ft

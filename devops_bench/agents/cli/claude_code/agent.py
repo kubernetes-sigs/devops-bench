@@ -48,6 +48,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Iterator
 from functools import cache
 from pathlib import Path
@@ -341,6 +342,8 @@ class ClaudeCodeAgent(AgentHarness):
             )
             with _claude_config_dir() as config_dir:
                 env_overlay = _build_env(self.config, config_dir=config_dir)
+                timed_out = False
+                started = time.monotonic()
                 try:
                     completed = run(
                         argv,
@@ -351,23 +354,24 @@ class ClaudeCodeAgent(AgentHarness):
                         input=_CLOSED_STDIN,
                     )
                 except SubprocessError as exc:
-                    # Under ``check=False`` the only way ``run`` raises is a
-                    # timeout, so report it as one rather than as an exit -1 that
-                    # reads like a crash. str(exc) embeds the child's full
-                    # stderr, so rebuild the message from the clipped tail rather
-                    # than interpolating it. The timeout carries the partial
-                    # stream-json captured before the kill; fall through so the
-                    # trajectory is recovered rather than dropped.
-                    stderr = _stderr_tail(exc.stderr)
+                    # No early return: the stream-json captured before the kill parses.
+                    timed_out = exc.timed_out
+                    stderr = _stderr_tail(exc.stderr)  # str(exc) embeds the child's full stderr.
                     returncode = exc.returncode
                     stdout = exc.stdout or ""
-                    reason = f"claude timed out after {self.config.timeout_sec}s"
+                    reason = (
+                        f"claude timed out after {self.config.timeout_sec}s"
+                        if timed_out
+                        else f"claude failed to run: exit {returncode}"
+                    )
                     if stderr:
                         reason += f": {stderr}"
                 except OSError as exc:
                     # Spawn failure core.subprocess.run does not wrap: usually a
                     # missing / non-executable binary, but also a vanished cwd.
-                    return AgentResult.errored(f"failed to spawn claude: {exc}")
+                    return AgentResult.errored(
+                        f"failed to spawn claude: {exc}", latency=time.monotonic() - started
+                    )
                 else:
                     stderr = _stderr_tail(completed.stderr)
                     returncode = completed.returncode
@@ -377,9 +381,11 @@ class ClaudeCodeAgent(AgentHarness):
                         if returncode == 0
                         else f"claude exited {returncode}: {stderr or '<no stderr>'}"
                     )
+                agent_sec = time.monotonic() - started
 
-        output, trajectory, tokens, parse_errors = parse_stream_json(stdout)
-        errors: list[str] = list(parse_errors)
+        parsed = parse_stream_json(stdout)
+        output = parsed.output
+        errors: list[str] = list(parsed.errors)
         metadata: dict = {}
         if stderr:
             # Keep stderr for diagnosis even on a clean exit — e.g. MCP startup
@@ -389,10 +395,15 @@ class ClaudeCodeAgent(AgentHarness):
             errors.append(reason)
             metadata["returncode"] = returncode
             output = output or f"Error: {reason}"
-        return AgentResult(
+        return parsed.to_result(
+            latency=agent_sec,
+            # A timeout wins; the exit code governs only a stream with no terminal event.
+            terminal_reason=(
+                "timeout"
+                if timed_out
+                else parsed.terminal_reason or ("error" if returncode != 0 else "completed")
+            ),
             output=output,
-            trajectory=trajectory,
-            tokens=tokens,
             errors=errors,
             metadata=metadata,
         )

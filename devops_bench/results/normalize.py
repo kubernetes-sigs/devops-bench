@@ -22,6 +22,7 @@ the per-metric score shapes along the way.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
@@ -34,6 +35,7 @@ __all__ = [
     "TOOL_SCORE_KEY",
     "NormalizedTokens",
     "build_rows",
+    "count_tool_calls",
     "derive_augmentation",
     "extract_score",
     "normalize_tokens",
@@ -73,7 +75,7 @@ _CATASTROPHIC_KEYS = score_keys.CATASTROPHIC_SCORE_KEYS
 # Token usage aliases per provider, in lookup priority. The canonical keys
 # (``input`` / ``cached`` / ``reasoning`` / ``output``; see
 # ``devops_bench.agents.result.TOKEN_BUCKETS``) come first; the rest keep
-# historical ``results.json`` records readable.
+# historical ``results.json`` records readable, CLI spellings included.
 _INPUT_TOKEN_KEYS = ("input", "prompt_tokens", "prompt_token_count", "input_tokens")
 _OUTPUT_TOKEN_KEYS = (
     "output",
@@ -82,10 +84,15 @@ _OUTPUT_TOKEN_KEYS = (
     "completion_tokens",
     "output_tokens",
 )
-_CACHED_TOKEN_KEYS = ("cached", "cache_read_input_tokens", "cached_content_token_count")
-_CACHE_WRITE_TOKEN_KEYS = ("cache_write", "cache_creation_input_tokens")
+_CACHED_TOKEN_KEYS = (
+    "cached",
+    "cacheRead",
+    "cache_read_input_tokens",
+    "cached_content_token_count",
+)
+_CACHE_WRITE_TOKEN_KEYS = ("cache_write", "cacheWrite", "cache_creation_input_tokens")
 _REASONING_TOKEN_KEYS = ("reasoning", "thoughts_token_count", "reasoning_tokens")
-_TOTAL_TOKEN_KEYS = ("total", "total_tokens", "total_token_count")
+_TOTAL_TOKEN_KEYS = ("total", "totalTokens", "total_tokens", "total_token_count")
 
 # Runs of characters outside ``[a-z0-9]`` collapse to a single ``-``. Mirrors the
 # dashboard's ``catalog.mjs`` / seeder ``slugify`` so the model component of a
@@ -278,6 +285,47 @@ def _scoring_version(scores: Mapping[str, Any] | None) -> str:
     return ""
 
 
+def count_tool_calls(trajectory: Any, errors: Any = None) -> tuple[int | None, int | None]:
+    """Return ``(tool_calls, tool_errors)`` for a record's trajectory.
+
+    Only ``status == "error"`` is an error: ``called`` and ``interrupted`` are
+    one condition spelled two ways, so counting either would skew the column.
+    An empty trajectory is ``(0, 0)`` only when ``errors`` is an empty list,
+    since a failed transcript export looks the same as a tool-less run.
+    """
+    if not isinstance(trajectory, list):
+        return None, None
+    calls = [
+        entry
+        for entry in trajectory
+        if isinstance(entry, Mapping) and isinstance(entry.get("name"), str)
+    ]
+    if calls:
+        return len(calls), sum(1 for entry in calls if entry.get("status") == "error")
+    # Entries that parsed as nothing are a malformed export, not a clean run.
+    if trajectory or not isinstance(errors, list) or errors:
+        return None, None
+    return 0, 0
+
+
+def _served_model(value: Any) -> str:
+    """Comma-join the models that answered; several means a mid-run failover."""
+    if not isinstance(value, list):
+        return ""
+    return ",".join(v for v in value if isinstance(v, str) and v)
+
+
+def _non_negative_float_or_none(value: Any) -> float | None:
+    """Coerce a duration to a non-negative ``float``, else ``None``.
+
+    ``0.0`` is a real measurement here. ``bool`` is rejected: ``True`` is an ``int``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # ``inf`` would serialize as the bare token ``Infinity``, which is not JSON.
+    return float(value) if math.isfinite(value) and value >= 0 else None
+
+
 def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list[ResultRow]:
     """Flatten harness result records into :class:`ResultRow` rows for one run.
 
@@ -299,6 +347,10 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
         tokens = normalize_tokens(record.get("tokens"))
         correctness = _first_score(scores, _CORRECTNESS_KEYS)
         catastrophic_kinds = [k for k in _CATASTROPHIC_KEYS if extract_score(scores, k) == 0.0]
+        tool_calls, tool_errors = count_tool_calls(record.get("trajectory"), record.get("errors"))
+        # A reported 0 is a parse miss; a negative one is corrupt.
+        turns = _coerce_int(record.get("model_turns"))
+        turns = turns if turns and turns > 0 else None
         rows.append(
             ResultRow(
                 setup_id=manifest.setup_id,
@@ -317,6 +369,11 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 catastrophic_kinds=catastrophic_kinds,
                 scoring_version=_scoring_version(scores),
                 tool_score=extract_score(scores, TOOL_SCORE_KEY),
+                tool_calls=tool_calls,
+                tool_errors=tool_errors,
+                model_turns=turns,
+                tool_wait_sec=_non_negative_float_or_none(record.get("tool_wait_sec")),
+                served_model=_served_model(record.get("served_models")),
                 latency_sec=float(record.get("latency") or 0.0),
                 input_tokens=tokens.input,
                 output_tokens=tokens.output,
@@ -325,6 +382,8 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 cache_write_tokens=tokens.cache_write,
                 total_tokens=tokens.total,
                 status=record.get("status", "") or "",
+                terminal_reason=record.get("terminal_reason", "") or "",
+                timeout_sec=manifest.timeout_sec,
                 validated=bool(record.get("validated", False)),
             )
         )

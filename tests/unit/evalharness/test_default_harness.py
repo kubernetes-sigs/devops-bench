@@ -694,6 +694,10 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "status",
         "error",
         "errors",
+        "terminal_reason",
+        "model_turns",
+        "tool_wait_sec",
+        "served_models",
         "scores",
         "expected_output",
         "expected_output_raw",
@@ -750,6 +754,7 @@ def _stub_agent_result() -> AgentResult:
         ],
         tokens={"input": 10, "output": 5},
         latency=1.5,
+        terminal_reason="completed",
     )
 
 
@@ -769,6 +774,7 @@ def test_success_record_keys_match_golden(isolated_env: None) -> None:
     assert record["output"] == "done"
     assert record["error"] is None
     assert record["errors"] == []
+    assert record["terminal_reason"] == "completed"
     assert record["scores"] == {}
 
 
@@ -782,6 +788,8 @@ def test_failed_record_keys_match_golden(isolated_env: None) -> None:
     assert record["status"] == "failed"
     assert record["error"] == "deployer.up() failed"
     assert record["errors"] == ["deployer.up() failed"]
+    # The failure was outside the agent: "" rather than "error", which would blame it.
+    assert record["terminal_reason"] == ""
 
 
 def test_success_and_failed_records_have_identical_top_level_keys(isolated_env: None) -> None:

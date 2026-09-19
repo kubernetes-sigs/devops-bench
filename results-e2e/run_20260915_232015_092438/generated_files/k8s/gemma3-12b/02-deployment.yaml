@@ -1,0 +1,153 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gemma3-12b-ft
+  namespace: ml-serving
+  labels:
+    app.kubernetes.io/name: gemma3-12b-ft
+    app.kubernetes.io/component: inference-server
+spec:
+  # Replica count is owned by the HPA (05-hpa.yaml). Left unset on purpose so
+  # `kubectl apply` does not stomp the autoscaler's current decision.
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gemma3-12b-ft
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # A GPU node + ~24 GiB of weights takes minutes to come up. Surge one
+      # fresh pod before retiring an old one; never dip below capacity.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gemma3-12b-ft
+        app.kubernetes.io/component: inference-server
+      annotations:
+        # Inject the GCS FUSE CSI sidecar.
+        gke-gcsfuse/volumes: "true"
+        # Explicit sidecar limits: the cluster's `require-resource-limits`
+        # Kyverno policy applies to every container in the pod, including the
+        # injected one, which otherwise defaults to unlimited.
+        gke-gcsfuse/cpu-limit: "2"
+        gke-gcsfuse/memory-limit: 8Gi
+        gke-gcsfuse/ephemeral-storage-limit: 64Gi
+    spec:
+      serviceAccountName: gemma3-12b-ft
+      # Long generations must finish before the pod dies.
+      terminationGracePeriodSeconds: 300
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+        cloud.google.com/gke-accelerator-count: "2"
+        # Backs the GCS FUSE file cache; without it the cache lands on the
+        # boot disk and first-token latency after a cold start is dreadful.
+        cloud.google.com/gke-ephemeral-storage-local-ssd: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      # Spread replicas across nodes so one node loss can't take out the fleet.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gemma3-12b-ft
+      volumes:
+        - name: model
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            readOnly: true
+            volumeAttributes:
+              bucketName: hypercomputer-d1-models-PROJECT_ID
+              mountOptions: "implicit-dirs,only-dir=gemma3-12b-finetuned,file-cache:max-size-mb:-1,file-cache:cache-file-for-range-read:true,file-cache:enable-parallel-downloads:true,metadata-cache:ttl-secs:-1,metadata-cache:stat-cache-max-size-mb:-1,metadata-cache:type-cache-max-size-mb:-1"
+        # Recognised by name: the CSI driver uses this volume as the file cache.
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        # vLLM's tensor-parallel workers talk over shared memory; the 64 MiB
+        # container default deadlocks NCCL at startup.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.11.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --model=/models
+            - --served-model-name=gemma3-12b-ft
+            - --tensor-parallel-size=2
+            - --max-model-len=16384
+            - --gpu-memory-utilization=0.92
+            - --max-num-seqs=128
+            - --host=0.0.0.0
+            - --port=8000
+            - --disable-log-requests
+          env:
+            # Weights come from the bucket; never phone home to the Hub.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "8"
+              memory: 48Gi
+              ephemeral-storage: 16Gi
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              ephemeral-storage: 32Gi
+              nvidia.com/gpu: "2"
+          # Model load from GCS is the slow path: allow up to 20 min
+          # (60 * 20s) before declaring the pod a failure.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec:
+                # Let the load balancer drop this endpoint before the server
+                # stops accepting connections.
+                command: ["/bin/sh", "-c", "sleep 20"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: model
+              mountPath: /models
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm

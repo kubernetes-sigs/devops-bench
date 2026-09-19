@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "runId": "run_20260915_232015_092438",
+  "t": "2026-09-15T23:31:11Z",
+  "setupId": "claude-claude-mcp",
+  "model": "claude",
+  "harness": "claude",
+  "augmentation": [
+    "mcp"
+  ],
+  "timeoutSec": 420.0
+}

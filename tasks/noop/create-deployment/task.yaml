@@ -1,0 +1,160 @@
+task_id: 2
+name: "create-deployment"
+# Manifest-generation task ("Generate ... manifest"): judged on the YAML the
+# agent produces, never applied. deployer: noop skips provisioning so it does not
+# waste a GKE cluster bring-up; generation_only is auto-derived from deployer==noop.
+infrastructure:
+  deployer: "noop"
+prompt: "Generate Kubernetes manifest for deploying our finetuned Gemma 3 12b model to our GKE {{GKE_CLUSTER_NAME}}. I think the models are stored in GCS in bucket hypercomputer-d1-models-{{GCP_PROJECT_ID}}. Ensure that it can scale up and down with traffic."
+expected_output: |
+  critical requirements:
+
+  - Expected Tool Call: generate_manifest
+  - Deploy a vLLM server for the Gemma 3 12B model.
+  - Configure the deployment to use 1 NVIDIA L4 GPU and the 'nvidia.com/gpu' toleration.
+  - Mount the model bucket 'hypercomputer-d1-models-{{GCP_PROJECT_ID}}' using gcsfuse CSI driver.
+  - Serve model 'google-gemma-3-12b-it' with '--quantization fp8'.
+  - Create a 'ClusterIP' service exposing the vLLM server on a feasible port.
+  - Create an HPA for the deployment with feasible scaling parameters (e.g., max replicas, CPU utilization).
+  - Use a dedicated service account for the deployment.
+
+  Expected Manifest Generated: apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    labels:
+      app: hypercomputer-d1-vllm-server
+    name: hypercomputer-d1-vllm-server
+    namespace: default
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: hypercomputer-d1-vllm-server
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: 'true'
+        labels:
+          app: hypercomputer-d1-vllm-server
+      spec:
+        automountServiceAccountToken: true
+        containers:
+        - args:
+          - python3 -m vllm.entrypoints.openai.api_server
+            --model /data/model/google-gemma-3-12b-it --served-model-name google-gemma-3-12b-it
+            --host 0.0.0.0 --port 8000 --trust-remote-code
+            --quantization fp8
+          command:
+          - /bin/bash
+          - -c
+          name: vllm
+          ports:
+          - containerPort: 8000
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 30
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+            requests:
+              cpu: '2'
+          volumeMounts:
+          - mountPath: /data/model
+            mountPropagation: None
+            name: model-volume
+            readOnly: true
+        serviceAccount: hypercomputer-d1-vllm-sa
+        serviceAccountName: hypercomputer-d1-vllm-sa
+        shareProcessNamespace: false
+        terminationGracePeriodSeconds: 30
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - csi:
+            driver: gcsfuse.csi.storage.gke.io
+            fsType: ''
+            readOnly: false
+            volumeAttributes:
+              bucketName: hypercomputer-d1-models-{{GCP_PROJECT_ID}}
+              mountOptions: implicit-dirs
+          name: model-volume
+  ---
+  apiVersion: autoscaling/v2
+  kind: HorizontalPodAutoscaler
+  metadata:
+    name: hypercomputer-d1-vllm-hpa
+    namespace: default
+  spec:
+    maxReplicas: 10
+    metrics:
+    - resource:
+        name: cpu
+        target:
+          averageUtilization: 60
+          type: Utilization
+      type: Resource
+    minReplicas: 1
+    scaleTargetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      name: hypercomputer-d1-vllm-server
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: hypercomputer-d1-vllm-service
+    namespace: default
+  spec:
+    ports:
+    - port: 8000
+      protocol: TCP
+      targetPort: 8000
+    selector:
+      app: hypercomputer-d1-vllm-server
+    type: ClusterIP
+
+documentation:
+  - doc_name: "Gemma vLLM Tutorial"
+    url: "https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-gemma-gpu-vllm"
+    constraints:
+      - text: "nvidia-l4 accelerator type in nodeSelector"
+        critical: false
+  - doc_name: "GCS Fuse CSI Driver Guide"
+    url: "https://cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-sidecar"
+    constraints:
+      - text: "gke-gcsfuse/volumes: 'true' annotation in Deployment metadata"
+        critical: false
+      - text: "implicit-dirs mountOption"
+        critical: false
+  - doc_name: "GPU Setup Docs"
+    url: "https://cloud.google.com/kubernetes-engine/docs/how-to/gpus"
+    constraints:
+      - text: "nvidia.com/gpu resource limit of 1"
+        critical: true
+      - text: "nvidia.com/gpu toleration"
+        critical: true
+  - doc_name: "HPA Configuration Guide"
+    url: "https://cloud.google.com/kubernetes-engine/docs/how-to/horizontal-pod-autoscaling"
+    constraints:
+      - text: "HorizontalPodAutoscaler resource"
+        critical: false
+  - doc_name: "Workload Identity Overview"
+    url: "https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity"
+    constraints:
+      - text: "Dedicated ServiceAccount with iam.gke.io/gcp-service-account annotation"
+        critical: false
+  - doc_name: "Inference Best Practices (Quantization)"
+    url: "https://cloud.google.com/kubernetes-engine/docs/best-practices/machine-learning/inference#apply-quantization"
+    constraints:
+      - text: "--quantization fp8 container argument"
+        critical: true

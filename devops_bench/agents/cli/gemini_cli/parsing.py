@@ -24,13 +24,10 @@ import json
 from collections.abc import Mapping
 
 from devops_bench.agents.result import ToolCall, empty_tokens
+from devops_bench.agents.shared.telemetry import ParsedRun, int_or_none, note_model
+from devops_bench.agents.shared.timing import merged_span_sec, parse_event_time
 
 __all__: list[str] = ["parse_stream_json"]
-
-
-def _int_or_none(value: object) -> int | None:
-    """Coerce to ``int``, rejecting ``bool`` (a JSON ``true`` is not a count)."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _canonical_tokens(stats: Mapping[str, object]) -> dict[str, int | None]:
@@ -43,10 +40,10 @@ def _canonical_tokens(stats: Mapping[str, object]) -> dict[str, int | None]:
     subtractions are clamped at ``0`` so an over-reported ``cached`` (or a
     rounding quirk) can never yield a negative bucket.
     """
-    full_input = _int_or_none(stats.get("input_tokens"))
-    output = _int_or_none(stats.get("output_tokens"))
-    total = _int_or_none(stats.get("total_tokens"))
-    cached = _int_or_none(stats.get("cached"))
+    full_input = int_or_none(stats.get("input_tokens"))
+    output = int_or_none(stats.get("output_tokens"))
+    total = int_or_none(stats.get("total_tokens"))
+    cached = int_or_none(stats.get("cached"))
     inp = (
         max(full_input - cached, 0) if full_input is not None and cached is not None else full_input
     )
@@ -60,7 +57,7 @@ def _canonical_tokens(stats: Mapping[str, object]) -> dict[str, int | None]:
     return tokens
 
 
-def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
+def parse_stream_json(stdout: str) -> ParsedRun:
     """Parse a Gemini ``--output-format stream-json`` stdout stream.
 
     The stream is newline-delimited JSON events. The parser is intentionally
@@ -70,25 +67,32 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
 
     | Event type      | Fields read                                              |
     |-----------------|---------------------------------------------------------|
-    | ``init``        | (ignored)                                               |
+    | ``init``        | ``model`` (the id the CLI resolved to)                  |
     | ``message``     | ``role`` (assistant text accumulated into the output)   |
-    | ``tool_use``    | ``tool_name``, ``tool_id``, ``parameters``              |
-    | ``tool_result`` | ``tool_id``, ``status`` (no payload in the stream)      |
+    | ``tool_use``    | ``tool_name``, ``tool_id``, ``parameters``, ``timestamp``|
+    | ``tool_result`` | ``tool_id``, ``status``, ``is_error``, ``timestamp``, and ``content``/``output`` when present |
     | ``error``       | recorded on the errors list                             |
-    | ``result``      | ``stats`` (token usage); terminal status                |
+    | ``result``      | ``output``/``response``, ``stats`` (tokens, ``models``) |
 
     Args:
         stdout: Raw process stdout, possibly empty.
 
     Returns:
-        A ``(output, trajectory, tokens, errors)`` tuple. ``trajectory`` is a
-        list of ``ToolCall.to_dict()`` mappings ordered as emitted.
+        A :class:`~devops_bench.agents.shared.telemetry.ParsedRun`.
+        ``served_models`` merges ``init.model`` with ``result.stats.models``,
+        since ``auto`` can resolve to two models in one run. ``model_turns`` is
+        segmented between ``tool_result`` batches; the stream reports no count.
     """
     output_parts: list[str] = []
     tokens: dict = {}
     errors: list[str] = []
-    pending: dict[str, ToolCall] = {}
+    # FIFO per id: reused ids match in emission order instead of overwriting.
+    pending: dict[str, list[tuple[ToolCall, float | None]]] = {}
     trajectory: list[ToolCall] = []
+    spans: list[tuple[float, float]] = []
+    served_models: list[str] = []
+    turns = 0
+    turn_open = False
 
     for lineno, raw in enumerate(stdout.splitlines(), start=1):
         line = raw.strip()
@@ -103,9 +107,18 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
             continue
 
         etype = event.get("type")
-        if etype == "message":
+        event_time = parse_event_time(event.get("timestamp"))
+        if etype == "init":
+            # ``auto`` is the router mode; what it routed to is in ``stats.models``.
+            model = event.get("model")
+            if model != "auto":
+                note_model(served_models, model)
+        elif etype == "message":
             # ``role="user"`` echoes the prompt and is skipped.
             if event.get("role") in ("assistant", "model"):
+                if not turn_open:
+                    turns += 1
+                    turn_open = True
                 content = event.get("content")
                 if isinstance(content, str):
                     output_parts.append(content)
@@ -115,26 +128,28 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
                         if isinstance(part, dict) and isinstance(part.get("text"), str):
                             output_parts.append(part["text"])
         elif etype == "tool_use":
+            if not turn_open:
+                turns += 1
+                turn_open = True
             call_id = event.get("tool_id") or event.get("id") or event.get("tool_use_id") or ""
-            args = event.get("parameters")
-            if args is None:
-                args = event.get("input")
-            if args is None:
-                args = event.get("args")
+            args = event.get("parameters") or event.get("input") or event.get("args")
             call = ToolCall(
-                name=event.get("tool_name") or event.get("name", ""),
+                name=str(event.get("tool_name") or event.get("name") or ""),
                 args=args if isinstance(args, dict) else {},
                 status="called",
             )
             trajectory.append(call)
             if call_id:
-                pending[str(call_id)] = call
+                pending.setdefault(str(call_id), []).append((call, event_time))
         elif etype == "tool_result":
+            turn_open = False
             call_id = event.get("tool_id") or event.get("tool_use_id") or event.get("id") or ""
-            target = pending.pop(str(call_id), None) if call_id else None
-            if target is None:
+            queue = pending.get(str(call_id)) if call_id else None
+            entry = queue.pop(0) if queue else None
+            if entry is None:
                 errors.append(f"stream-json tool_result without matching tool_use (id={call_id!r})")
                 continue
+            target, started = entry
             # tool_result carries only a status; accept a content/output
             # payload as a fallback when present.
             content = event.get("content")
@@ -147,21 +162,35 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
             status = str(event.get("status", "")).lower()
             failed = bool(event.get("is_error")) or status in ("error", "failed", "failure")
             target.status = "error" if failed else "completed"
+            if started is not None and event_time is not None:
+                spans.append((started, event_time))
         elif etype == "error":
             msg = event.get("message") or event.get("error") or str(event)
             errors.append(f"stream-json error event: {msg}")
         elif etype == "result":
-            # Terminal event: answer streams via ``message`` events and token
-            # usage rides under ``stats``; accept ``output``/``response`` and
-            # ``tokens``/``usage`` as fallbacks.
+            # Fallbacks: first wins over what already streamed, except ``models``.
             tail = event.get("output") or event.get("response")
-            if isinstance(tail, str) and tail:
+            if isinstance(tail, str) and tail and not output_parts:
                 output_parts.append(tail)
             stats = event.get("stats")
             usage = event.get("tokens") or event.get("usage")
-            if isinstance(stats, dict):
-                tokens = _canonical_tokens(stats)
-            elif isinstance(usage, dict):
+            if isinstance(stats, dict) and stats:
+                if not tokens:
+                    tokens = _canonical_tokens(stats)
+                # Keyed per serving model, so a mid-run switch adds a second key.
+                per_model = stats.get("models")
+                if isinstance(per_model, Mapping):
+                    for name in per_model:
+                        note_model(served_models, name)
+            elif isinstance(usage, dict) and usage and not tokens:
                 tokens = usage
 
-    return "".join(output_parts), [call.to_dict() for call in trajectory], tokens, errors
+    return ParsedRun(
+        output="".join(output_parts),
+        trajectory=[call.to_dict() for call in trajectory],
+        tokens=tokens,
+        errors=errors,
+        tool_wait_sec=merged_span_sec(spans),
+        served_models=served_models,
+        model_turns=turns or None,
+    )

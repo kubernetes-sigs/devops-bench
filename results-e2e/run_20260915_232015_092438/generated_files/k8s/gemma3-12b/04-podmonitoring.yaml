@@ -1,0 +1,19 @@
+# Google Managed Prometheus scrapes vLLM's /metrics and exports it to Cloud
+# Monitoring as prometheus.googleapis.com/vllm:*. The HPA in 05-hpa.yaml reads
+# vllm:num_requests_waiting from there, so this resource is a hard dependency
+# of autoscaling, not optional telemetry.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: gemma3-12b-ft
+  namespace: ml-serving
+  labels:
+    app.kubernetes.io/name: gemma3-12b-ft
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gemma3-12b-ft
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

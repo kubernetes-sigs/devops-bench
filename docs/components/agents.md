@@ -166,6 +166,12 @@ Anthropic, OpenAI, and others, but it requires `google-adk[extensions]`, which
 the `adk` extra does not install. Token accounting also assumes `google-genai`
 usage field names, so a `LiteLlm`-backed run may report usage incompletely.
 
+The rest of the per-run telemetry comes from event fields every backend sets, so
+it survives that gap: `modelTurns` counts the events carrying a usage block,
+`toolWaitSec` pairs each `function_call` event with the one bearing its
+`function_response` (concurrent calls counted once), and `servedModel` reads the
+`model_version` the provider reported rather than the id that was requested.
+
 `AGENT_TARGET` accepts four spellings:
 
 | Target | Resolves to |

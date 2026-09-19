@@ -42,6 +42,7 @@ from devops_bench.agents.cli.gemini_cli.agent import (
     _build_settings,
 )
 from devops_bench.core.errors import ConfigError, SubprocessError
+from devops_bench.results.normalize import count_tool_calls
 
 
 def _stream(*events: dict) -> str:
@@ -83,11 +84,11 @@ SAMPLE_STREAM = _stream(
 
 
 def test_parse_stream_json_emits_canonical_trajectory() -> None:
-    output, trajectory, tokens, errors = parse_stream_json(SAMPLE_STREAM)
-    assert output == "Done."
-    assert tokens == {"prompt_token_count": 10, "candidates_token_count": 20}
-    assert errors == []
-    assert trajectory == [
+    parsed = parse_stream_json(SAMPLE_STREAM)
+    assert parsed.output == "Done."
+    assert parsed.tokens == {"prompt_token_count": 10, "candidates_token_count": 20}
+    assert parsed.errors == []
+    assert parsed.trajectory == [
         {
             "name": "mcp_gke_list_clusters",
             "args": {"project": "p1"},
@@ -103,27 +104,214 @@ def test_parse_stream_json_emits_canonical_trajectory() -> None:
     ]
 
 
+def test_parse_stream_json_records_the_model_the_cli_resolved_to() -> None:
+    """The requested id can be an alias, so both sources are read: ``init.model``
+    names the resolved id up front and ``result.stats.models`` is keyed per model,
+    so a mid-run switch appears as a second key. A repeat is not counted twice.
+    """
+    blob = "\n".join(
+        json.dumps(e)
+        for e in (
+            {"type": "init", "model": "gemini-3.5-flash"},
+            {
+                "type": "result",
+                "stats": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                    "models": {"gemini-3.5-flash": {}, "gemini-3.5-pro": {}},
+                },
+            },
+        )
+    )
+    assert parse_stream_json(blob).served_models == ["gemini-3.5-flash", "gemini-3.5-pro"]
+
+
+def test_parse_stream_json_leaves_served_models_empty_when_unreported() -> None:
+    blob = json.dumps({"type": "result", "stats": {"input_tokens": 1}})
+    assert parse_stream_json(blob).served_models == []
+
+
+def test_parse_stream_json_does_not_record_auto_as_a_served_model() -> None:
+    """``auto`` is the router mode, not a model. Captured live: one prompt was served
+    by ``gemini-3.1-flash-lite`` and ``gemini-3.5-flash`` together.
+    """
+    blob = _stream(
+        {"type": "init", "model": "auto"},
+        {
+            "type": "result",
+            "stats": {"models": {"gemini-3.1-flash-lite": {}, "gemini-3.5-flash": {}}},
+        },
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.served_models == ["gemini-3.1-flash-lite", "gemini-3.5-flash"]
+
+
+def test_parse_stream_json_coerces_a_null_tool_name() -> None:
+    """``count_tool_calls`` skips any entry whose name is not a ``str``, so a stream
+    like this dropped the call and reported zero tool errors.
+    """
+    blob = _stream({"type": "tool_use", "tool_id": "1", "tool_name": None, "name": None})
+    parsed = parse_stream_json(blob)
+    assert parsed.trajectory[0]["name"] == ""
+    assert count_tool_calls(parsed.trajectory) == (1, 0)
+
+
+def test_parse_stream_json_keeps_the_first_terminal_results_payload() -> None:
+    """The CLI can emit a second terminal event carrying an empty ``stats`` block:
+    overwriting on it lost every token bucket, and appending its ``output`` again
+    returned the answer twice.
+    """
+    blob = _stream(
+        {"type": "result", "output": "the answer", "stats": {"input_tokens": 100}},
+        {"type": "result", "output": "the answer", "stats": {}},
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "the answer"
+    assert parsed.tokens["input"] == 100
+
+
+def test_parse_stream_json_segments_model_turns_between_tool_batches() -> None:
+    """Live shape: one turn issues both reads, a second answers. ``result.stats``
+    carries no request count and assistant ``message`` events are ``delta: true``
+    chunks, so counting either events or tool calls overcounts.
+    """
+    blob = _stream(
+        {"type": "init", "model": "auto"},
+        {"type": "message", "role": "user", "content": "read both files"},
+        {"type": "tool_use", "tool_name": "read_file", "tool_id": "read_file__call_1"},
+        {"type": "tool_use", "tool_name": "read_file", "tool_id": "read_file__call_2"},
+        {"type": "tool_result", "tool_id": "read_file__call_1", "status": "success"},
+        {"type": "tool_result", "tool_id": "read_file__call_2", "status": "success"},
+        {"type": "message", "role": "assistant", "content": "a.txt:\n", "delta": True},
+        {"type": "message", "role": "assistant", "content": "hello", "delta": True},
+        {"type": "result", "status": "success", "stats": {"total_tokens": 16616}},
+    )
+    assert parse_stream_json(blob).model_turns == 2
+
+
+def test_parse_stream_json_counts_a_tool_free_answer_as_one_turn() -> None:
+    blob = _stream(
+        {"type": "message", "role": "user", "content": "say ok"},
+        {"type": "message", "role": "assistant", "content": "OK", "delta": True},
+    )
+    assert parse_stream_json(blob).model_turns == 1
+
+
+def test_parse_stream_json_reports_no_model_turns_for_an_empty_stream() -> None:
+    assert parse_stream_json("").model_turns is None
+
+
+def test_parse_stream_json_times_tools_and_merges_concurrent_calls() -> None:
+    """Overlapping calls count once, so tool wait can never exceed the run. Live
+    ``stream-json`` shape: every event carries a timestamp.
+    """
+    blob = "\n".join(
+        json.dumps(e)
+        for e in (
+            {
+                "type": "tool_use",
+                "tool_id": "a",
+                "tool_name": "t",
+                "timestamp": "2026-08-24T17:57:28.891Z",
+            },
+            {
+                "type": "tool_use",
+                "tool_id": "b",
+                "tool_name": "t",
+                "timestamp": "2026-08-24T17:57:29.000Z",
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "a",
+                "status": "success",
+                "timestamp": "2026-08-24T17:57:29.891Z",
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "b",
+                "status": "success",
+                "timestamp": "2026-08-24T17:57:29.500Z",
+            },
+        )
+    )
+    assert parse_stream_json(blob).tool_wait_sec == pytest.approx(1.0, abs=1e-6)
+
+
+def test_parse_stream_json_leaves_tool_wait_none_without_timestamps() -> None:
+    """An older CLI that omits ``timestamp`` reports unmeasured, not zero."""
+    blob = "\n".join(
+        json.dumps(e)
+        for e in (
+            {"type": "tool_use", "tool_id": "a", "tool_name": "t"},
+            {"type": "tool_result", "tool_id": "a", "status": "success"},
+        )
+    )
+    assert parse_stream_json(blob).tool_wait_sec is None
+
+
+def test_parse_stream_json_matches_reused_tool_ids_in_emission_order() -> None:
+    """Two live calls can share an id. Overwriting pairs the first call's result
+    with the second call's start, reporting a tool wait shorter than the run and
+    inventing an orphan error.
+    """
+    blob = "\n".join(
+        json.dumps(e)
+        for e in (
+            {
+                "type": "tool_use",
+                "tool_id": "x",
+                "tool_name": "a",
+                "timestamp": "2026-08-24T17:57:28.000Z",
+            },
+            {
+                "type": "tool_use",
+                "tool_id": "x",
+                "tool_name": "b",
+                "timestamp": "2026-08-24T17:57:29.000Z",
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "x",
+                "content": "ra",
+                "status": "success",
+                "timestamp": "2026-08-24T17:57:30.000Z",
+            },
+            {
+                "type": "tool_result",
+                "tool_id": "x",
+                "content": "rb",
+                "status": "success",
+                "timestamp": "2026-08-24T17:57:32.000Z",
+            },
+        )
+    )
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert [(c["name"], c["result"]) for c in parsed.trajectory] == [("a", "ra"), ("b", "rb")]
+    assert parsed.tool_wait_sec == pytest.approx(4.0, abs=1e-6)
+
+
 def test_parse_stream_json_records_json_decode_errors_on_errors_list() -> None:
     blob = "{not json}\n" + json.dumps({"type": "result", "output": "ok"}) + "\n"
-    output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert output == "ok"
-    assert trajectory == []
-    assert len(errors) == 1
-    assert "parse error" in errors[0]
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "ok"
+    assert parsed.trajectory == []
+    assert len(parsed.errors) == 1
+    assert "parse error" in parsed.errors[0]
 
 
 def test_parse_stream_json_records_unmatched_tool_results() -> None:
     blob = _stream({"type": "tool_result", "tool_use_id": "ghost", "content": "?"})
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
+    parsed = parse_stream_json(blob)
     # Unpaired result must surface; canonical trajectory is empty.
-    assert trajectory == []
-    assert any("without matching tool_use" in msg for msg in errors)
+    assert parsed.trajectory == []
+    assert any("without matching tool_use" in msg for msg in parsed.errors)
 
 
 def test_parse_stream_json_records_error_events() -> None:
     blob = _stream({"type": "error", "message": "rate limit"})
-    _output, _trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == ["stream-json error event: rate limit"]
+    assert parse_stream_json(blob).errors == ["stream-json error event: rate limit"]
 
 
 def test_parse_stream_json_marks_failed_tool_results_as_error_status() -> None:
@@ -131,12 +319,17 @@ def test_parse_stream_json_marks_failed_tool_results_as_error_status() -> None:
         {"type": "tool_use", "id": "c", "name": "x", "input": {}},
         {"type": "tool_result", "tool_use_id": "c", "content": "oops", "is_error": True},
     )
-    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
-    assert trajectory[0]["status"] == "error"
+    assert parse_stream_json(blob).trajectory[0]["status"] == "error"
 
 
 def test_parse_stream_json_empty_input_returns_empty() -> None:
-    assert parse_stream_json("") == ("", [], {}, [])
+    parsed = parse_stream_json("")
+    assert parsed.output == ""
+    assert parsed.trajectory == []
+    assert parsed.tokens == {}
+    assert parsed.errors == []
+    assert parsed.tool_wait_sec is None
+    assert parsed.served_models == []
 
 
 def test_build_argv_disables_extensions_when_no_allowed_tools() -> None:
@@ -219,6 +412,7 @@ def test_execute_returns_typed_result_with_trajectory(monkeypatch: pytest.Monkey
     assert result.output == "Done."
     assert len(result.trajectory) == 2
     assert result.errors == []
+    assert result.terminal_reason == "completed"
     assert result.tokens == {"prompt_token_count": 10, "candidates_token_count": 20}
     assert captured["timeout"] == 30.0
     assert captured["argv"][0].endswith("gemini-x")
@@ -236,17 +430,56 @@ def test_execute_records_non_zero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.has_errors()
     assert any("exited 2" in e for e in result.errors)
     assert result.metadata.get("returncode") == 2
+    assert result.terminal_reason == "error"
 
 
 def test_execute_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv, **kwargs):
-        raise SubprocessError(argv, returncode=-1, stdout="", stderr="timeout")
+        raise SubprocessError(argv, returncode=-1, stdout="", stderr="failed")
 
     monkeypatch.setattr(gemini_mod, "run", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.has_errors()
     assert "subprocess error" in result.errors[0]
     assert result.trajectory == []
+    assert result.terminal_reason == "error"
+
+
+def test_execute_reports_a_timeout_apart_from_a_subprocess_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both arrive as SubprocessError with returncode -1 and only ``timed_out``
+    differs, yet they mean opposite things about the model.
+    """
+
+    def fake_run(argv, **kwargs):
+        raise SubprocessError(argv, returncode=-1, stdout="", stderr="", timed_out=True)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    assert GeminiCliAgent(AgentConfig(target="gemini")).run("p").terminal_reason == "timeout"
+
+
+def test_execute_recovers_partial_telemetry_from_a_timed_out_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stdout written before the kill is a valid prefix of the event stream, so
+    discarding it blanks the counters on the rows where "how far did it get" is
+    the question and leaves gemini incomparable with the other two CLI harnesses.
+    """
+    partial = _stream(
+        {"type": "tool_use", "id": "c1", "name": "list_pods", "input": {}},
+        {"type": "tool_result", "tool_use_id": "c1", "content": "pod-a"},
+    )
+
+    def fake_run(argv, **kwargs):
+        raise SubprocessError(argv, returncode=-1, stdout=partial, stderr="", timed_out=True)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+    assert result.terminal_reason == "timeout"
+    assert result.has_errors()
+    assert len(result.trajectory) == 1
+    assert result.trajectory[0]["name"] == "list_pods"
 
 
 def test_execute_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,6 +502,48 @@ def test_execute_passes_timeout_to_subprocess(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(gemini_mod, "run", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=15.5)).run("p")
     assert captured["timeout"] == 15.5
+
+
+class _FakeClock:
+    """Monotonic clock that only moves when a fake explicitly advances it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def test_latency_excludes_workspace_setup_and_stream_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Latency is the agent turn only, so it stays comparable across harnesses."""
+    clock = _FakeClock()
+    monkeypatch.setattr(gemini_mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    def fake_run(argv, **kwargs):
+        clock.now += 5.0
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    def slow_parse(text):
+        clock.now += 100.0
+        return parse_stream_json("")
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "parse_stream_json", slow_parse)
+    assert GeminiCliAgent(AgentConfig(target="gemini")).run("p").latency == 5.0
+
+
+def test_timeout_result_carries_the_elapsed_agent_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(gemini_mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+
+    def fake_run(argv, **kwargs):
+        clock.now += 7.0
+        raise SubprocessError(argv, returncode=-1, stdout="", stderr="", timed_out=True)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    assert GeminiCliAgent(AgentConfig(target="gemini")).run("p").latency == 7.0
 
 
 def test_execute_wires_extra_env_into_subprocess_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -303,9 +578,9 @@ def test_parse_stream_json_accepts_tool_use_id_field_for_call_id() -> None:
         },
         {"type": "tool_result", "tool_use_id": "alt-1", "content": "ok"},
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert trajectory == [
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.trajectory == [
         {"name": "list", "args": {}, "result": "ok", "status": "completed"},
     ]
 
@@ -316,10 +591,10 @@ def test_parse_stream_json_accepts_args_field_when_input_absent() -> None:
         {"type": "tool_use", "id": "c1", "name": "x", "args": {"k": "v"}},
         {"type": "tool_result", "id": "c1", "output": "ok"},
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert trajectory[0]["args"] == {"k": "v"}
-    assert trajectory[0]["result"] == "ok"
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.trajectory[0]["args"] == {"k": "v"}
+    assert parsed.trajectory[0]["result"] == "ok"
 
 
 def test_parse_stream_json_real_cli_schema() -> None:
@@ -351,12 +626,12 @@ def test_parse_stream_json_real_cli_schema() -> None:
             },
         },
     )
-    output, trajectory, tokens, errors = parse_stream_json(blob)
-    assert output == "I found one file."
-    assert errors == []
+    parsed = parse_stream_json(blob)
+    assert parsed.output == "I found one file."
+    assert parsed.errors == []
     # The live tool_result carries only a status (no payload), so result stays
     # unset (None) — the stream simply doesn't include tool output text.
-    assert trajectory == [
+    assert parsed.trajectory == [
         {
             "name": "list_directory",
             "args": {"dir_path": "/work"},
@@ -366,7 +641,7 @@ def test_parse_stream_json_real_cli_schema() -> None:
     ]
     # Canonical buckets: input excludes the cached subset, and reasoning is
     # derived from the total gap (total - full_input - output = thinking).
-    assert tokens == {
+    assert parsed.tokens == {
         "input": 31225 - 12173,
         "cached": 12173,
         "cache_write": None,
@@ -386,10 +661,10 @@ def test_parse_stream_json_clamps_input_when_cached_exceeds_full_input() -> None
             "stats": {"input_tokens": 100, "cached": 250, "output_tokens": 10},
         },
     )
-    _, _, tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert tokens["input"] == 0
-    assert tokens["cached"] == 250
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.tokens["input"] == 0
+    assert parsed.tokens["cached"] == 250
 
 
 def test_parse_stream_json_marks_failed_tool_result_status_field() -> None:
@@ -398,9 +673,9 @@ def test_parse_stream_json_marks_failed_tool_result_status_field() -> None:
         {"type": "tool_use", "tool_name": "x", "tool_id": "t1", "parameters": {}},
         {"type": "tool_result", "tool_id": "t1", "status": "error"},
     )
-    _output, trajectory, _tokens, errors = parse_stream_json(blob)
-    assert errors == []
-    assert trajectory[0]["status"] == "error"
+    parsed = parse_stream_json(blob)
+    assert parsed.errors == []
+    assert parsed.trajectory[0]["status"] == "error"
 
 
 def test_run_does_not_invoke_subprocess_when_skipped(monkeypatch: pytest.MonkeyPatch) -> None:

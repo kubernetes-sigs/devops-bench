@@ -14,6 +14,8 @@
 
 """Tests for the harness-to-dashboard result normalizer."""
 
+import pytest
+
 from devops_bench.results import (
     SCHEMA_VERSION,
     Manifest,
@@ -23,7 +25,11 @@ from devops_bench.results import (
     normalize_tokens,
     setup_id,
 )
-from devops_bench.results.normalize import OUTCOME_SCORE_KEY, TOOL_SCORE_KEY
+from devops_bench.results.normalize import (
+    OUTCOME_SCORE_KEY,
+    TOOL_SCORE_KEY,
+    count_tool_calls,
+)
 
 
 def _manifest(**overrides):
@@ -130,6 +136,56 @@ def test_normalize_tokens_float_coerced_to_int():
     assert normalize_tokens({"input": 12.0, "output": 3.9}) == (12, 3, None, None, None, None)
 
 
+def test_normalize_tokens_openclaw_camel_case_cache_keys() -> None:
+    """Verbatim from a live ``oc`` run. Before the camelCase aliases existed,
+    ``cacheRead`` matched nothing and the buckets summed to 26385 against a
+    reported total of 50773 — 48% of the billed tokens invisible on every row.
+    """
+    tokens = {"input": 26362, "output": 23, "cacheRead": 24388, "total": 50773}
+    normalized = normalize_tokens(tokens)
+    assert normalized == (26362, 23, 24388, None, None, 50773)
+    assert sum(v for v in normalized[:5] if v is not None) == normalized.total
+
+
+def test_normalize_tokens_openclaw_cache_write_and_total_tokens() -> None:
+    """``@openclaw/ai``'s ``parseChunkUsage`` builds every adapter's usage as
+    ``{input, output, cacheRead, cacheWrite, totalTokens}``, with ``input``
+    already net of both cache buckets — so the four add up to the total.
+    """
+    tokens = {
+        "input": 100,
+        "output": 20,
+        "cacheRead": 300,
+        "cacheWrite": 40,
+        "totalTokens": 460,
+    }
+    normalized = normalize_tokens(tokens)
+    assert normalized == (100, 20, 300, None, 40, 460)
+    assert sum(v for v in normalized[:5] if v is not None) == normalized.total
+
+
+def test_normalize_tokens_snake_case_wins_over_camel_case() -> None:
+    """The canonical key keeps priority when a record carries both spellings."""
+    tokens = {"cached": 1, "cacheRead": 999, "cache_write": 2, "cacheWrite": 888}
+    normalized = normalize_tokens(tokens)
+    assert normalized.cached == 1
+    assert normalized.cache_write == 2
+
+
+def test_normalize_tokens_openclaw_cost_breakdown_is_not_read_as_tokens() -> None:
+    """OpenClaw nests a float ``cost`` map that repeats the bucket names beside the
+    counts, so a flattening lookup would read dollars as tokens.
+    """
+    tokens = {
+        "input": 100,
+        "output": 20,
+        "cacheRead": 300,
+        "total": 420,
+        "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0.03, "total": 0.06},
+    }
+    assert normalize_tokens(tokens) == (100, 20, 300, None, None, 420)
+
+
 # -- extract_score -----------------------------------------------------------
 
 
@@ -167,6 +223,11 @@ def test_build_rows_success_record():
         "status": "success",
         "latency": 42.5,
         "tokens": {"prompt_tokens": 100, "candidates_tokens": 20},
+        "terminal_reason": "completed",
+        "trajectory": [
+            {"name": "kubectl", "args": {}, "result": "ok", "status": "completed"},
+            {"name": "kubectl", "args": {}, "result": None, "status": "error"},
+        ],
         "scores": {
             OUTCOME_SCORE_KEY: {"score": 0.9, "success": True, "reason": "ok"},
             TOOL_SCORE_KEY: {"score": 0.7, "success": True, "reason": "ok"},
@@ -194,6 +255,8 @@ def test_build_rows_success_record():
         "catastrophicKinds": [],
         "scoringVersion": "",
         "toolScore": 0.7,
+        "toolCalls": 2,
+        "toolErrors": 1,
         "latencySec": 42.5,
         "inputTokens": 100,
         "outputTokens": 20,
@@ -202,8 +265,31 @@ def test_build_rows_success_record():
         "cacheWriteTokens": None,
         "totalTokens": None,
         "status": "success",
+        "modelTurns": None,
+        "toolWaitSec": None,
+        "servedModel": "",
+        "terminalReason": "completed",
+        "timeoutSec": None,
         "validated": False,
     }
+
+
+def test_build_rows_defaults_terminal_reason_for_records_that_omit_it() -> None:
+    """``""`` must not collapse to ``"completed"``: a record written before the
+    field existed cannot claim the agent finished on its own.
+    """
+    rows = build_rows([{"name": "n", "folder": "f", "status": "success"}], _manifest())
+    assert rows[0].terminal_reason == ""
+
+
+def test_build_rows_carries_a_cut_off_run_through_as_success() -> None:
+    """A cut-off run still reads ``status: "success"``: that status describes the
+    harness, not the agent, so ``terminal_reason`` is the only thing separating
+    "the harness killed it" from "it answered badly".
+    """
+    record = {"name": "n", "folder": "f", "status": "success", "terminal_reason": "timeout"}
+    row = build_rows([record], _manifest())[0]
+    assert (row.status, row.terminal_reason) == ("success", "timeout")
 
 
 def test_build_rows_maps_all_v1_score_components() -> None:
@@ -381,6 +467,8 @@ def test_result_row_keys_match_typescript_interface():
         "catastrophicKinds",
         "scoringVersion",
         "toolScore",
+        "toolCalls",
+        "toolErrors",
         "latencySec",
         "inputTokens",
         "outputTokens",
@@ -388,6 +476,11 @@ def test_result_row_keys_match_typescript_interface():
         "reasoningTokens",
         "cacheWriteTokens",
         "totalTokens",
+        "modelTurns",
+        "toolWaitSec",
+        "servedModel",
+        "terminalReason",
+        "timeoutSec",
         "validated",
     }
     row = build_rows(
@@ -406,7 +499,24 @@ def test_manifest_to_dict_keys():
         "model",
         "harness",
         "augmentation",
+        "timeoutSec",
     }
+
+
+def test_build_rows_carries_the_run_timeout_onto_every_row():
+    """Ingest uploads ``rows.json`` alone and never reads ``manifest.json``, so a
+    budget left on the manifest never reaches the dashboard — and without it
+    "timed out" cannot be told from "finished with room to spare".
+    """
+    manifest = _manifest().model_copy(update={"timeout_sec": 900.0})
+    rows = build_rows(
+        [
+            {"name": "a", "folder": "a", "status": "success"},
+            {"name": "b", "folder": "b", "status": "failed"},
+        ],
+        manifest,
+    )
+    assert [row.to_dict()["timeoutSec"] for row in rows] == [900.0, 900.0]
 
 
 def test_build_rows_propagates_validated():
@@ -460,3 +570,156 @@ def test_build_rows_carries_cache_write() -> None:
     row = build_rows([record], _manifest())[0]
     assert row.cache_write_tokens == 200
     assert row.total_tokens == 1245
+
+
+# --- tool-call counts ---
+
+
+@pytest.mark.parametrize(
+    ("trajectory", "errors", "expected"),
+    [
+        pytest.param(
+            [
+                {"name": "a", "status": "completed"},
+                {"name": "b", "status": "error"},
+                {"name": "c", "status": "interrupted"},
+                {"name": "d", "status": "completed"},
+            ],
+            None,
+            (4, 1),
+            id="only-error-is-a-failure",
+        ),
+        pytest.param([{"name": "a", "status": "called"}], None, (1, 0), id="called-is-unresolved"),
+        pytest.param(None, None, (None, None), id="no-trajectory"),
+        pytest.param([], None, (None, None), id="empty-and-unqualified"),
+        pytest.param("not a list", None, (None, None), id="not-a-list"),
+        pytest.param([], [], (0, 0), id="empty-with-no-errors-is-a-real-zero"),
+        pytest.param([], ["oc export-trajectory exited 1"], (None, None), id="empty-with-errors"),
+        pytest.param(
+            [
+                {"name": "a", "status": "completed"},
+                {"role": "assistant", "text": "thinking about it"},
+                {"name": "b", "status": "error"},
+            ],
+            None,
+            (2, 1),
+            id="text-turns-are-not-calls",
+        ),
+        pytest.param(
+            [{"name": "a", "status": "error"}, "junk", None], None, (1, 1), id="skips-malformed"
+        ),
+        pytest.param(["junk", None], None, (None, None), id="all-malformed"),
+    ],
+)
+def test_count_tool_calls(trajectory: object, errors: object, expected: tuple) -> None:
+    """Counting rules for ``toolCalls`` / ``toolErrors``, and when they are unknown.
+
+    ``called`` and ``interrupted`` are the same condition under two names -- the
+    parser never saw the call resolve -- and only antigravity uses the latter, so
+    counting either would make ``toolErrors`` incomparable across the harness
+    dimension the dashboard groups by. Only entries carrying a ``name`` count: an
+    API agent interleaves text turns with tool calls, and a malformed entry must
+    lose a count rather than raise.
+
+    An empty result is ``None`` unless ``errors`` proves the run was captured.
+    Every path that loses a transcript says so there -- the openclaw exporter
+    appends its failure, a timeout appends its own -- so an empty trajectory
+    beside an error means "not captured", while one beside a clean ``errors``
+    list is a real zero that belongs in the dashboard average. A confident ``0``
+    in the first case sinks that average on exactly the corrupted records the
+    skip exists to survive.
+    """
+    assert count_tool_calls(trajectory, errors) == expected
+
+
+def test_build_rows_counts_tools_from_the_trajectory() -> None:
+    """The trajectory is too large to aggregate at dashboard time, yet two models
+    with the same score and wall clock can differ severalfold in work done.
+    """
+    record = {
+        "name": "n",
+        "folder": "f",
+        "status": "success",
+        "trajectory": [
+            {"name": "a", "status": "completed"},
+            {"name": "b", "status": "error"},
+            {"name": "c", "status": "completed"},
+        ],
+    }
+    row = build_rows([record], _manifest())[0]
+    assert (row.tool_calls, row.tool_errors) == (3, 1)
+
+
+def test_build_rows_reports_none_tool_counts_for_a_record_with_no_trajectory() -> None:
+    row = build_rows([{"name": "n", "folder": "f", "status": "failed"}], _manifest())[0]
+    assert (row.tool_calls, row.tool_errors) == (None, None)
+
+
+def test_build_rows_carries_model_turns_separately_from_tool_calls() -> None:
+    """Seen live: one openclaw ``assistant.message`` carried two ``toolCall``
+    entries. Input tokens grow with turns, not calls, so a cost-per-turn read
+    off ``toolCalls`` would be wrong by that factor.
+    """
+    record = {
+        "name": "n",
+        "folder": "f",
+        "status": "success",
+        "model_turns": 2,
+        "trajectory": [{"name": "a", "status": "completed"}] * 3,
+    }
+    row = build_rows([record], _manifest())[0]
+    assert (row.model_turns, row.tool_calls) == (2, 3)
+
+
+def test_build_rows_joins_served_models_so_a_failover_stays_visible() -> None:
+    """``model`` is the requested id, so a failover means it is not what ran;
+    collapsing to the first entry hides the case the field exists for.
+    """
+
+    def served(value):
+        record = {"name": "n", "folder": "f", "status": "success", "served_models": value}
+        return build_rows([record], _manifest())[0].served_model
+
+    assert served(["gemini-3-flash-preview"]) == "gemini-3-flash-preview"
+    assert served(["a", "b"]) == "a,b"
+    assert served([]) == ""
+    assert served(None) == ""
+    assert served("a") == ""
+
+
+def test_build_rows_keeps_a_zero_tool_wait_but_drops_a_missing_one() -> None:
+    """Tools returning inside the transcript's millisecond resolution genuinely
+    measured ~0, so that stays on the row; a harness reporting no timings at all
+    must not be averaged in as if it were instantaneous.
+    """
+
+    def wait(record_extra):
+        record = {"name": "n", "folder": "f", "status": "success", **record_extra}
+        return build_rows([record], _manifest())[0].tool_wait_sec
+
+    assert wait({"tool_wait_sec": 0}) == 0.0
+    assert wait({"tool_wait_sec": 1.75}) == 1.75
+    assert wait({}) is None
+    assert wait({"tool_wait_sec": -1.0}) is None
+    assert wait({"tool_wait_sec": True}) is None
+    # ``json.dumps`` writes inf as the bare token ``Infinity``, which is not JSON.
+    assert wait({"tool_wait_sec": float("inf")}) is None
+    assert wait({"tool_wait_sec": float("nan")}) is None
+
+
+def test_build_rows_reports_unusable_model_turns_as_none() -> None:
+    """Zero, a bool and a non-int all mean unmeasured: a record that produced
+    output cannot have taken zero round-trips, and ``True`` is an ``int``, so
+    both would otherwise land on the row as a real count.
+    """
+
+    def turns(value):
+        record = {"name": "n", "folder": "f", "status": "success", "model_turns": value}
+        return build_rows([record], _manifest())[0].model_turns
+
+    assert turns(0) is None
+    assert turns(True) is None
+    assert turns("4") is None
+    assert turns(None) is None
+    # A negative count is corrupt; the rebatch path reads records straight off disk.
+    assert turns(-3) is None

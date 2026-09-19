@@ -25,11 +25,12 @@ import io
 import json
 import os
 import sqlite3
+from typing import NamedTuple
 
 from devops_bench import core
 from devops_bench.agents import result as agents_result
 
-__all__ = ["parse_session_jsonl", "empty_tokens", "db_token_state"]
+__all__ = ["parse_session_jsonl", "empty_tokens", "db_token_state", "DbTokenState"]
 
 _log = core.get_logger("agents.cli.antigravity.parsing")
 
@@ -287,14 +288,8 @@ def _parse_old_session_jsonl(jsonl_text: str) -> tuple[str, list[dict], dict, li
     return output, [call.to_dict() for call in trajectory], aggregated_tokens, errors
 
 
-# Harness-local until the unified token schema lands: input = non-cached prompt,
-# cached = cache reads, output excludes reasoning, total = sum of all buckets.
-_TOKEN_BUCKETS = ("input", "cached", "cache_write", "reasoning", "output", "total")
-
-
-def empty_tokens() -> dict:
-    """Return the canonical token dict with every bucket ``None`` (unavailable)."""
-    return dict.fromkeys(_TOKEN_BUCKETS, None)
+#: Re-exported so a new canonical bucket reaches this harness for free.
+empty_tokens = agents_result.empty_tokens
 
 
 # --- Token usage from the conversation DB ----------------------------------
@@ -407,27 +402,25 @@ def _turn_usage(blob: bytes) -> dict | None:
     return max(records, key=lambda r: r["input"] + r["cached"] + r["reasoning"] + r["output"])
 
 
-def db_token_state(db_path: str | os.PathLike[str]) -> tuple[str, dict | None]:
+class DbTokenState(NamedTuple):
+    """One read of an ``agy`` DB; ``tokens``/``turns`` are set only when ``ready``."""
+
+    state: str
+    tokens: dict | None = None
+    turns: int | None = None
+
+
+def db_token_state(db_path: str | os.PathLike[str]) -> DbTokenState:
     """Read canonical token usage from an ``agy`` conversation DB.
 
     Returns:
-        A ``(state, tokens)`` tuple so the caller can handle the async flush:
-
-        * ``("ready", tokens)`` — usage decoded; ``tokens`` is the canonical dict.
-        * ``("pending", None)`` — an ``agy`` DB whose usage rows have not flushed
-          yet (retry after a short wait).
-        * ``("undecodable", None)`` — usage rows exist but none matches the
-          expected layout (schema drift; retrying will not help).
-        * ``("absent", None)`` — no DB, not an ``agy`` DB, or unreadable.
-
-    Buckets are summed per-turn across ``gen_metadata``. ``cached`` is a genuine
-    ``0`` when no turn hit the cache (protobuf omits the field when zero);
-    ``cache_write`` is always ``None``. ``total`` is the full footprint
-    (input + cached + reasoning + output), the same quantity as Gemini's
-    provider ``total_tokens``.
+        A :class:`DbTokenState`. Only ``pending`` is worth retrying — the flush
+        is async; ``undecodable`` is schema drift and ``absent`` is terminal.
+        Buckets sum per turn across ``gen_metadata``; ``cached`` is a genuine
+        ``0`` (protobuf omits it when zero) and ``cache_write`` always ``None``.
     """
     if not db_path or not os.path.exists(db_path):
-        return "absent", None
+        return DbTokenState("absent")
     # The DB is read during agy's post-exit flush window, so a read can hit a
     # locked/half-written image (OperationalError/DatabaseError). Those are
     # transient -> "pending" so the poll retries; only genuinely unusable DBs
@@ -435,17 +428,20 @@ def db_token_state(db_path: str | os.PathLike[str]) -> tuple[str, dict | None]:
     try:
         con = sqlite3.connect(f"file:{os.fspath(db_path)}?mode=ro", uri=True)
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
-        return "pending", None
+        return DbTokenState("pending")
     except sqlite3.Error:
-        return "absent", None
+        return DbTokenState("absent")
 
     totals = {"input": 0, "cached": 0, "reasoning": 0, "output": 0}
     saw_row = False
-    seen_turn = False
+    # One decoded usage record per model round-trip, so the count is model_turns.
+    turns = 0
     try:
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "gen_metadata" not in tables:
-            return ("pending", None) if tables & _AGY_DB_TABLES else ("absent", None)
+            if tables & _AGY_DB_TABLES:
+                return DbTokenState("pending")
+            return DbTokenState("absent")
         # Stream the cursor: peak memory is one blob, not the whole turn history.
         for (blob,) in con.execute("SELECT data FROM gen_metadata ORDER BY idx"):
             saw_row = True
@@ -454,20 +450,22 @@ def db_token_state(db_path: str | os.PathLike[str]) -> tuple[str, dict | None]:
             usage = _turn_usage(blob)
             if usage is None:
                 continue
-            seen_turn = True
+            turns += 1
             for key in totals:
                 totals[key] += usage[key]
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
-        return "pending", None
+        return DbTokenState("pending")
     except sqlite3.Error:
-        return "absent", None
+        return DbTokenState("absent")
     finally:
         con.close()
 
     if not saw_row:
-        return "pending", None  # table created but rows not flushed yet
-    if not seen_turn:
-        return "undecodable", None  # rows flushed, but no usage record matched
+        # table created but rows not flushed yet
+        return DbTokenState("pending")
+    if not turns:
+        # rows flushed, but no usage record matched
+        return DbTokenState("undecodable")
     tokens = empty_tokens()
     tokens.update(
         input=totals["input"],
@@ -476,4 +474,4 @@ def db_token_state(db_path: str | os.PathLike[str]) -> tuple[str, dict | None]:
         output=totals["output"],
         total=totals["input"] + totals["cached"] + totals["reasoning"] + totals["output"],
     )
-    return "ready", tokens
+    return DbTokenState("ready", tokens, turns)

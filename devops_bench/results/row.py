@@ -34,6 +34,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from devops_bench.agents.result import TerminalReason
+
 __all__ = ["SCHEMA_VERSION", "Manifest", "ResultRow"]
 
 #: Version of the ``rows.json`` / ``manifest.json`` contract. Bump on any
@@ -64,6 +66,7 @@ class Manifest(BaseModel):
             ``api``).
         augmentation: Capability tokens active for the run (e.g.
             ``["mcp", "skills"]``); an empty list denotes the baseline arm.
+        timeout_sec: Per-task wall-clock budget, or ``None`` when uncapped.
     """
 
     model_config = _MODEL_CONFIG
@@ -75,6 +78,7 @@ class Manifest(BaseModel):
     model: str
     harness: str
     augmentation: list[str]
+    timeout_sec: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``manifest.json``."""
@@ -95,6 +99,9 @@ class ResultRow(BaseModel):
         setup_id: Run arm id; matches :attr:`Manifest.setup_id`.
         model: Model identifier; matches :attr:`Manifest.model`.
         harness: Canonical harness key; matches :attr:`Manifest.harness`.
+        served_model: The model that actually answered; ``""`` when unreported.
+            ``model`` is only what was *asked* for. Comma-joined in first-seen
+            order when several served the run, which is the failover signal.
         augmentation: Capability tokens; matches :attr:`Manifest.augmentation`.
         run_id: Run directory suffix; matches :attr:`Manifest.run_id`.
         t: UTC ISO-8601 run timestamp; matches :attr:`Manifest.t`.
@@ -131,7 +138,14 @@ class ResultRow(BaseModel):
         scoring_version: Scoring-framework version that produced ``outcome_score``
             (e.g. ``"v1"``); ``""`` for rows written before the framework landed.
         tool_score: Tool-invocation judge score in ``[0, 1]``, or ``None``.
+        tool_calls: Tool calls in the trajectory, or ``None`` when none was
+            captured. The trajectory is too large to aggregate at dashboard time.
+        tool_errors: How many of those returned an error.
+        model_turns: Model round-trips, or ``None`` when the harness cannot
+            delimit them. Not ``tool_calls``: one turn can issue several or none.
         latency_sec: Agent wall-clock seconds for the iteration.
+        tool_wait_sec: How much of ``latency_sec`` went on tool calls, concurrent
+            calls counted once; ``None`` when the harness reported no timings.
         input_tokens: Non-cached prompt token count, or ``None`` when
             unreported. (Historical records that predate the canonical token
             schema may include cached tokens here.)
@@ -146,6 +160,11 @@ class ResultRow(BaseModel):
         total_tokens: Provider-reported or bucket-sum total, or ``None`` when
             unreported. Semantics vary for pre-canonical records.
         status: Terminal record status, ``"success"`` or ``"failed"``.
+        terminal_reason: Why the *agent* stopped. Distinct from ``status``, which
+            describes the record: a run killed at its budget is still
+            ``status: "success"``.
+        timeout_sec: Matches :attr:`Manifest.timeout_sec`; duplicated here because
+            ingest uploads ``rows.json`` alone and never reads the manifest.
         validated: Whether the task is vetted as correct and eligible for the
             leaderboard; ingest gates promotion on this (default ``False``).
     """
@@ -155,6 +174,7 @@ class ResultRow(BaseModel):
     setup_id: str
     model: str
     harness: str
+    served_model: str = ""
     augmentation: list[str]
     run_id: str
     t: str
@@ -168,7 +188,11 @@ class ResultRow(BaseModel):
     catastrophic_kinds: list[str] = Field(default_factory=list)
     scoring_version: str = ""
     tool_score: float | None
+    tool_calls: int | None = None
+    tool_errors: int | None = None
+    model_turns: int | None = None
     latency_sec: float
+    tool_wait_sec: float | None = None
     input_tokens: int | None
     output_tokens: int | None
     cached_tokens: int | None = None
@@ -176,6 +200,8 @@ class ResultRow(BaseModel):
     cache_write_tokens: int | None = None
     total_tokens: int | None = None
     status: str
+    terminal_reason: TerminalReason = ""
+    timeout_sec: float | None = None
     validated: bool = False
 
     def to_dict(self) -> dict[str, Any]:

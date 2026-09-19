@@ -198,13 +198,11 @@ A2A_EVENT: dict[str, Any] = {
 
 
 def test_parse_event_stream_folds_call_and_response() -> None:
-    output, trajectory, tokens, errors = parsing.parse_event_stream(
-        [CALL_EVENT, RESPONSE_EVENT, FINAL_EVENT]
-    )
+    parsed = parsing.parse_event_stream([CALL_EVENT, RESPONSE_EVENT, FINAL_EVENT])
 
-    assert output == "Scaled web to 3 replicas."
-    assert errors == []
-    assert trajectory == [
+    assert parsed.output == "Scaled web to 3 replicas."
+    assert parsed.errors == []
+    assert parsed.trajectory == [
         {
             "name": "scale_deployment",
             "args": {"name": "web", "replicas": 3},
@@ -213,19 +211,21 @@ def test_parse_event_stream_folds_call_and_response() -> None:
         }
     ]
     # Usage is per LLM call, so the run total is the sum of both blocks.
-    assert tokens["input"] == 300
-    assert tokens["output"] == 30
-    assert tokens["total"] == 330
-    assert tokens["cached"] is None
-    assert tokens["cache_write"] is None
+    assert parsed.tokens["input"] == 300
+    assert parsed.tokens["output"] == 30
+    assert parsed.tokens["total"] == 330
+    assert parsed.tokens["cached"] is None
+    assert parsed.tokens["cache_write"] is None
+    # ...and the same two blocks are the two model round-trips.
+    assert parsed.model_turns == 2
 
 
 def test_parse_event_stream_reads_mcp_result_text_and_success() -> None:
-    _, trajectory, _, errors = parsing.parse_event_stream([MCP_CALL_EVENT, MCP_RESPONSE_EVENT])
+    parsed = parsing.parse_event_stream([MCP_CALL_EVENT, MCP_RESPONSE_EVENT])
 
-    assert errors == []
-    assert trajectory[0]["result"] == "cluster prod-1 is HEALTHY"
-    assert trajectory[0]["status"] == "completed"
+    assert parsed.errors == []
+    assert parsed.trajectory[0]["result"] == "cluster prod-1 is HEALTHY"
+    assert parsed.trajectory[0]["status"] == "completed"
 
 
 def test_parse_event_stream_marks_mcp_is_error_as_failed() -> None:
@@ -234,19 +234,17 @@ def test_parse_event_stream_marks_mcp_is_error_as_failed() -> None:
     response["isError"] = True
     response["content"] = [{"type": "text", "text": "permission denied"}]
 
-    _, trajectory, _, _ = parsing.parse_event_stream([MCP_CALL_EVENT, failed])
+    parsed = parsing.parse_event_stream([MCP_CALL_EVENT, failed])
 
-    assert trajectory[0]["status"] == "error"
-    assert trajectory[0]["result"] == "permission denied"
+    assert parsed.trajectory[0]["status"] == "error"
+    assert parsed.trajectory[0]["result"] == "permission denied"
 
 
 def test_parse_event_stream_marks_adk_error_payload_as_failed() -> None:
     failed = copy.deepcopy(RESPONSE_EVENT)
     failed["content"]["parts"][0]["function_response"]["response"] = {"error": "boom"}
 
-    _, trajectory, _, _ = parsing.parse_event_stream([CALL_EVENT, failed])
-
-    assert trajectory[0]["status"] == "error"
+    assert parsing.parse_event_stream([CALL_EVENT, failed]).trajectory[0]["status"] == "error"
 
 
 def test_parse_event_stream_keeps_unanswered_calls_as_called() -> None:
@@ -263,20 +261,20 @@ def test_parse_event_stream_keeps_unanswered_calls_as_called() -> None:
     # ADK yields an error event and *then* raises, so both shapes must survive.
     error_event = {"error_code": "RuntimeError", "error_message": "kaboom on 9"}
 
-    output, trajectory, _, errors = parsing.parse_event_stream([parallel, error_event])
+    parsed = parsing.parse_event_stream([parallel, error_event])
 
-    assert [entry["status"] for entry in trajectory] == ["called", "called"]
-    assert [entry["result"] for entry in trajectory] == [None, None]
-    assert output == ""
-    assert errors == ["event 1 reported RuntimeError: kaboom on 9"]
+    assert [entry["status"] for entry in parsed.trajectory] == ["called", "called"]
+    assert [entry["result"] for entry in parsed.trajectory] == [None, None]
+    assert parsed.output == ""
+    assert parsed.errors == ["event 1 reported RuntimeError: kaboom on 9"]
 
 
 def test_parse_event_stream_reports_orphan_tool_response() -> None:
-    _, trajectory, _, errors = parsing.parse_event_stream([RESPONSE_EVENT])
+    parsed = parsing.parse_event_stream([RESPONSE_EVENT])
 
-    assert trajectory == []
-    assert len(errors) == 1
-    assert "matched no pending call" in errors[0]
+    assert parsed.trajectory == []
+    assert len(parsed.errors) == 1
+    assert "matched no pending call" in parsed.errors[0]
 
 
 def test_parse_event_stream_pairs_id_less_calls_in_order() -> None:
@@ -285,10 +283,10 @@ def test_parse_event_stream_pairs_id_less_calls_in_order() -> None:
     resp_a = {"content": {"role": "user", "parts": [{"function_response": {"response": "ra"}}]}}
     resp_b = {"content": {"role": "user", "parts": [{"function_response": {"response": "rb"}}]}}
 
-    _, trajectory, _, errors = parsing.parse_event_stream([call_a, call_b, resp_a, resp_b])
+    parsed = parsing.parse_event_stream([call_a, call_b, resp_a, resp_b])
 
-    assert errors == []
-    assert [(e["name"], e["result"]) for e in trajectory] == [("a", "ra"), ("b", "rb")]
+    assert parsed.errors == []
+    assert [(e["name"], e["result"]) for e in parsed.trajectory] == [("a", "ra"), ("b", "rb")]
 
 
 def test_parse_event_stream_skips_partial_and_thought_text() -> None:
@@ -299,22 +297,24 @@ def test_parse_event_stream_skips_partial_and_thought_text() -> None:
         {"content": {"role": "model", "parts": [{"text": "Scaled."}]}},
     ]
 
-    output, _, _, errors = parsing.parse_event_stream(events)
+    parsed = parsing.parse_event_stream(events)
 
-    assert output == "Scaled."
-    assert errors == []
+    assert parsed.output == "Scaled."
+    assert parsed.errors == []
 
 
 def test_parse_event_stream_reports_non_mapping_event() -> None:
-    _, _, _, errors = parsing.parse_event_stream(["not an event"])
+    parsed = parsing.parse_event_stream(["not an event"])
 
-    assert errors == ["event 0: unexpected type str"]
+    assert parsed.errors == ["event 0: unexpected type str"]
 
 
 def test_parse_event_stream_reports_unavailable_tokens_as_none() -> None:
-    _, _, tokens, _ = parsing.parse_event_stream([MCP_CALL_EVENT, MCP_RESPONSE_EVENT])
+    parsed = parsing.parse_event_stream([MCP_CALL_EVENT, MCP_RESPONSE_EVENT])
 
-    assert set(tokens.values()) == {None}
+    assert set(parsed.tokens.values()) == {None}
+    # No usage block anywhere is "unknown", not a run that skipped the model.
+    assert parsed.model_turns is None
 
 
 def test_parse_event_stream_subtracts_cached_from_input() -> None:
@@ -328,9 +328,9 @@ def test_parse_event_stream_subtracts_cached_from_input() -> None:
         }
     }
 
-    _, _, tokens, _ = parsing.parse_event_stream([event])
+    parsed = parsing.parse_event_stream([event])
 
-    assert tokens == {
+    assert parsed.tokens == {
         "input": 60,
         "cached": 40,
         "cache_write": None,
@@ -345,17 +345,144 @@ def test_parse_event_stream_clamps_over_reported_cache_read() -> None:
         "usage_metadata": {"prompt_token_count": 10, "cached_content_token_count": 40},
     }
 
-    _, _, tokens, _ = parsing.parse_event_stream([event])
+    assert parsing.parse_event_stream([event]).tokens["input"] == 0
 
-    assert tokens["input"] == 0
+
+def test_parse_event_stream_reports_the_model_that_answered() -> None:
+    """``model_version`` is the served id, which need not be the requested one."""
+    first = {**CALL_EVENT, "model_version": "gemini-3-flash-preview"}
+    failed_over = {**FINAL_EVENT, "model_version": "gemini-3-pro"}
+
+    parsed = parsing.parse_event_stream([first, RESPONSE_EVENT, failed_over])
+
+    assert parsed.served_models == ["gemini-3-flash-preview", "gemini-3-pro"]
+
+
+def test_parse_event_stream_reports_no_served_model_when_absent() -> None:
+    assert parsing.parse_event_stream([CALL_EVENT, FINAL_EVENT]).served_models == []
+
+
+def test_parse_event_stream_times_a_tool_call_from_its_event_timestamps() -> None:
+    """ADK stamps epoch seconds on every event, so a call has a real duration."""
+    call = {**CALL_EVENT, "timestamp": 1789425592.927646}
+    response = {**RESPONSE_EVENT, "timestamp": 1789425593.335542}
+
+    parsed = parsing.parse_event_stream([call, response, FINAL_EVENT])
+
+    assert parsed.tool_wait_sec == pytest.approx(0.407896, abs=1e-6)
+
+
+def test_parse_event_stream_counts_concurrent_tool_calls_once() -> None:
+    """ADK yields both responses of a parallel batch as separate events, so the
+    spans overlap: added together they report 4s of tool time for a batch that
+    took 3s of wall clock.
+    """
+    batch = {
+        "content": {
+            "parts": [
+                {"function_call": {"id": "a1", "name": "a", "args": {}}},
+                {"function_call": {"id": "a2", "name": "b", "args": {}}},
+            ],
+            "role": "model",
+        },
+        "timestamp": 1000.0,
+    }
+    resp_a = {
+        "content": {"role": "user", "parts": [{"function_response": {"id": "a1", "response": {}}}]},
+        "timestamp": 1002.0,
+    }
+    resp_b = {
+        "content": {"role": "user", "parts": [{"function_response": {"id": "a2", "response": {}}}]},
+        "timestamp": 1003.0,
+    }
+
+    assert parsing.parse_event_stream([batch, resp_a, resp_b]).tool_wait_sec == 3.0
+
+
+def test_parse_event_stream_reports_no_tool_wait_without_timestamps() -> None:
+    """Untimed is ``None``: a 0.0 would read as "tools returned instantly"."""
+    assert parsing.parse_event_stream([CALL_EVENT, RESPONSE_EVENT]).tool_wait_sec is None
+
+
+def test_parse_event_stream_does_not_time_an_orphan_response() -> None:
+    """An orphan response has no start, and pairing it with the previous call's
+    would report the gap between two unrelated events as tool time.
+    """
+    orphan = {**RESPONSE_EVENT, "timestamp": 2000.0}
+
+    parsed = parsing.parse_event_stream([orphan])
+
+    assert parsed.tool_wait_sec is None
+    assert "matched no pending call" in parsed.errors[0]
+
+
+def test_parse_event_stream_keeps_id_less_call_starts_in_step() -> None:
+    """Without a placeholder in the queue for the untimed id-less call, ``b``'s
+    response pairs with the *timed* ``b`` start and reports the whole two-call
+    stretch as one span.
+    """
+    call_a = {"content": {"role": "model", "parts": [{"function_call": {"name": "a", "args": {}}}]}}
+    call_b = {
+        "content": {"role": "model", "parts": [{"function_call": {"name": "b", "args": {}}}]},
+        "timestamp": 100.0,
+    }
+    resp_a = {
+        "content": {"role": "user", "parts": [{"function_response": {"response": "ra"}}]},
+        "timestamp": 105.0,
+    }
+    resp_b = {
+        "content": {"role": "user", "parts": [{"function_response": {"response": "rb"}}]},
+        "timestamp": 107.0,
+    }
+
+    parsed = parsing.parse_event_stream([call_a, call_b, resp_a, resp_b])
+
+    assert [(e["name"], e["result"]) for e in parsed.trajectory] == [("a", "ra"), ("b", "rb")]
+    # Only ``b`` was timed: 100 -> 107. ``a`` contributes nothing.
+    assert parsed.tool_wait_sec == 7.0
+
+
+def test_parse_event_stream_matches_reused_call_ids_in_emission_order() -> None:
+    """Two live calls can share an id. Overwriting pairs the first call's result
+    with the second call's start, reporting a tool wait shorter than the run and
+    inventing an orphan error.
+    """
+    call_a = {
+        "content": {"role": "model", "parts": [{"function_call": {"id": "x", "name": "a"}}]},
+        "timestamp": 1000.0,
+    }
+    call_b = {
+        "content": {"role": "model", "parts": [{"function_call": {"id": "x", "name": "b"}}]},
+        "timestamp": 1005.0,
+    }
+    resp_a = {
+        "content": {
+            "role": "user",
+            "parts": [{"function_response": {"id": "x", "response": "ra"}}],
+        },
+        "timestamp": 1010.0,
+    }
+    resp_b = {
+        "content": {
+            "role": "user",
+            "parts": [{"function_response": {"id": "x", "response": "rb"}}],
+        },
+        "timestamp": 1020.0,
+    }
+
+    parsed = parsing.parse_event_stream([call_a, call_b, resp_a, resp_b])
+
+    assert parsed.errors == []
+    assert [(e["name"], e["result"]) for e in parsed.trajectory] == [("a", "ra"), ("b", "rb")]
+    assert parsed.tool_wait_sec == 20.0
 
 
 def test_parse_event_stream_prefers_the_a2a_status_message() -> None:
-    output, trajectory, _, errors = parsing.parse_event_stream([A2A_EVENT])
+    parsed = parsing.parse_event_stream([A2A_EVENT])
 
-    assert output == "RCA: node memory pressure evicted the pod."
-    assert trajectory == []
-    assert errors == []
+    assert parsed.output == "RCA: node memory pressure evicted the pod."
+    assert parsed.trajectory == []
+    assert parsed.errors == []
 
 
 def test_parse_event_stream_reports_a_failed_a2a_task() -> None:
@@ -370,10 +497,10 @@ def test_parse_event_stream_reports_a_failed_a2a_task() -> None:
     status["state"] = "TASK_STATE_FAILED"
     status["message"]["parts"] = [{"text": "the metrics backend is unreachable"}]
 
-    output, _, _, errors = parsing.parse_event_stream([event])
+    parsed = parsing.parse_event_stream([event])
 
-    assert output == ""
-    assert errors == ["event 0: remote A2A task failed"]
+    assert parsed.output == ""
+    assert parsed.errors == ["event 0: remote A2A task failed"]
 
 
 @pytest.mark.parametrize("state", ["TASK_STATE_FAILED", "TASK_STATE_CANCELED", "rejected"])
@@ -388,10 +515,12 @@ def test_parse_event_stream_keeps_a_failed_tasks_artifact_out_of_output(state: s
     del event["custom_metadata"]["a2a:response"]["status"]["message"]
     event["custom_metadata"]["a2a:response"]["status"]["state"] = state
 
-    output, _, _, errors = parsing.parse_event_stream([event])
+    parsed = parsing.parse_event_stream([event])
 
-    assert output == ""
-    assert errors == [f"event 0: remote A2A task {state.lower().removeprefix('task_state_')}"]
+    assert parsed.output == ""
+    assert parsed.errors == [
+        f"event 0: remote A2A task {state.lower().removeprefix('task_state_')}"
+    ]
 
 
 def test_parse_event_stream_falls_back_to_content_on_a_completed_task_with_no_message() -> None:
@@ -403,10 +532,10 @@ def test_parse_event_stream_falls_back_to_content_on_a_completed_task_with_no_me
     event = copy.deepcopy(A2A_EVENT)
     del event["custom_metadata"]["a2a:response"]["status"]["message"]
 
-    output, _, _, errors = parsing.parse_event_stream([event])
+    parsed = parsing.parse_event_stream([event])
 
-    assert output == "node-1 mem = 0.97"
-    assert errors == []
+    assert parsed.output == "node-1 mem = 0.97"
+    assert parsed.errors == []
 
 
 def test_parse_event_stream_accepts_a_lowercase_a2a_state() -> None:
@@ -414,9 +543,7 @@ def test_parse_event_stream_accepts_a_lowercase_a2a_state() -> None:
     event = copy.deepcopy(A2A_EVENT)
     event["custom_metadata"]["a2a:response"]["status"]["state"] = "rejected"
 
-    _, _, _, errors = parsing.parse_event_stream([event])
-
-    assert errors == ["event 0: remote A2A task rejected"]
+    assert parsing.parse_event_stream([event]).errors == ["event 0: remote A2A task rejected"]
 
 
 def test_parse_event_stream_falls_back_to_content_without_a_status_message() -> None:
@@ -424,10 +551,10 @@ def test_parse_event_stream_falls_back_to_content_without_a_status_message() -> 
     event = copy.deepcopy(A2A_EVENT)
     event["custom_metadata"]["a2a:response"]["status"] = {"state": "TASK_STATE_WORKING"}
 
-    output, _, _, errors = parsing.parse_event_stream([event])
+    parsed = parsing.parse_event_stream([event])
 
-    assert output == "node-1 mem = 0.97"
-    assert errors == []
+    assert parsed.output == "node-1 mem = 0.97"
+    assert parsed.errors == []
 
 
 def test_parse_event_stream_ignores_a_working_tasks_status_message() -> None:
@@ -444,11 +571,11 @@ def test_parse_event_stream_ignores_a_working_tasks_status_message() -> None:
     status["state"] = "TASK_STATE_WORKING"
     status["message"]["parts"] = [{"text": "Analyzing node pressure..."}]
 
-    output, _, _, errors = parsing.parse_event_stream([working, A2A_EVENT])
+    parsed = parsing.parse_event_stream([working, A2A_EVENT])
 
-    assert "Analyzing node pressure..." not in output
-    assert output.endswith("RCA: node memory pressure evicted the pod.")
-    assert errors == []
+    assert "Analyzing node pressure..." not in parsed.output
+    assert parsed.output.endswith("RCA: node memory pressure evicted the pod.")
+    assert parsed.errors == []
 
 
 @pytest.mark.parametrize("state", ["TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED"])
@@ -459,21 +586,21 @@ def test_parse_event_stream_ignores_a_non_terminal_status_message(state: str) ->
     status["state"] = state
     status["message"]["parts"] = [{"text": "which namespace?"}]
 
-    output, _, _, errors = parsing.parse_event_stream([event])
+    parsed = parsing.parse_event_stream([event])
 
-    assert output == "node-1 mem = 0.97"
-    assert errors == []
+    assert parsed.output == "node-1 mem = 0.97"
+    assert parsed.errors == []
 
 
 def test_parse_event_stream_still_folds_tool_calls_on_an_a2a_event() -> None:
     event = copy.deepcopy(A2A_EVENT)
     event["content"]["parts"].append(CALL_EVENT["content"]["parts"][0])
 
-    output, trajectory, _, errors = parsing.parse_event_stream([event, RESPONSE_EVENT])
+    parsed = parsing.parse_event_stream([event, RESPONSE_EVENT])
 
-    assert output == "RCA: node memory pressure evicted the pod."
-    assert errors == []
-    assert [(entry["name"], entry["status"]) for entry in trajectory] == [
+    assert parsed.output == "RCA: node memory pressure evicted the pod."
+    assert parsed.errors == []
+    assert [(entry["name"], entry["status"]) for entry in parsed.trajectory] == [
         ("scale_deployment", "completed")
     ]
 
@@ -1040,11 +1167,40 @@ def test_drive_finishes_teardown_after_the_budget_expires(
 
     monkeypatch.setattr(adk_runners, "InMemoryRunner", SlowClosingRunner)
 
-    events, errors = adk_mod._drive(object(), "prompt", 0.02)
+    events, errors, reason = adk_mod._drive(object(), "prompt", 0.02)
 
     assert SlowClosingRunner.progress == ["started", "finished"]
     assert events == []
     assert errors == ["ADK run exceeded the 0.02s budget"]
+    # The budget expiring is an efficiency ceiling, not a capability failure.
+    assert reason == "timeout"
+
+
+class InnerTimeoutRunner(SlowClosingRunner):
+    """Runner whose provider call raises ``TimeoutError`` well inside the budget."""
+
+    async def create_session(self, **kwargs: object) -> SimpleNamespace:
+        raise TimeoutError("provider read timed out")
+
+
+@requires_adk
+@pytest.mark.parametrize("budget", [600.0, None])
+def test_drive_reports_an_inner_timeout_as_an_error_not_the_budget(
+    monkeypatch: pytest.MonkeyPatch, budget: float | None
+) -> None:
+    """``socket.timeout`` has been a ``TimeoutError`` since 3.10, so the handler for
+    the budget expiring also sees every provider read timeout — and with no budget
+    at all it still fires, stamping ``timeout`` on a row whose ``timeoutSec`` is
+    ``null``.
+    """
+    import google.adk.runners as adk_runners
+
+    monkeypatch.setattr(adk_runners, "InMemoryRunner", InnerTimeoutRunner)
+
+    _events, errors, reason = adk_mod._drive(object(), "prompt", budget)  # noqa: SLF001
+
+    assert reason == "error"
+    assert errors == ["ADK run failed: TimeoutError: provider read timed out"]
 
 
 def test_close_quietly_finishes_under_repeated_cancellation() -> None:
@@ -1116,6 +1272,12 @@ def test_execute_drives_a_real_adk_agent_end_to_end(agent_dir: pathlib.Path) -> 
     ]
     assert result.tokens["total"] == 220
     assert result.latency > 0
+    assert result.terminal_reason == "completed"
+    # The stub answers twice: the tool call and the final text.
+    assert result.model_turns == 2
+    # The tool returns instantly, but it *was* timed — 0.0, not unknown.
+    assert result.tool_wait_sec is not None
+    assert result.tool_wait_sec <= result.latency
     assert result.metadata["agent_name"] == "fixture_agent"
     assert result.metadata["event_count"] == 3
 
@@ -1190,3 +1352,5 @@ def test_execute_keeps_the_partial_trajectory_when_a_tool_raises(agent_dir: path
     assert any("kaboom" in message for message in result.errors)
     assert [entry["name"] for entry in result.trajectory] == ["scale_deployment"]
     assert result.trajectory[0]["status"] == "called"
+    # The agent broke, which is not the same signal as its budget expiring.
+    assert result.terminal_reason == "error"

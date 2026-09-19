@@ -24,6 +24,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 from collections.abc import Iterator
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -476,28 +477,22 @@ async def _close_quietly(runner: Any) -> None:
         await closing
 
 
-def _drive(root_agent: Any, prompt: str, timeout_sec: float | None) -> tuple[list[dict], list[str]]:
+def _drive(
+    root_agent: Any, prompt: str, timeout_sec: float | None
+) -> tuple[list[dict], list[str], str]:
     """Run the agent to completion and collect its serialized event stream.
 
-    ``events`` is populated as the stream arrives rather than at the end: ADK
-    surfaces a failing tool by yielding an error event and *then* raising out of
-    the iterator, so a run that dies mid-way still has a partial trajectory
-    worth scoring. Both the timeout and the failure are recorded as errors and
-    returned alongside whatever was collected.
-
-    Args:
-        root_agent: The prepared ADK agent.
-        prompt: Task prompt to send as the user message.
-        timeout_sec: Wall-clock budget, or ``None`` for no limit.
-
-    Returns:
-        A ``(events, errors)`` tuple.
+    ``events`` fills as the stream arrives: ADK yields an error event and *then*
+    raises, so a run that dies mid-way still has a trajectory worth scoring.
+    ``terminal_reason`` is returned because a timeout and a failure both leave
+    one, so ``errors`` alone cannot tell them apart.
     """
     from google.adk.runners import InMemoryRunner
     from google.genai import types
 
     events: list[dict] = []
     errors: list[str] = []
+    reason = "completed"
 
     async def _consume() -> None:
         runner = InMemoryRunner(root_agent, app_name=_APP_NAME)
@@ -514,18 +509,27 @@ def _drive(root_agent: Any, prompt: str, timeout_sec: float | None) -> tuple[lis
             await _close_quietly(runner)
 
     async def _main() -> None:
+        nonlocal reason
+        start = time.monotonic()
         try:
             if timeout_sec is None:
                 await _consume()
             else:
                 await asyncio.wait_for(_consume(), timeout=timeout_sec)
-        except TimeoutError:
-            errors.append(f"ADK run exceeded the {timeout_sec}s budget")
+        except TimeoutError as exc:
+            # An earlier TimeoutError came from inside the run, so it is a failure.
+            if timeout_sec is not None and time.monotonic() - start >= timeout_sec:
+                errors.append(f"ADK run exceeded the {timeout_sec}s budget")
+                reason = "timeout"
+            else:
+                errors.append(f"ADK run failed: {type(exc).__name__}: {exc}")
+                reason = "error"
         except Exception as exc:  # noqa: BLE001 - keep the partial trajectory
             errors.append(f"ADK run failed: {type(exc).__name__}: {exc}")
+            reason = "error"
 
     asyncio.run(_main())
-    return events, errors
+    return events, errors, reason
 
 
 @base.AGENTS.register("adk")
@@ -622,21 +626,25 @@ class AdkAgent(base.AgentHarness):
         prepared, metadata, errors = self._prepare(root_agent)
         if workspace_path is not None:
             metadata["workspace"] = str(workspace_path)
+        # Bracket the agent run alone; resolving and preparing the tree is setup.
+        started = time.monotonic()
         with _in_workspace(workspace_path):
-            events, run_errors = _drive(prepared, prompt, self.config.timeout_sec)
+            events, run_errors, terminal_reason = _drive(prepared, prompt, self.config.timeout_sec)
+        agent_sec = time.monotonic() - started
         errors.extend(run_errors)
 
-        output, trajectory, tokens, parse_errors = parsing.parse_event_stream(events)
-        errors.extend(parse_errors)
+        parsed = parsing.parse_event_stream(events)
+        errors.extend(parsed.errors)
         metadata["event_count"] = len(events)
 
+        output = parsed.output
         if not output and errors:
             output = f"Error: {errors[0]}"
 
-        return agents_result.AgentResult(
+        return parsed.to_result(
+            latency=agent_sec,
+            terminal_reason=terminal_reason,
             output=output,
-            trajectory=trajectory,
-            tokens=tokens,
             errors=errors,
             metadata=metadata,
         )

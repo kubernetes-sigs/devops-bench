@@ -26,6 +26,8 @@ import re
 from pathlib import Path
 
 from devops_bench.agents.result import ToolCall
+from devops_bench.agents.shared.telemetry import ParsedRun, note_model
+from devops_bench.agents.shared.timing import merged_span_sec, parse_event_time
 from devops_bench.core import get_logger
 
 __all__ = ["parse_trajectory_export"]
@@ -60,42 +62,70 @@ def _join_text(content: object) -> str:
     return ""
 
 
-def _accumulate_usage(acc: dict, usage: dict) -> None:
+def _accumulate_usage(acc: dict, usage: dict, *, top_level: bool = True) -> None:
     """Sum one turn's token usage into a running accumulator, in place.
 
-    OpenClaw emits a ``model.completed`` event per turn (per model call), each
-    carrying that turn's ``usage``, so the session total is the sum across turns
-    rather than the value of any single ``model.completed``. Numeric fields are
-    added; nested mappings (e.g. a ``cost`` breakdown) are summed recursively;
-    booleans and other non-numeric values are ignored.
-
-    Args:
-        acc: Accumulator mutated in place.
-        usage: A single turn's usage mapping.
+    One ``model.completed`` per turn, so the session total is the sum of them.
+    Top-level ``cacheWrite`` is left to :func:`_resolve_cache_write`, but not
+    nested: a ``cost`` breakdown itemizes cache-write *dollars*, which have no
+    second source.
     """
     for key, value in usage.items():
-        if isinstance(value, bool):
+        if (top_level and key == "cacheWrite") or isinstance(value, bool):
             continue
         if isinstance(value, (int, float)):
             acc[key] = acc.get(key, 0) + value
         elif isinstance(value, dict):
             nested = acc.setdefault(key, {})
             if isinstance(nested, dict):
-                _accumulate_usage(nested, value)
+                _accumulate_usage(nested, value, top_level=False)
 
 
-def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, list[str]]:
+def _accumulate_cache_write(acc: dict, usage: object) -> None:
+    """Sum one event's ``cacheWrite`` into ``acc``, in place."""
+    if not isinstance(usage, dict):
+        return
+    written = usage.get("cacheWrite")
+    if isinstance(written, (int, float)) and not isinstance(written, bool):
+        acc["cacheWrite"] = acc.get("cacheWrite", 0) + written
+
+
+def _resolve_cache_write(acc: dict, rollup: dict, per_call: dict) -> None:
+    """Settle the ``cacheWrite`` bucket on whichever event reported it.
+
+    Today's rollup omits ``cacheWrite`` from its buckets *and* its total, so a
+    per-call value is added into the total; a rollup value is taken as-is.
+    """
+    written = rollup.get("cacheWrite")
+    if isinstance(written, (int, float)):
+        acc["cacheWrite"] = written
+        return
+    written = per_call.get("cacheWrite")
+    if not isinstance(written, (int, float)):
+        return
+    acc["cacheWrite"] = written
+    for key in ("total", "totalTokens"):
+        current = acc.get(key)
+        if isinstance(current, (int, float)):
+            acc[key] = current + written
+
+
+def parse_trajectory_export(jsonl_text: str) -> ParsedRun:
     """Parse an ``oc sessions export-trajectory`` ``events.jsonl`` into the canonical shape.
 
     The export bundle's ``events.jsonl`` is line-delimited JSON. Each line is an
     event with a dotted ``type`` and an event-specific ``data`` payload:
 
     - ``tool.call`` -> ``data.name`` / ``data.arguments`` / ``data.toolCallId``
+      (+ the event's top-level ``ts``, paired with the result's to time the call)
     - ``tool.result`` -> ``data.message`` with ``toolCallId`` + ``content[].text``
       (+ ``isError`` / ``details.status``)
     - ``model.completed`` -> ``data.usage`` (tokens) + ``data.assistantTexts``
       (the agent's final answer)
     - ``assistant.message`` -> ``data.message.content[].text`` (fallback output)
+      + ``data.message.model``, the model that actually answered the call
+      + ``data.message.usage.cacheWrite``, the only place cache-write tokens
+      appear (``model.completed`` omits that one bucket)
 
     Matching ``tool.call`` / ``tool.result`` pairs (keyed on ``toolCallId``) fold
     into one :class:`ToolCall` so the metrics layer sees the canonical trajectory
@@ -108,17 +138,23 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
         jsonl_text: Raw contents of ``events.jsonl`` inside the export bundle.
 
     Returns:
-        A ``(trajectory, tokens, output, errors)`` tuple. ``trajectory`` is a
-        list of ``ToolCall.to_dict()`` mappings; ``tokens`` is the usage summed
-        across every ``model.completed`` turn (not just the last); ``output`` is
-        the agent's final answer text (``""`` when none was found).
+        A :class:`~devops_bench.agents.shared.telemetry.ParsedRun`. ``tokens``
+        sums every ``model.completed`` turn. Reasoning stays ``None``: openclaw
+        reports none at any thinking level. ``model_turns`` counts
+        ``assistant.message`` events, which is not ``len(trajectory)``.
     """
     tokens: dict = {}
+    rollup_cache_write: dict = {}
+    per_call_cache_write: dict = {}
     errors: list[str] = []
     output = ""
     fallback_output: list[str] = []
-    pending: dict[str, ToolCall] = {}
+    # FIFO per id: reused ids match in emission order instead of overwriting.
+    pending: dict[str, list[tuple[ToolCall, float | None]]] = {}
     trajectory: list[ToolCall] = []
+    model_turns = 0
+    spans: list[tuple[float, float]] = []
+    served_models: list[str] = []
 
     for lineno, raw in enumerate(jsonl_text.splitlines(), start=1):
         line = raw.strip()
@@ -133,6 +169,7 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
             continue
 
         etype = entry.get("type") or entry.get("event")
+        event_time = parse_event_time(entry.get("ts"))
         data = entry.get("data")
         if not isinstance(data, dict):
             data = {}
@@ -141,13 +178,13 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
             call_id = data.get("toolCallId") or data.get("id") or ""
             args = data.get("arguments")
             call = ToolCall(
-                name=data.get("name", ""),
+                name=str(data.get("name") or ""),
                 args=args if isinstance(args, dict) else {},
                 status="called",
             )
             trajectory.append(call)
             if call_id:
-                pending[str(call_id)] = call
+                pending.setdefault(str(call_id), []).append((call, event_time))
         elif etype == "tool.result":
             msg = data.get("message") if isinstance(data.get("message"), dict) else data
             call_id = msg.get("toolCallId") or msg.get("id") or ""
@@ -156,8 +193,9 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
             is_error = bool(msg.get("isError")) or (
                 str(details.get("status", "")).lower() in ("error", "failed", "failure")
             )
-            target = pending.pop(str(call_id), None) if call_id else None
-            if target is None:
+            queue = pending.get(str(call_id)) if call_id else None
+            entry = queue.pop(0) if queue else None
+            if entry is None:
                 # Drop the orphan from the trajectory but surface it on errors.
                 # Synthesizing a free-floating result entry would break the
                 # "every trajectory item is a real ToolCall the model issued"
@@ -171,27 +209,43 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
                     f"(id={call_id!r}, content={preview!r})"
                 )
                 continue
+            target, started = entry
             target.result = text
             target.status = "error" if is_error else "completed"
+            if started is not None and event_time is not None:
+                spans.append((started, event_time))
         elif etype == "model.completed":
             usage = data.get("usage")
             if isinstance(usage, dict):
                 _accumulate_usage(tokens, usage)
+                _accumulate_cache_write(rollup_cache_write, usage)
             texts = data.get("assistantTexts")
             if isinstance(texts, list):
                 joined = "\n".join(t for t in texts if isinstance(t, str))
                 if joined:
                     output = joined
         elif etype == "assistant.message":
+            model_turns += 1
             msg = data.get("message") if isinstance(data.get("message"), dict) else {}
+            note_model(served_models, msg.get("model"))
+            _accumulate_cache_write(per_call_cache_write, msg.get("usage"))
             txt = _join_text(msg.get("content"))
             if txt:
                 fallback_output.append(txt)
 
     if not output and fallback_output:
         output = "\n".join(fallback_output)
+    _resolve_cache_write(tokens, rollup_cache_write, per_call_cache_write)
 
-    return [call.to_dict() for call in trajectory], tokens, output, errors
+    return ParsedRun(
+        trajectory=[call.to_dict() for call in trajectory],
+        tokens=tokens,
+        output=output,
+        errors=errors,
+        model_turns=model_turns or None,
+        tool_wait_sec=merged_span_sec(spans),
+        served_models=served_models,
+    )
 
 
 def _read_export_bundle(workspace: Path) -> tuple[str, list[str]]:
