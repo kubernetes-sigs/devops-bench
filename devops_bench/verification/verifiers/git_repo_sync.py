@@ -50,8 +50,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import model_validator
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 from devops_bench.verification.base import (
     VERIFIERS,
@@ -77,6 +78,11 @@ __all__ = ["GitRepoSyncVerifier"]
 
 _VALUE_OPS = ("eq", "ne", "gt", "gte", "lt", "lte", "contains", "matches")
 _SET_OPS = ("exists", "absent")
+
+# YAML 1.2 semantics (matching tasks/loader.py): only ``true``/``false`` are
+# booleans, so a manifest key like ``on:`` or a value of ``no`` stays a string
+# and is compared as the agent actually wrote it.
+_yaml = YAML(typ="safe")
 
 
 class _GitError(RuntimeError):
@@ -228,8 +234,8 @@ class GitRepoSyncVerifier(BaseVerifier):
             return "error", f"could not read {self.file!r} from {repo}: {exc}", raw
 
         try:
-            docs = [d for d in yaml.safe_load_all(content) if d is not None]
-        except yaml.YAMLError as exc:
+            docs = [d for d in _yaml.load_all(content) if d is not None]
+        except YAMLError as exc:
             # The agent left the file unparseable. That is an observation about
             # the repository's state, not a harness failure.
             return "fail", f"{self.file!r} at {self.ref} is not valid YAML: {exc}", raw
