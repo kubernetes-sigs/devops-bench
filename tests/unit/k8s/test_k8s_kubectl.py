@@ -115,6 +115,32 @@ def test_get_resource_with_name(mocker: MockerFixture) -> None:
     assert argv == ["kubectl", "get", "deployment", "my-dep", "-o", "json"]
 
 
+def test_get_resource_lists_across_every_namespace(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout='{"items": []}'),
+    )
+
+    kubectl.get_resource("pods", all_namespaces=True)
+
+    assert mock_run.call_args.args[0] == ["kubectl", "get", "pods", "-o", "json", "-A"]
+
+
+def test_get_resource_prefers_an_explicit_namespace_over_all(mocker: MockerFixture) -> None:
+    """``-n`` and ``-A`` together are an error, and the caller who named a
+    namespace meant it."""
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout='{"items": []}'),
+    )
+
+    kubectl.get_resource("pods", namespace="default", all_namespaces=True)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[-2:] == ["-n", "default"]
+    assert "-A" not in argv
+
+
 def test_get_resource_forwards_timeout(mocker: MockerFixture) -> None:
     payload = {"items": []}
     mock_run = mocker.patch(
@@ -145,6 +171,65 @@ def test_apply_builds_argv(mocker: MockerFixture) -> None:
 
     argv = mock_run.call_args.args[0]
     assert argv == ["kubectl", "apply", "-f", "/manifests/app.yaml", "-n", "staging"]
+
+
+def test_delete_builds_argv_and_ignores_not_found_by_default(mocker: MockerFixture) -> None:
+    # Not-found tolerance is the default because the callers are teardown
+    # paths, where "already gone" is success.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.delete("clusterrolebinding", "a", "b", context="kind-bench")
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "delete",
+        "clusterrolebinding",
+        "a",
+        "b",
+        "--ignore-not-found",
+        "--context",
+        "kind-bench",
+    ]
+
+
+def test_delete_can_skip_waiting_and_surface_not_found(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.delete("pod", "web-0", namespace="prod", ignore_not_found=False, wait=False)
+
+    argv = mock_run.call_args.args[0]
+    assert argv == ["kubectl", "delete", "pod", "web-0", "--wait=false", "-n", "prod"]
+
+
+def test_delete_threads_the_subprocess_timeout(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.delete("namespace", "bench-system", timeout=300)
+
+    assert mock_run.call_args.kwargs["timeout"] == 300
+
+
+def test_delete_refuses_an_empty_name_list(mocker: MockerFixture) -> None:
+    # ``kubectl delete <kind>`` with no name is a no-op kubectl rejects; a
+    # caller who wants --all should have to spell that out, not fall into it.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    with pytest.raises(ValueError):
+        kubectl.delete("pod")
+
+    mock_run.assert_not_called()
+
+
+def test_label_renders_a_none_value_as_removal(mocker: MockerFixture) -> None:
+    # ``key-`` is kubectl's spelling for "remove this label"; a mapping mixing
+    # sets and removals renders each element in its own form.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.label("namespace", "default", {"keep": "1", "drop": None})
+
+    argv = mock_run.call_args.args[0]
+    assert argv == ["kubectl", "label", "namespace", "default", "keep=1", "drop-"]
 
 
 def test_rollout_status_with_timeout(mocker: MockerFixture) -> None:
@@ -358,3 +443,62 @@ def test_is_not_found_matches_both_renderings_only(stderr: str, expected: bool) 
 
 def test_is_not_found_tolerates_an_exception_without_stderr() -> None:
     assert kubectl.is_not_found(RuntimeError("boom")) is False
+
+
+def test_apply_threads_context_into_argv(mocker: MockerFixture) -> None:
+    # Applying a cluster-scoped object against whichever cluster the ambient
+    # current-context happens to name is the failure the pin exists to stop.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.apply("/tmp/manifest.yaml", namespace="prod", context="kind-bench")
+
+    assert mock_run.call_args.args[0] == [
+        "kubectl",
+        "apply",
+        "-f",
+        "/tmp/manifest.yaml",
+        "-n",
+        "prod",
+        "--context",
+        "kind-bench",
+    ]
+
+
+def test_get_resource_pins_context_alongside_kubeconfig(mocker: MockerFixture) -> None:
+    # The kubeconfig overlay alone is not a pin: one file routinely holds
+    # several contexts, so the read still needs to say which.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed("{}"))
+
+    kubectl.get_resource("pods", kubeconfig="/tmp/kc", context="gke_p_us_c")
+
+    assert mock_run.call_args.args[0][-2:] == ["--context", "gke_p_us_c"]
+    assert mock_run.call_args.kwargs["extra_env"] == {"KUBECONFIG": "/tmp/kc"}
+
+
+def test_apply_and_get_resource_omit_the_flag_without_a_context(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed("{}"))
+
+    kubectl.apply("/tmp/manifest.yaml")
+    kubectl.get_resource("pods")
+
+    for call in mock_run.call_args_list:
+        assert "--context" not in call.args[0]
+
+
+# --context pinning. The flags have to land before a bare "--" separator:
+# everything after it belongs to the container command, not to kubectl.
+
+
+def test_context_lands_before_a_bare_separator() -> None:
+    argv = kubectl._insert_context_args(
+        ["kubectl", "exec", "pod/web", "--", "sh", "-c", "echo hi"], "kind-bench"
+    )
+
+    assert argv.index("--context") < argv.index("--")
+
+
+@pytest.mark.parametrize("context", [None, ""])
+def test_no_context_leaves_argv_untouched(context: str | None) -> None:
+    argv = ["kubectl", "get", "pods"]
+
+    assert kubectl._insert_context_args(argv, context) == argv

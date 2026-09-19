@@ -64,6 +64,16 @@ class Manifest(BaseModel):
             ``api``).
         augmentation: Capability tokens active for the run (e.g.
             ``["mcp", "skills"]``); an empty list denotes the baseline arm.
+        sandbox_image: The agent container image reference for a sandboxed
+            run, verbatim from ``BENCH_SANDBOX_IMAGE``. ``None`` on an
+            unsandboxed arm (or a manifest predating the field).
+        sandbox_image_digest: The resolved content digest of that image
+            (``RepoDigests`` when the image was pulled/pushed, the local image
+            ID otherwise). Recorded because it is otherwise unrecoverable:
+            a mutable tag like ``:dev`` says nothing after the fact, and
+            an A/B comparison between two runs of "the same image" is only
+            evidence when the digests agree. ``None`` when unsandboxed or when
+            the digest could not be resolved (recorded loudly at write time).
     """
 
     model_config = _MODEL_CONFIG
@@ -75,6 +85,8 @@ class Manifest(BaseModel):
     model: str
     harness: str
     augmentation: list[str]
+    sandbox_image: str | None = None
+    sandbox_image_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``manifest.json``."""
@@ -148,6 +160,13 @@ class ResultRow(BaseModel):
         status: Terminal record status, ``"success"`` or ``"failed"``.
         validated: Whether the task is vetted as correct and eligible for the
             leaderboard; ingest gates promotion on this (default ``False``).
+        sandboxed: Whether this task's agent actually ran inside the container
+            boundary. Per-row rather than inferred from the setup's
+            ``sandboxed`` augmentation token, because the two legitimately
+            disagree: within a sandboxed arm a task that declared
+            ``requires_unsandboxed`` runs outside the boundary, and its row
+            must say so. ``None`` when the record predates the field —
+            unknown, which is not the claim ``False`` makes.
     """
 
     model_config = _MODEL_CONFIG
@@ -177,6 +196,7 @@ class ResultRow(BaseModel):
     total_tokens: int | None = None
     status: str
     validated: bool = False
+    sandboxed: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``rows.json``.

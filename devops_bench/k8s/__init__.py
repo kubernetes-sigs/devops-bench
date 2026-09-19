@@ -17,8 +17,11 @@
 from devops_bench.k8s.conditions import poll_until
 from devops_bench.k8s.kubectl import (
     apply,
+    config_value,
+    create_token,
     get_resource,
     is_not_found,
+    label,
     port_forward,
     rollout_status,
     wait,
@@ -26,8 +29,11 @@ from devops_bench.k8s.kubectl import (
 
 __all__ = [
     "apply",
+    "config_value",
+    "create_token",
     "get_resource",
     "is_not_found",
+    "label",
     "poll_until",
     "port_forward",
     "rollout_status",

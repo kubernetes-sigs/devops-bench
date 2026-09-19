@@ -18,13 +18,31 @@ from __future__ import annotations
 
 from typing import Any
 
-from devops_bench.core import ClusterInfo, ConfigError, get_bool, get_env, get_logger
+from devops_bench.core import (
+    ClusterInfo,
+    ConfigError,
+    NetworkPlan,
+    SandboxError,
+    get_bool,
+    get_env,
+    get_logger,
+)
 from devops_bench.core.subprocess import run
 from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
 
 __all__ = ["GcpProvider"]
 
 _log = get_logger("providers.gcp")
+
+
+def _context_name(project: str, location: str, cluster_name: str) -> str:
+    """Return the kubectl context name ``gcloud get-credentials`` writes.
+
+    gcloud derives it from the cluster's own coordinates rather than letting
+    the caller choose, so reconstructing it is the only way to name the
+    context without re-reading the kubeconfig.
+    """
+    return f"gke_{project}_{location}_{cluster_name}"
 
 
 @PROVIDERS.register("gcp")
@@ -81,7 +99,7 @@ class GcpProvider(Provider):
             capture=False,
         )
 
-        context_name = f"gke_{project}_{location}_{cluster_name}"
+        context_name = _context_name(project, location, cluster_name)
         if get_bool("GCP_USE_ADC", False):
             _log.info(
                 "Enabling application default credentials for auth plugin in context %s",
@@ -105,6 +123,43 @@ class GcpProvider(Provider):
 
         return ClusterInfo.from_dict(
             {"name": cluster_name, "location": location, "project": project}
+        )
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Reach a GKE apiserver from inside a container over ordinary routing.
+
+        A GKE endpoint is a real address — public, or VPC-routable from the
+        bastion — so a bridge-networked container reaches it with no network
+        or URL surgery. All this adds is the context pin, so the credential
+        the container is handed is definitely for *this* cluster and not
+        whichever GKE context the operator's kubeconfig last selected.
+
+        Args:
+            cluster_info: The provisioned cluster to reach.
+
+        Returns:
+            A default plan pinned to this cluster's context.
+
+        Raises:
+            SandboxError: When the cluster's project or location is unknown,
+                so its context name cannot be reconstructed. Degrading to an
+                unpinned plan would mint the agent's identity and token on the
+                ambient current-context — whatever cluster the operator's
+                kubeconfig last pointed at, not necessarily this one. Only
+                sandboxed runs reach this method, so failing here cannot
+                affect an ordinary run.
+        """
+        if not (cluster_info.project and cluster_info.location):
+            raise SandboxError(
+                f"GKE cluster {cluster_info.name!r} reported no project/location, so the "
+                "sandbox cannot pin to its kubectl context; refusing rather than "
+                "provisioning the agent's credential against the ambient context, "
+                "which may be a different cluster entirely"
+            )
+        return NetworkPlan(
+            kubectl_context=_context_name(
+                cluster_info.project, cluster_info.location, cluster_info.name
+            )
         )
 
     def cleanup(
