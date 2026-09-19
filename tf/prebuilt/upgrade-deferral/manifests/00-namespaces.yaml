@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ops
+  labels:
+    platform.io/tier: operations
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: payments
+  labels:
+    platform.io/tier: production
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    platform.io/tier: observability
