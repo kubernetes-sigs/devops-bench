@@ -323,6 +323,18 @@ def test_check_group_requires_a_title():
         Task.from_dict({"name": "n", "check_groups": {"g": {"description": "x"}}})
 
 
+def test_check_group_rejects_a_blank_title_and_strips_text():
+    # Blank means blank after stripping, at any stage, not only once validated.
+    with pytest.raises(ValidationError, match="check group title must not be blank"):
+        Task.from_dict({"name": "n", "check_groups": {"g": {"title": "   "}}})
+    with pytest.raises(ValidationError, match="check group title must not be blank"):
+        Task.from_dict({"name": "n", "check_groups": {"g": {"title": None}}})
+    group = Task.from_dict(
+        {"name": "n", "check_groups": {"g": {"title": "  G  ", "description": " d "}}}
+    ).check_groups["g"]
+    assert (group.title, group.description) == ("G", "d")
+
+
 def test_display_metadata_rejects_placeholders_at_task_level():
     with pytest.raises(ValidationError, match="title must not contain a placeholder"):
         Task.from_dict({"name": "n", "title": "Deploy to {{CLUSTER_NAME}}"})

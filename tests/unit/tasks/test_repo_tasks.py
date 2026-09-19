@@ -27,7 +27,8 @@ from devops_bench.tasks.loader import _load_yaml_task, load_from_tasks_dir
 from devops_bench.verification.spec import parse_entries
 
 _TASKS_DIR = Path(__file__).resolve().parents[3] / "tasks"
-_TASK_FILES = sorted(_TASKS_DIR.glob("*/*/task.yaml"))
+# Recursive, like the directory loader, so a task at any depth is covered.
+_TASK_FILES = sorted(_TASKS_DIR.rglob("task.yaml"))
 
 
 @pytest.mark.parametrize("task_file", _TASK_FILES, ids=lambda p: p.parent.name)
@@ -42,5 +43,6 @@ def test_shipped_task_loads_and_its_entries_parse(task_file: Path) -> None:
 
 
 def test_directory_loader_drops_no_shipped_task() -> None:
-    loaded = {task.folder for task in load_from_tasks_dir(str(_TASKS_DIR))}
-    assert loaded == {p.parent.name for p in _TASK_FILES}
+    # Sorted lists, not sets: two tasks sharing a basename must both survive.
+    loaded = sorted(task.folder for task in load_from_tasks_dir(str(_TASKS_DIR)))
+    assert loaded == sorted(p.parent.name for p in _TASK_FILES)

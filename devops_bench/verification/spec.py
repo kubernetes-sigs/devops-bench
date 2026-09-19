@@ -329,6 +329,12 @@ class VerificationEntry(BaseModel):
     weight: float = Field(default=1.0, gt=0)
     check: Any
 
+    @field_validator("title", "description", "group", "failure_hint", mode="before")
+    @classmethod
+    def _strip_display_text(cls, value: Any) -> Any:
+        """Strip display text so it is compared and rendered the same as task fields."""
+        return value.strip() if isinstance(value, str) else value
+
     @field_validator("check", mode="before")
     @classmethod
     def _parse_check(cls, value: Any) -> Any:

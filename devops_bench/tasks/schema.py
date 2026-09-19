@@ -139,9 +139,19 @@ class CheckGroup(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _coalesce_empty(cls, data: Any) -> Any:
-        """Coalesce empty (``None``) keys to defaults (e.g. ``description:`` alone)."""
-        return _coalesce_none(data, {"description": ""})
+    def _coalesce_and_strip(cls, data: Any) -> Any:
+        """Coalesce an empty ``description:`` and strip both texts, as task fields are."""
+        if not isinstance(data, dict):
+            return data
+        data = _coalesce_none(data, {"description": ""})
+        return {k: _text(v) if k in ("title", "description") else v for k, v in data.items()}
+
+    @model_validator(mode="after")
+    def _require_title(self) -> "CheckGroup":
+        """A group exists to be shown, so a blank title is a mistake at any stage."""
+        if not self.title:
+            raise ValueError("check group title must not be blank")
+        return self
 
 
 class Task(BaseModel):

@@ -167,6 +167,20 @@ def test_display_fields_are_parsed_verbatim() -> None:
     assert entry.failure_hint == "The image tag is usually wrong."
 
 
+def test_display_fields_are_stripped() -> None:
+    entries, errors = parse_entries(
+        [_entry(title="  web is healthy ", description=" d ", group=" g ", failure_hint=" h ")]
+    )
+    assert errors == []
+    entry = entries[0]
+    assert (entry.title, entry.description, entry.group, entry.failure_hint) == (
+        "web is healthy",
+        "d",
+        "g",
+        "h",
+    )
+
+
 def test_display_fields_do_not_change_scoring_defaults() -> None:
     entries, _ = parse_entries([_entry(title="t", description="d", group="g")])
     assert entries[0].weight == 1.0
