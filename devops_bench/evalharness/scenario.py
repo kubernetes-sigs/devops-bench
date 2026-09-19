@@ -167,6 +167,11 @@ class ScenarioManager:
     ) -> None:
         """Inject the planned fault, then gather verification metrics.
 
+        Verification runs only when the fault actually landed. A failed
+        injection records why in ``chaos_report["verification"]`` and leaves
+        ``perf_report`` empty, so neither the check nor the derived performance
+        numbers claim an outcome for a disruption that never happened.
+
         Args:
             spec: A typed :class:`ChaosSpec` carrying the trigger, action, and
                 opaque ``verify:`` key to resolve.
@@ -199,6 +204,16 @@ class ScenarioManager:
             # it via the fault, so without this it stalls for the full
             # ``_CHAOS_ACTIVE_WAIT_SEC`` timeout before proceeding.
             self.chaos_active_event.set()
+            return
+
+        if not chaos_result.success:
+            # The planned disruption never landed, so there is nothing to
+            # verify. Running the check anyway measures an undisturbed cluster,
+            # which reads as a pass for a fault that did not happen — and the
+            # derived perf numbers would report 100% uptime under a load spike
+            # that never fired. Record the injection failure in the
+            # verification slot instead and leave ``perf_report`` empty.
+            self._record_injection_failure(spec, chaos_result)
             return
 
         if self._aborted.is_set():
@@ -236,6 +251,35 @@ class ScenarioManager:
                     "success": False,
                     "reason": f"Verification exception: {exc}",
                 }
+
+    def _record_injection_failure(self, spec: ChaosSpec, result: ChaosResult) -> None:
+        """Stamp an un-injected disruption into the report's verification slot.
+
+        Mirrors the typed :class:`~devops_bench.verification.VerificationResult`
+        dump shape used by the resolved-entry path, so downstream consumers need
+        no special-case parse — but with ``status: "error"``. The check was
+        never *observed*, which is not the same as observing it false. This is
+        the run record only; the scored report is handled separately, by the
+        harness reading ``chaos_report["status"]`` after the drain.
+
+        Args:
+            spec: The chaos spec whose injection failed.
+            result: The unsuccessful :class:`~devops_bench.chaos.ChaosResult`.
+        """
+        detail = result.error or result.output or "no detail reported"
+        reason = (
+            f"planned disruption {spec.name!r} was never injected ({detail}); "
+            "the referenced verification was not run"
+        )
+        _log.error("%s", reason)
+        with self._report_lock:
+            self.result_holder["chaos_report"]["verification"] = {
+                "success": False,
+                "status": "error",
+                "reason": reason,
+                "name": spec.verify or spec.name,
+                "injection_failed": True,
+            }
 
     def _inject_chaos(self, spec: ChaosSpec, ctx: RunContext) -> ChaosResult:
         """Wait on the trigger, then drive ``action.inject`` with the target env.
