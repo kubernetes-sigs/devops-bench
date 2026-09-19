@@ -46,3 +46,27 @@ variable "node_count" {
   description = "Number of nodes (1 control-plane + worker nodes)"
   default     = 3
 }
+
+variable "registry_mirrors" {
+  type        = map(list(string))
+  description = <<-EOT
+    Registry mirror endpoints keyed by upstream registry host, e.g.
+    { "docker.io" = ["https://registry.example.internal"] }. Rendered into the
+    cluster's containerd configuration, so every image pull for that host goes
+    to the mirror instead of the upstream registry.
+
+    Empty by default, deliberately: no mirror is named here. A mirror is a
+    property of the host a run executes on -- an internal pull-through cache, a
+    regional endpoint, a way around an anonymous rate limit -- and a default
+    baked into this module would silently route every run's image pulls through
+    an endpoint the operator never chose, in a repository whose runs are
+    reproduced on machines in different organizations. Set it per host or per
+    stack.
+  EOT
+  default     = {}
+
+  validation {
+    condition     = alltrue([for endpoints in var.registry_mirrors : length(endpoints) > 0])
+    error_message = "Each registry mirror host must list at least one endpoint."
+  }
+}

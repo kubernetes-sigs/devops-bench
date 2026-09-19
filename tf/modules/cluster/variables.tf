@@ -104,6 +104,12 @@ variable "node_image" {
   default     = "kindest/node:v1.29.2"
 }
 
+variable "registry_mirrors" {
+  type        = map(list(string))
+  description = "Registry mirror endpoints keyed by upstream registry host (KinD-only). Empty by default; see modules/cluster/kind/variables.tf for why no mirror is named here."
+  default     = {}
+}
+
 
 variable "host_kubecontext" {
   type        = string
