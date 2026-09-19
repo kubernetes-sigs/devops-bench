@@ -417,6 +417,34 @@ def test_execute_falls_back_to_stdout_when_bundle_has_no_answer(
     assert result.output == "bare stdout answer"
 
 
+def test_execute_keeps_the_export_bundle_in_a_harness_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The raw events.jsonl survives the run when the harness owns the workspace.
+
+    Exported into the run workdir (not a throwaway temp dir), the bundle's
+    lifetime follows the workspace's, and the harness's existing workspace
+    diff carries it into the run's generated_files. The first observed
+    oc-side redaction could not be root-caused because the bundle had died
+    with the temp dir this replaces.
+    """
+    _install_oc_run(
+        monkeypatch,
+        lambda *a, **k: _make_subprocess_result("OK\n", "", 0),
+        _bundle_writer(SAMPLE_EVENTS),
+    )
+    workspace = tmp_path / "run-ws"
+    workspace.mkdir()
+
+    agent = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=30.0))
+    result = agent._execute("audit pods", workspace_path=workspace)
+
+    assert result.output == "All pods healthy."
+    bundles = list((workspace / ".openclaw" / "trajectory-exports").rglob("events.jsonl"))
+    assert len(bundles) == 1
+    assert json.loads(bundles[0].read_text().splitlines()[0])["type"] == "tool.call"
+
+
 def test_execute_records_when_sessions_returns_no_rows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
