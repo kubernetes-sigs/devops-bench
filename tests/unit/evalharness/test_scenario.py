@@ -643,3 +643,50 @@ def _no_real_kubectl(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("test attempted to spawn a real kubectl process")
 
     monkeypatch.setattr("devops_bench.k8s.kubectl.subprocess.Popen", _boom)
+
+
+def test_failed_injection_skips_verification_and_leaves_perf_empty() -> None:
+    """A disruption that never landed verifies nothing and reports no perf numbers.
+
+    The manager used to run the referenced check anyway. With no load actually
+    applied, the check observes a quiescent cluster and passes — recording a
+    satisfied objective, plus a derived 100% uptime and 1.0 efficiency, for a
+    spike that never fired. Nothing to disrupt means nothing to verify.
+    """
+    spec = _build_spec(verify_key="planned-verify")
+
+    def failing_inject(self, ctx, event):
+        return ChaosResult(
+            success=False,
+            injected_fault=self.type,
+            elapsed_time=0.0,
+            error="fortio not found",
+        )
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(GenerateLoadFault, "inject", failing_inject),
+        patch.object(VerifierAgent, "run_entry") as mock_run_entry,
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            verification_mapping={"planned-verify": SimpleNamespace()},
+            skip_port_forward=True,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    mock_run_entry.assert_not_called()
+
+    chaos_report, perf_report = manager.get_reports()
+    assert chaos_report["status"] == "failed"
+    verification = chaos_report["verification"]
+    assert verification["success"] is False
+    # "error", not "fail": the check was never observed, and the agent is not
+    # the reason the disruption did not land.
+    assert verification["status"] == "error"
+    assert verification["injection_failed"] is True
+    assert verification["name"] == "planned-verify"
+    assert "fortio not found" in verification["reason"]
+    # No vacuous 100% uptime / 1.0 efficiency for a spike that never fired.
+    assert perf_report == {}
