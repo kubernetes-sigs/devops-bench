@@ -70,6 +70,17 @@ _RECOVERABLE_KEYS = (
 # ``catastrophicKinds``, so the key name doubles as the failure type.
 _CATASTROPHIC_KEYS = score_keys.CATASTROPHIC_SCORE_KEYS
 
+#: Markers that stop a preference chain rather than being skipped over. A
+#: withheld deterministic signal means the task declared checks for that
+#: quantity and they did not resolve; the judged reading of the same quantity
+#: is not a substitute, and a row that fell through would publish a component
+#: the headline composite deliberately declined to build from. Mirrors
+#: ``metrics.pipeline._WITHHELD_KEYS``.
+_WITHHELD_KEYS = {
+    score_keys.VERIFICATION_CORRECTNESS_KEY: score_keys.VERIFICATION_CORRECTNESS_WITHHELD_KEY,
+    score_keys.VERIFICATION_RECOVERABLE_KEY: score_keys.VERIFICATION_RECOVERABLE_WITHHELD_KEY,
+}
+
 # Token usage aliases per provider, in lookup priority. The canonical keys
 # (``input`` / ``cached`` / ``reasoning`` / ``output``; see
 # ``devops_bench.agents.result.TOKEN_BUCKETS``) come first; the rest keep
@@ -248,14 +259,23 @@ def extract_score(scores: Mapping[str, Any] | None, key: str) -> float | None:
 def _first_score(scores: Mapping[str, Any] | None, keys: tuple[str, ...]) -> float | None:
     """Return the score under the first key in ``keys`` that carries one.
 
+    A key whose withheld marker is present ends the walk instead of being
+    skipped, so a signal the deterministic layer declined to publish is not
+    answered by a judged key further down the chain (see
+    :data:`_WITHHELD_KEYS`).
+
     Args:
         scores: The record's ``scores`` mapping, or ``None``.
         keys: Candidate score keys in preference order.
 
     Returns:
-        The first numeric score found, or ``None`` when no key carries one.
+        The first numeric score found, or ``None`` when no key carries one or
+        when a key earlier in the chain was withheld.
     """
     for key in keys:
+        marker = _WITHHELD_KEYS.get(key)
+        if marker is not None and marker in (scores or {}):
+            return None
         value = extract_score(scores, key)
         if value is not None:
             return value
