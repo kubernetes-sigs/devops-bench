@@ -31,6 +31,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from devops_bench.core import ClusterInfo, ConfigError
+from devops_bench.core.errors import SubprocessError
 from devops_bench.deployers.tofu import _TF_ROOT, TFDeployer
 from devops_bench.providers.base import Provider, ResolveContext
 
@@ -473,3 +474,184 @@ def test_var_flags_raises_on_undeclared_custom_variables(stack_dir, provider):
         ConfigError, match="Variable 'undeclared_custom_var' defined in task config is not declared"
     ):
         deployer._var_flags()
+
+
+class TestDownWhenTheClusterIsGone:
+    """Teardown after the Kubernetes API server is already unreachable.
+
+    This is the leak in the ticket: ``tofu destroy`` cannot delete a Helm
+    release inside a cluster that no longer answers, so it stops before the
+    cluster, node service account, secrets and load-balancer parts behind it.
+    The deployer drops the in-cluster addresses from state and destroys again.
+    """
+
+    @staticmethod
+    def _state_list(addresses: list[str]) -> MagicMock:
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = "".join(f"{a}\n" for a in addresses)
+        return proc
+
+    @staticmethod
+    def _argv(call) -> list[str]:
+        return list(call.args[0])
+
+    def _runner(self, *, state: list[str], destroy_failures: int, rm_ok: bool = True):
+        """Return a ``run`` side effect that fails the first N destroy calls.
+
+        Each failure carries a distinct message so a test can tell which of the
+        two destroy attempts an escaping error came from.
+        """
+        seen = {"destroy": 0}
+
+        def side_effect(cmd, **kwargs):
+            argv = list(cmd)
+            if argv[1] == "destroy":
+                seen["destroy"] += 1
+                if seen["destroy"] <= destroy_failures:
+                    raise SubprocessError(
+                        argv,
+                        returncode=1,
+                        stderr=f"destroy attempt {seen['destroy']}: cluster unreachable",
+                    )
+                return MagicMock(returncode=0, stdout="")
+            if argv[1:3] == ["state", "list"]:
+                return self._state_list(state)
+            if argv[1:3] == ["state", "rm"]:
+                return MagicMock(returncode=0 if rm_ok else 1, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        return side_effect
+
+    def test_in_cluster_resources_are_dropped_and_the_destroy_retried(
+        self, mocker, monkeypatch, tf_deployer, provider
+    ):
+        monkeypatch.delenv("TF_DATA_DIR", raising=False)
+        mock_run = mocker.patch(
+            "devops_bench.deployers.tofu.run",
+            side_effect=self._runner(
+                state=[
+                    "module.cluster.module.gke.google_container_cluster.this",
+                    "helm_release.workload",
+                    "module.app.kubernetes_namespace.team_alpha",
+                ],
+                destroy_failures=1,
+            ),
+        )
+
+        tf_deployer.down()
+
+        argvs = [self._argv(c) for c in mock_run.call_args_list]
+        removed = [a[-1] for a in argvs if a[1:3] == ["state", "rm"]]
+        # Only the resources that need a live API server, and each one in its
+        # own invocation so an already-gone address cannot abort the rest.
+        assert removed == ["helm_release.workload", "module.app.kubernetes_namespace.team_alpha"]
+        # The cluster itself is never forgotten — destroying it is the point.
+        assert not any("google_container_cluster" in a for a in removed)
+        assert sum(1 for a in argvs if a[1] == "destroy") == 2
+        assert provider.cleanup_calls[0][2] is True
+
+    def test_a_clean_destroy_never_touches_state(self, mocker, monkeypatch, tf_deployer):
+        monkeypatch.delenv("TF_DATA_DIR", raising=False)
+        mock_run = mocker.patch(
+            "devops_bench.deployers.tofu.run",
+            side_effect=self._runner(state=["helm_release.workload"], destroy_failures=0),
+        )
+
+        tf_deployer.down()
+
+        argvs = [self._argv(c) for c in mock_run.call_args_list]
+        assert not any(a[1] == "state" for a in argvs)
+
+    def test_a_failure_with_nothing_in_cluster_is_raised_not_retried(
+        self, mocker, monkeypatch, tf_deployer, provider
+    ):
+        # Quota, a held lock, a bad credential: dropping state fixes none of
+        # these, so the error must surface instead of being retried into silence.
+        monkeypatch.delenv("TF_DATA_DIR", raising=False)
+        mock_run = mocker.patch(
+            "devops_bench.deployers.tofu.run",
+            side_effect=self._runner(
+                state=["module.cluster.module.gke.google_container_cluster.this"],
+                destroy_failures=1,
+            ),
+        )
+
+        with pytest.raises(SubprocessError):
+            tf_deployer.down()
+
+        argvs = [self._argv(c) for c in mock_run.call_args_list]
+        assert sum(1 for a in argvs if a[1] == "destroy") == 1
+        assert not any(a[1:3] == ["state", "rm"] for a in argvs)
+        # cleanup still runs, and is told the destroy did not succeed.
+        assert provider.cleanup_calls[0][2] is False
+
+    def test_a_second_failure_reports_the_original_error(
+        self, mocker, monkeypatch, tf_deployer, provider
+    ):
+        monkeypatch.delenv("TF_DATA_DIR", raising=False)
+        mocker.patch(
+            "devops_bench.deployers.tofu.run",
+            side_effect=self._runner(state=["helm_release.workload"], destroy_failures=2),
+        )
+
+        with pytest.raises(SubprocessError) as excinfo:
+            tf_deployer.down()
+
+        # The first error says why teardown started failing; the second only
+        # says it failed again.
+        assert "destroy attempt 1" in str(excinfo.value.stderr)
+        assert provider.cleanup_calls[0][2] is False
+
+    def test_an_unreadable_state_does_not_raise_from_the_error_path(
+        self, mocker, monkeypatch, tf_deployer
+    ):
+        monkeypatch.delenv("TF_DATA_DIR", raising=False)
+
+        def side_effect(cmd, **kwargs):
+            argv = list(cmd)
+            if argv[1] == "destroy":
+                raise SubprocessError(argv, returncode=1, stderr="boom")
+            if argv[1:3] == ["state", "list"]:
+                return MagicMock(returncode=1, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        mocker.patch("devops_bench.deployers.tofu.run", side_effect=side_effect)
+
+        with pytest.raises(SubprocessError) as excinfo:
+            tf_deployer.down()
+        assert excinfo.value.stderr == "boom"
+
+    def test_a_state_rm_that_fails_does_not_stop_the_others(self, mocker, monkeypatch, tf_deployer):
+        monkeypatch.delenv("TF_DATA_DIR", raising=False)
+        mock_run = mocker.patch(
+            "devops_bench.deployers.tofu.run",
+            side_effect=self._runner(
+                state=["helm_release.a", "helm_release.b", "kubernetes_secret.c"],
+                destroy_failures=1,
+                rm_ok=False,
+            ),
+        )
+
+        tf_deployer.down()
+
+        argvs = [self._argv(c) for c in mock_run.call_args_list]
+        assert sum(1 for a in argvs if a[1:3] == ["state", "rm"]) == 3
+
+    def test_the_state_flags_are_carried_into_state_subcommands(
+        self, mocker, monkeypatch, tmp_path, tf_deployer
+    ):
+        # The per-run state file lives beside TF_DATA_DIR, so a state list/rm
+        # without -state would read the wrong (or an empty) state.
+        monkeypatch.setenv("TF_DATA_DIR", str(tmp_path / "tf-data"))
+        mock_run = mocker.patch(
+            "devops_bench.deployers.tofu.run",
+            side_effect=self._runner(state=["helm_release.workload"], destroy_failures=1),
+        )
+
+        tf_deployer.down()
+
+        expected = str((tmp_path / "tf-data").resolve().parent / "terraform.tfstate")
+        for argv in (self._argv(c) for c in mock_run.call_args_list):
+            if argv[1] == "state":
+                assert argv[argv.index("-state") + 1] == expected

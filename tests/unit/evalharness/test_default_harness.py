@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,15 @@ import pytest
 
 from devops_bench.agents import AGENTS, AgentHarness
 from devops_bench.agents.result import AgentResult, ToolCall
+from devops_bench.chaos import ChaosSpec
 from devops_bench.core import ConfigError, MissingDependencyError
 from devops_bench.core.score_keys import INTEGRITY_CATASTROPHIC_KEY, OUTCOME_SCORE_KEY
 from devops_bench.evalharness import default as harness_default
-from devops_bench.evalharness.default import DefaultEvalHarness
+from devops_bench.evalharness.default import DefaultEvalHarness, chaos_invalidated_entries
 from devops_bench.tasks import Task
 from devops_bench.verification.base import VerificationResult
+from devops_bench.verification.rollup import rollup
+from devops_bench.verification.spec import parse_entries
 
 
 @pytest.fixture
@@ -396,6 +400,63 @@ def test_run_one_collects_files_the_agent_writes_to_its_workspace(
         AGENTS._items.pop("fake-workspace-writer", None)  # noqa: SLF001
 
 
+class _WorkspaceRecordingAgent(AgentHarness):
+    """Stand-in agent that records the workspace it was handed."""
+
+    seen: list[Path] = []
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        assert workspace_path is not None
+        _WorkspaceRecordingAgent.seen.append(workspace_path)
+        (workspace_path / "output.txt").write_text("agent wrote this")
+        return AgentResult(output="wrote a file", trajectory=[])
+
+
+def _run_once_recording_the_workspace(tmp_path: Path, agent_name: str) -> Path:
+    """Run one task with the recording agent and return its workspace path."""
+    _WorkspaceRecordingAgent.seen = []
+    AGENTS.register(agent_name)(_WorkspaceRecordingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p", cluster_name="c", agent_type=agent_name, no_infra=True
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+        record = harness._run_one(task, run_dir)  # noqa: SLF001
+        assert record["status"] == "success"
+    finally:
+        AGENTS._items.pop(agent_name, None)  # noqa: SLF001
+    assert len(_WorkspaceRecordingAgent.seen) == 1
+    return _WorkspaceRecordingAgent.seen[0]
+
+
+def test_run_one_deletes_the_agent_workspace_by_default(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The workspace is a mkdtemp outside the run directory, so nothing else
+    # ever reclaims it: a matrix leaves one per combination behind, each holding
+    # whatever the agent copied in.
+    monkeypatch.delenv("BENCH_KEEP_WORKSPACE", raising=False)
+
+    workspace = _run_once_recording_the_workspace(tmp_path, "fake-workspace-recorder")
+
+    assert not workspace.exists()
+    # The artifacts survive the deletion — they were collected into the run dir.
+    assert (tmp_path / "run_1" / "generated_files" / "output.txt").exists()
+
+
+def test_run_one_keeps_the_agent_workspace_when_asked(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BENCH_KEEP_WORKSPACE", "true")
+
+    workspace = _run_once_recording_the_workspace(tmp_path, "fake-workspace-recorder-keep")
+
+    assert (workspace / "output.txt").read_text() == "agent wrote this"
+    shutil.rmtree(workspace, ignore_errors=True)
+
+
 def test_run_one_warns_when_a_verification_entry_fails_to_parse(
     isolated_env: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -470,7 +531,7 @@ def test_run_one_evaluates_verification_on_the_exception_path_when_infra_is_up(
     # exception path.
     monkeypatch.setattr(harness, "execute_agent", _boom)
     canned_report = [{"name": "web-ready", "success": True, "status": "pass"}]
-    monkeypatch.setattr(harness, "_run_verification", lambda entries: canned_report)
+    monkeypatch.setattr(harness, "_run_verification", lambda entries, **kwargs: canned_report)
     task = Task.from_dict(
         {
             "task_id": "t",
@@ -1240,3 +1301,158 @@ def test_same_task_repeat_is_not_fingerprinted(
 
     assert results[0]["cheating_report"]["status"] == "clean"
     assert results[1]["cheating_report"]["status"] == "clean"
+
+
+# -- chaos-invalidated verification entries ---------------------------------
+#
+# A ``verify:`` entry only means anything while the planned disruption is live.
+# The post-run pass evaluates every entry unconditionally, so an injection that
+# never landed used to have its entry re-checked against an undisturbed
+# cluster — which passes, scoring a satisfied objective for a fault that never
+# happened. These tests pin the entry to "never observed" instead.
+
+
+def _spike_spec() -> Any:
+    """A chaos spec shaped like the optimize-scale load spike."""
+    return ChaosSpec.model_validate(
+        {
+            "name": "Planned Load Spike",
+            "trigger": {"type": "time", "delay_seconds": 0},
+            "action": {
+                "type": "generate_load",
+                "target": {"service_url": "http://svc", "qps": 300},
+            },
+            "verify": "Planned Load Spike Verification",
+        }
+    )
+
+
+def test_chaos_invalidated_entries_empty_when_injection_succeeded() -> None:
+    """A landed disruption leaves its verification entry scored as normal."""
+    assert chaos_invalidated_entries([_spike_spec()], {"status": "success"}) == {}
+
+
+@pytest.mark.parametrize(
+    ("chaos_report", "expected_detail"),
+    [
+        ({"status": "failed", "error": "fortio not found"}, "fortio not found"),
+        ({"status": "timed_out"}, "chaos status 'timed_out'"),
+        ({"status": "initiated"}, "chaos status 'initiated'"),
+    ],
+)
+def test_chaos_invalidated_entries_names_the_entry_and_the_cause(
+    chaos_report: dict[str, Any], expected_detail: str
+) -> None:
+    """Any non-success chaos outcome invalidates the referenced entry, with the cause."""
+    invalidated = chaos_invalidated_entries([_spike_spec()], chaos_report)
+    assert set(invalidated) == {"Planned Load Spike Verification"}
+    reason = invalidated["Planned Load Spike Verification"]
+    assert expected_detail in reason
+    assert "never injected" in reason
+
+
+@pytest.mark.parametrize(
+    ("chaos_specs", "chaos_report"),
+    [
+        ([], {"status": "failed"}),
+        ([_spike_spec()], {}),
+    ],
+    ids=["no-chaos-declared", "no-scenario-ran"],
+)
+def test_chaos_invalidated_entries_empty_without_a_scheduled_disruption(
+    chaos_specs: list[Any], chaos_report: dict[str, Any]
+) -> None:
+    """No chaos, or no scenario report, invalidates nothing — the legacy path."""
+    assert chaos_invalidated_entries(chaos_specs, chaos_report) == {}
+
+
+def test_chaos_invalidated_entries_empty_when_spec_opts_out_of_verification() -> None:
+    """A spec with no ``verify:`` reference has no entry to invalidate."""
+    spec = ChaosSpec.model_validate(
+        {
+            "name": "Planned Load Spike",
+            "trigger": {"type": "time", "delay_seconds": 0},
+            "action": {
+                "type": "generate_load",
+                "target": {"service_url": "http://svc", "qps": 300},
+            },
+            "verify": None,
+        }
+    )
+    assert chaos_invalidated_entries([spec], {"status": "failed"}) == {}
+
+
+def _spike_entries() -> list[Any]:
+    """The load-spike objective plus an unrelated objective, both converge-mode."""
+    entries, errors = parse_entries(
+        [
+            {
+                "name": "Planned Load Spike Verification",
+                "role": "objective",
+                "check": {"type": "pod_healthy", "selector": "app=web"},
+            },
+            {
+                "name": "unrelated-objective",
+                "role": "objective",
+                "check": {"type": "pod_healthy", "selector": "app=api"},
+            },
+        ]
+    )
+    assert errors == []
+    return entries
+
+
+def test_run_verification_records_invalidated_entry_without_evaluating_it(
+    isolated_env: None,
+) -> None:
+    """The invalidated entry is never handed to the verifier; its sibling still runs."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    entries = _spike_entries()
+    reason = "planned disruption 'Planned Load Spike' was never injected (fortio not found)"
+
+    with patch.object(
+        harness_default.VerifierAgent,
+        "run_entry",
+        return_value=VerificationResult(success=True, elapsed_time=0.1, reason="ok"),
+    ) as mock_run_entry:
+        report = harness._run_verification(  # noqa: SLF001
+            entries, invalidated={"Planned Load Spike Verification": reason}
+        )
+
+    # Only the sibling was evaluated — the spike entry short-circuited.
+    assert mock_run_entry.call_count == 1
+    assert mock_run_entry.call_args.args[0].name == "unrelated-objective"
+
+    spike = next(e for e in report if e["name"] == "Planned Load Spike Verification")
+    # "error", not "fail": never observed is not the same as observed false, and
+    # the agent is not the reason the disruption did not land.
+    assert spike["status"] == "error"
+    assert spike["success"] is False
+    assert spike["reason"] == reason
+    assert spike["role"] == "objective"
+    assert report[1]["name"] == "unrelated-objective" and report[1]["success"] is True
+
+
+def test_invalidated_entry_leaves_the_correctness_denominator(isolated_env: None) -> None:
+    """The recorded shape rolls up as unobserved: no credit, and coverage drops."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    entries = _spike_entries()
+
+    with patch.object(
+        harness_default.VerifierAgent,
+        "run_entry",
+        return_value=VerificationResult(success=True, elapsed_time=0.1, reason="ok"),
+    ):
+        report = harness._run_verification(  # noqa: SLF001
+            entries, invalidated={"Planned Load Spike Verification": "never injected"}
+        )
+
+    scores = rollup(report)
+    assert scores.declared == 2
+    assert scores.errored == 1
+    # One of two objectives was observed, and it passed, so correctness is over
+    # the observed entry alone — the un-injected one contributes to neither the
+    # numerator nor the denominator.
+    assert scores.correctness == 1.0
+    # It shows up in coverage instead, which is what disqualifies the run.
+    assert 1 - (scores.errored / scores.declared) == 0.5
