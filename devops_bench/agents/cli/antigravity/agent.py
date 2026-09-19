@@ -29,6 +29,7 @@ from devops_bench.agents import config as agents_config
 from devops_bench.agents import result as agents_result
 from devops_bench.agents.cli.antigravity import parsing
 from devops_bench.agents.shared import cli_capabilities
+from devops_bench.agents.shared.vertex_env import vertex_location
 from devops_bench.core import subprocess as devops_subprocess
 
 if TYPE_CHECKING:
@@ -228,15 +229,16 @@ class AgyCliAgent(base.AgentHarness):
                 env_overlay["GOOGLE_CLOUD_PROJECT"] = project
                 env_overlay["GCP_PROJECT"] = project
 
-            location = (
-                os.environ.get("GOOGLE_CLOUD_LOCATION")
-                or os.environ.get("GCP_LOCATION")
-                or _get_gcloud_location()
-                or "us-central1"
-            )
-            if location:
-                env_overlay["GOOGLE_CLOUD_LOCATION"] = location
-                env_overlay["GCP_LOCATION"] = location
+            # Shared with the Gemini CLI harness so the two cannot drift; the
+            # gcloud lookup stays a lazy fallback, consulted only when the env
+            # chain is empty.
+            location = vertex_location(fallback=_get_gcloud_location)
+            env_overlay["GOOGLE_CLOUD_LOCATION"] = location
+            # Written but deliberately not *read* back (see vertex_env): agy's
+            # own GCP tooling has always been handed this spelling, and dropping
+            # it is a behavior change for the binary, not a routing fix. It only
+            # ever reaches the agy subprocess, never the deployers.
+            env_overlay["GCP_LOCATION"] = location
 
             # Explicit gemini_dir keeps agy on the workspace settings, not real HOME.
             argv = [

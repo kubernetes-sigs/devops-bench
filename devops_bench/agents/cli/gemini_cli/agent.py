@@ -47,6 +47,7 @@ from devops_bench.agents.shared.cli_capabilities import (
     build_mcp_servers,
     materialize_skills,
 )
+from devops_bench.agents.shared.vertex_env import vertex_location
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.model_providers import resolve_provider
 from devops_bench.core.subprocess import run
@@ -151,7 +152,13 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
     ``config.model`` onto ``GEMINI_MODEL``. OTLP telemetry exporters are disabled
     so they don't hang on broken endpoints. The model is never hardcoded; it
     flows from ``config.model``. A keyless backend (e.g. Vertex/ADC) writes no
-    key.
+    key. A Vertex backend additionally writes the google-genai routing vars
+    (``GOOGLE_GENAI_USE_VERTEXAI`` plus project/location), since the SDK
+    otherwise talks to the Gemini API regardless of the configured provider. The
+    location comes from the shared
+    :func:`~devops_bench.agents.shared.vertex_env.vertex_location` chain, which
+    defaults to ``global`` — the only endpoint the ``-preview`` model ids are
+    published on.
 
     Args:
         config: Resolved :class:`AgentConfig` for this run.
@@ -173,6 +180,25 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
         "OTEL_LOGS_EXPORTER": "none",
         "OTEL_SDK_DISABLED": "true",
     }
+    if spec.backend == "vertex":
+        # The google-genai SDK the CLI embeds reads these three; without the
+        # switch it defaults to the Gemini API and ignores the Vertex routing.
+        # Project/location env spellings follow the antigravity harness so an
+        # operator configures both agents the same way.
+        overlay["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+        if project:
+            overlay["GOOGLE_CLOUD_PROJECT"] = project
+        overlay["GOOGLE_CLOUD_LOCATION"] = vertex_location()
+    else:
+        # The overlay rides on top of the inherited environment, so *omitting*
+        # the switch cannot protect a non-Vertex run from an operator shell
+        # that exports GOOGLE_GENAI_USE_VERTEXAI=true (a Vertex arm's env
+        # sourced globally, say) — the ambient value would reroute the run at
+        # Vertex. Pin it off explicitly; an overlay value beats the ambient
+        # one. Project/location are left alone: without the switch the SDK
+        # does not read them for routing.
+        overlay["GOOGLE_GENAI_USE_VERTEXAI"] = "false"
     if config.api_key:
         for var in spec.api_key_envs:
             overlay[var] = config.api_key
