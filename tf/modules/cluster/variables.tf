@@ -100,8 +100,8 @@ variable "enable_iap_ssh" {
 
 variable "node_image" {
   type        = string
-  description = "The kind node image to use (KinD-only)"
-  default     = "kindest/node:v1.29.2"
+  description = "The kind node image to use (KinD-only; v1.30+, see tf/modules/cluster/kind/variables.tf)"
+  default     = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
 }
 
 

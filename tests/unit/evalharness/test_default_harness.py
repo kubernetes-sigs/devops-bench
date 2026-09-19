@@ -1021,6 +1021,300 @@ def test_run_survives_detector_failure(
     assert len(run_dirs) == 1 and (run_dirs[0] / "results.json").exists()
 
 
+# -- sandbox wiring ----------------------------------------------------------
+
+
+def _sandboxed_harness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **kwargs: Any
+) -> DefaultEvalHarness:
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX", "docker")
+    monkeypatch.setenv("BENCH_SANDBOX_IMAGE", "agent-sandbox:test")
+    return DefaultEvalHarness(
+        project_id="p", cluster_name="c", results_root=str(tmp_path / "results"), **kwargs
+    )
+
+
+def test_agent_config_snapshot_carries_the_sandbox_opt_in(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot rebuild must not drop the ``sandbox`` field on the floor."""
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    assert harness.build_agent_config().sandbox is not None
+    assert harness.build_agent_config().sandbox.image == "agent-sandbox:test"
+
+
+def test_agent_config_snapshot_has_no_sandbox_when_flag_off(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("BENCH_AGENT_SANDBOX", raising=False)
+    harness = DefaultEvalHarness(
+        project_id="p", cluster_name="c", results_root=str(tmp_path / "results")
+    )
+    assert harness.build_agent_config().sandbox is None
+
+
+def test_prepare_sandbox_spec_completes_the_skeletal_spec(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from devops_bench.core import ClusterInfo, NetworkPlan
+
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    plan = NetworkPlan(docker_network="kind", rewrite_server="https://c1-control-plane:6443")
+    kubeconfig = tmp_path / "creds" / "kubeconfig"
+    provider = object()
+
+    def fake_provision(
+        got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str
+    ) -> Path:
+        assert got_plan is plan
+        assert dest_dir == tmp_path / "creds"
+        # The agent's default 600s timeout plus the module's slack: the token
+        # must outlast the run it is minted for.
+        assert token_ttl_sec == 1500
+        assert pod_security == "baseline"
+        return kubeconfig
+
+    plan_requests: list[tuple[Any, str]] = []
+
+    def fake_build_network_plan(got_provider: Any, cluster_info: ClusterInfo) -> Any:
+        plan_requests.append((got_provider, cluster_info.name))
+        return plan
+
+    monkeypatch.setattr(
+        harness_default.agent_sandbox, "build_network_plan", fake_build_network_plan
+    )
+    monkeypatch.setattr(
+        harness_default.agent_credentials, "provision_agent_credentials", fake_provision
+    )
+    monkeypatch.setattr(
+        harness_default.agent_sandbox,
+        "discover_fixture_mounts",
+        lambda cluster: {"/home/op/repo-c1.git": "/workspace/home/repo-c1.git"},
+    )
+
+    workspace = tmp_path / "workspace-x"
+    workspace.mkdir()
+    (tmp_path / "creds").mkdir()
+    spec = harness._prepare_sandbox_spec(  # noqa: SLF001
+        workspace, tmp_path / "creds", ClusterInfo(name="c1"), provider, "baseline"
+    )
+
+    # The sandbox home exists on the host before the agent runs (it is both
+    # the container HOME mountpoint and the detection inventory root).
+    assert (workspace / "home").is_dir()
+    assert spec.image == "agent-sandbox:test"
+    assert spec.network is plan
+    assert spec.workspace == workspace
+    assert spec.kubeconfig == kubeconfig
+    assert spec.fixture_mounts == {"/home/op/repo-c1.git": "/workspace/home/repo-c1.git"}
+    # The run's own provider and cluster build the plan (and through it the
+    # kubeconfig), never the ambient current-context.
+    assert plan_requests == [(provider, "c1")]
+
+
+def test_prepare_sandbox_spec_tears_down_when_completion_fails(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provisioning wrote to the cluster, but the spec that would carry its
+    context to the run-end teardown never completes — so the failure path must
+    clean up itself, or a reused cluster keeps the policies with nothing
+    recording they exist."""
+    from devops_bench.core import ClusterInfo, NetworkPlan
+
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    plan = NetworkPlan(kubectl_context="kind-c1")
+    monkeypatch.setattr(
+        harness_default.agent_sandbox, "build_network_plan", lambda provider, cluster: plan
+    )
+    monkeypatch.setattr(
+        harness_default.agent_credentials,
+        "provision_agent_credentials",
+        lambda *args, **kwargs: tmp_path / "creds" / "kubeconfig",
+    )
+
+    def explode(cluster: str) -> dict[str, str]:
+        raise ValueError("BENCH_AGENT_FIXTURES names a path that does not exist")
+
+    monkeypatch.setattr(harness_default.agent_sandbox, "discover_fixture_mounts", explode)
+    torn_down: list[str | None] = []
+    monkeypatch.setattr(
+        harness_default.agent_credentials,
+        "teardown_agent_credentials",
+        lambda context=None: torn_down.append(context) or True,
+    )
+
+    workspace = tmp_path / "workspace-x"
+    workspace.mkdir()
+    (tmp_path / "creds").mkdir()
+    with pytest.raises(ValueError):
+        harness._prepare_sandbox_spec(  # noqa: SLF001
+            workspace, tmp_path / "creds", ClusterInfo(name="c1"), None, "baseline"
+        )
+
+    assert torn_down == ["kind-c1"]
+
+
+def test_run_one_tears_down_sandbox_credentials_in_its_finally(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run-end teardown fires from ``_run_one``'s finally, pinned to the
+    run's own context. It is a correctness requirement on a reused cluster:
+    the pod-security policy is not username-scoped, so left behind it denies
+    the operator's next privileged workload too."""
+    from dataclasses import replace
+
+    from devops_bench.core import NetworkPlan
+
+    class _SandboxReadyAgent(_WorkspaceWritingAgent):
+        # Opt the fake onto the seam: base.run() refuses a sandboxed config on
+        # a harness that has not been migrated (supports_sandbox is False).
+        supports_sandbox = True
+
+    AGENTS.register("fake-sandbox-teardown")(_SandboxReadyAgent)
+    try:
+        harness = _sandboxed_harness(
+            monkeypatch, tmp_path, agent_type="fake-sandbox-teardown", no_infra=True
+        )
+
+        def fake_prepare(
+            workspace_path: Path,
+            creds_dir: Path,
+            cluster_info: Any,
+            provider: Any,
+            pod_security: str,
+        ) -> Any:
+            (workspace_path / "home").mkdir(parents=True, exist_ok=True)
+            return replace(
+                harness.build_agent_config().sandbox,
+                network=NetworkPlan(kubectl_context="kind-c1"),
+                workspace=workspace_path,
+                kubeconfig=creds_dir / "kubeconfig",
+            )
+
+        monkeypatch.setattr(harness, "_prepare_sandbox_spec", fake_prepare)
+        torn_down: list[str | None] = []
+        monkeypatch.setattr(
+            harness_default.agent_credentials,
+            "teardown_agent_credentials",
+            lambda context=None: torn_down.append(context) or True,
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert torn_down == ["kind-c1"]
+    finally:
+        AGENTS._items.pop("fake-sandbox-teardown", None)  # noqa: SLF001
+
+
+def test_build_agent_config_overlays_the_active_sandbox_spec(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    completed = dc_replace(
+        harness.build_agent_config().sandbox, workspace=tmp_path, kubeconfig=tmp_path / "kc"
+    )
+
+    harness._active_sandbox_spec = completed  # noqa: SLF001
+    overlaid = harness.build_agent_config()
+    assert overlaid.sandbox is completed
+    # Everything else still reads from the one snapshot.
+    assert overlaid.capabilities is harness._agent_config.capabilities  # noqa: SLF001
+
+    harness._active_sandbox_spec = None  # noqa: SLF001
+    assert harness.build_agent_config() is harness._agent_config  # noqa: SLF001
+
+
+def test_inventory_sandbox_home_records_rules_per_task(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sandbox home replaces the operator home as the inventory root:
+    a leftover seeded there is flagged, and a fresh home yields the empty
+    ruleset (correct by construction, not a skipped scan)."""
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+
+    dirty_home = tmp_path / "ws-dirty" / "home"
+    dirty_home.mkdir(parents=True)
+    (dirty_home / "report.md").write_text("prior-run leftover fingerprint line\n" * 3)
+    harness._inventory_sandbox_home("dirty-task", dirty_home)  # noqa: SLF001
+    assert harness._sandbox_inventory_rules["dirty-task"]  # noqa: SLF001
+
+    fresh_home = tmp_path / "ws-fresh" / "home"
+    fresh_home.mkdir(parents=True)
+    harness._inventory_sandbox_home("fresh-task", fresh_home)  # noqa: SLF001
+    assert harness._sandbox_inventory_rules["fresh-task"] == ()  # noqa: SLF001
+
+
+def test_inventory_covers_fixture_mounts_at_their_container_paths(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixture mounts only materialize inside the container, so the host-side
+    home scan cannot see them; each mounted name must get a container-path
+    rule, and the prompt filter must drop exactly the ones the task names."""
+    import re
+
+    from devops_bench.cheat_detection import filter_rules_for_prompt
+
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+
+    home = tmp_path / "ws" / "home"
+    home.mkdir(parents=True)
+    harness._inventory_sandbox_home(  # noqa: SLF001
+        "t",
+        home,
+        {
+            "/home/op/opa-repo-c1.git": "/workspace/home/opa-repo-c1.git",
+            "/home/op/stale-notes-c1.md": "/workspace/home/stale-notes-c1.md",
+        },
+    )
+    rules = harness._sandbox_inventory_rules["t"]  # noqa: SLF001
+    assert {r.source for r in rules} == {"opa-repo-c1.git", "stale-notes-c1.md"}
+    # The rules match the container-side spellings the trajectory records.
+    repo_rule = next(r for r in rules if r.source == "opa-repo-c1.git")
+    assert re.search(repo_rule.patterns[0], "cat /workspace/home/opa-repo-c1.git/config")
+    assert re.search(repo_rule.patterns[0], "git clone ~/opa-repo-c1.git")
+
+    # A prompt naming the repo authorizes it for that record; the mount the
+    # prompt never asked for (a leftover swept in by the token glob) stays.
+    surviving = filter_rules_for_prompt(rules, "Fix the policy and push to '~/opa-repo-c1.git'.")
+    assert {r.source for r in surviving} == {"stale-notes-c1.md"}
+
+
+def test_stray_container_sweep_is_skipped_under_parallel(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep matches on the shared name prefix and cannot tell a stray
+    from a sibling harness's live container, so BENCH_PARALLEL must skip it."""
+    monkeypatch.setenv("BENCH_PARALLEL", "1")
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    swept: list[bool] = []
+    monkeypatch.setattr(
+        harness_default.agent_sandbox, "sweep_stray_containers", lambda: swept.append(True)
+    )
+    harness.run([])
+    assert swept == []
+
+
+def test_stray_container_sweep_runs_when_not_parallel(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("BENCH_PARALLEL", raising=False)
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    swept: list[bool] = []
+    monkeypatch.setattr(
+        harness_default.agent_sandbox, "sweep_stray_containers", lambda: swept.append(True)
+    )
+    harness.run([])
+    assert swept == [True]
+
+
 class _BatchContaminatingAgent(AgentHarness):
     """Task 1 leaves a deliverable in the home; task 2 reads it back.
 

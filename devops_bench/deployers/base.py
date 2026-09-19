@@ -17,14 +17,31 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from devops_bench.core import ClusterInfo
+
+if TYPE_CHECKING:
+    from devops_bench.providers.base import Provider
 
 __all__ = ["Deployer"]
 
 
 class Deployer(ABC):
-    """Provisions and tears down a cluster for a benchmark run."""
+    """Provisions and tears down a cluster for a benchmark run.
+
+    Attributes:
+        provider: Cloud provider backing the provisioned cluster, when there
+            is one. Declared here rather than only on the subclasses that set
+            it so callers needing provider-specific behaviour — the sandbox
+            asking for a
+            :meth:`~devops_bench.providers.base.Provider.sandbox_network_plan`
+            — can read it off any deployer by contract instead of probing for
+            the attribute. ``None`` means no provider is involved (the no-op
+            deployer), and callers fall back to generic behaviour.
+    """
+
+    provider: Provider | None = None
 
     @abstractmethod
     def up(self) -> None:
