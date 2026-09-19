@@ -20,7 +20,7 @@ Every term below names a real concept in the codebase. The "Where it lives" colu
 | **Outcome validity** | The primary rubric: did the agent actually achieve the goal by *any* valid path? It grades the result, not whether a specific method was followed. | `devops_bench/metrics/outcome_validity.py` |
 | **`expected_output` (rubric)** | The per-task grading reference — prose "critical requirements" — graded on the terminal outcome. | Task field; schema in `devops_bench/tasks/schema.py` |
 | **Registry** | A generic name-to-object lookup with entry-point plugin discovery. It backs every extension axis: `AGENTS`, `MODELS`, `PROVIDERS`, `FAULTS`, `TRIGGERS`, `VERIFIERS`, `METRICS`. | `devops_bench/core/registry.py` |
-| **Bastion** | An alternate execution environment — a VM that runs the harness in-VPC, so runs reach cluster-internal endpoints directly. Its tooling has not migrated yet. | `tf/modules/bastion` |
+| **Bastion** | An alternate execution environment — a VM that runs the harness in-VPC, so runs reach cluster-internal endpoints directly. See [The Bastion](bastion.md). | `tf/modules/bastion`, `tf/prebuilt/bastion/`, `scripts/bastion/` |
 
 ### Chaos
 

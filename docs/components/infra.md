@@ -57,7 +57,7 @@ The env var outranks the config key so a task can pin a default `provider:` whil
 The OpenTofu stacks live under `tf/`:
 
 - `tf/modules/` — reusable building blocks: `cluster/gke`, `cluster/kind`, `cluster/vcluster`, and `bastion`.
-- `tf/prebuilt/<stack>/` — standard, ready-to-use stacks: `kind` (a local cluster for offline / no-cloud runs), `opa-remediation` (task-specific policy stack supporting `kind`, `gcp`, and `vcluster`). Task-specific stacks build on the modules and ship alongside the tasks that provision them.
+- `tf/prebuilt/<stack>/` — standard, ready-to-use stacks: `kind` (a local cluster for offline / no-cloud runs), `opa-remediation` (task-specific policy stack supporting `kind`, `gcp`, and `vcluster`), `bastion` (not a cluster: the eval-harness VM, see [The Bastion](bastion.md)). Task-specific stacks build on the modules and ship alongside the tasks that provision them.
 
 Every stack root that `TFDeployer` drives must output `cluster_name` and `cluster_location` — that's the contract the deployer reads back. Stacks utilizing `vcluster` also output `kubeconfig` (the virtual cluster's client configuration).
 
