@@ -96,3 +96,15 @@ def test_run_entry_returns_the_check_result() -> None:
     result = VerifierAgent().run_entry(entry, timeout_sec=5)
     assert result.success is False
     assert isinstance(result, VerificationResult)
+
+
+def test_hold_mode_evaluates_once_with_a_zero_budget() -> None:
+    """A single ``run_entry`` call under hold is one sample, not a poll to convergence.
+
+    Continuous holding is the caller's job (the background safeguard
+    monitor, sampling ``run_entry`` repeatedly over the agent's turn), not
+    something a single call does on its own.
+    """
+    entry = _entry("safeguard", severity="catastrophic", mode="hold")
+    VerifierAgent().run_entry(entry, timeout_sec=30)
+    assert entry.check.budgets == [0.0]
