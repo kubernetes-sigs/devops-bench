@@ -21,6 +21,7 @@ from devops_bench.k8s.kubectl import (
     is_not_found,
     port_forward,
     rollout_status,
+    run_pod,
     wait,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "poll_until",
     "port_forward",
     "rollout_status",
+    "run_pod",
     "wait",
 ]
