@@ -246,6 +246,39 @@ class VerifierAgent:
         return node.verify(remaining)
 
     @staticmethod
+    def _carry_forward(
+        previous: VerificationResult | None, index: int
+    ) -> VerificationResult | None:
+        """Return an earlier round's definite verdict for child ``index``, if there is one.
+
+        A converge poll evaluates the same children round after round, so a
+        child skipped in the final round has usually already been observed —
+        several times — in the rounds before it. Recording that child as
+        "error" would throw those observations away and turn a definite "the
+        condition was seen not to hold" into "we never looked", which is the
+        difference between a low score and no score at all. Only "pass" and
+        "fail" carry forward: an earlier "error" is no more of an observation
+        than the skip itself.
+
+        Args:
+            previous: The last completed round's result, or ``None`` on the
+                first round (nothing to carry forward from).
+            index: Position of the child in the node's ``checks`` list.
+
+        Returns:
+            The earlier observation, re-labeled to say it was carried forward,
+            or ``None`` when this child has no definite earlier verdict.
+        """
+        if previous is None or index >= len(previous.children):
+            return None
+        child = previous.children[index]
+        if child.status not in ("pass", "fail"):
+            return None
+        return child.model_copy(
+            update={"reason": f"{child.reason} (carried forward from the last completed round)"}
+        )
+
+    @staticmethod
     def _skip_rest(
         checks: list[Any],
         start_index: int,
@@ -253,9 +286,22 @@ class VerifierAgent:
         children: list[VerificationResult],
         reasons: list[str],
         status: VerificationStatus = "fail",
+        previous: VerificationResult | None = None,
     ) -> None:
-        """Mark every child from ``start_index`` onward as skipped, in one pass."""
+        """Mark every child from ``start_index`` onward as skipped, in one pass.
+
+        ``previous`` is the last completed round's result, supplied only by the
+        converge round evaluators; a child it already observed is carried
+        forward via :meth:`_carry_forward` instead of being recorded as
+        skipped. The sequence fail-fast path leaves it unset, since there is no
+        earlier round there.
+        """
         for j, rest in enumerate(checks[start_index:], start=start_index):
+            carried = VerifierAgent._carry_forward(previous, j)
+            if carried is not None:
+                children.append(carried)
+                reasons.append(f"[{j}] carried forward: {carried.reason}")
+                continue
             children.append(_failed(rest, reason, status=status))
             reasons.append(f"[{j}] skipped")
 
@@ -325,11 +371,19 @@ class VerifierAgent:
         if single_shot:
             return self._eval_any_round(node, deadline, bound_by_deadline=False)
         return self._poll_rounds(
-            lambda: self._eval_any_round(node, deadline, bound_by_deadline=True), deadline
+            lambda previous: self._eval_any_round(
+                node, deadline, bound_by_deadline=True, previous=previous
+            ),
+            deadline,
         )
 
     def _eval_any_round(
-        self, node: AnySpec, deadline: float, *, bound_by_deadline: bool = False
+        self,
+        node: AnySpec,
+        deadline: float,
+        *,
+        bound_by_deadline: bool = False,
+        previous: VerificationResult | None = None,
     ) -> VerificationResult:
         """Run one bounded pass over ``node``'s children, stopping at the first success.
 
@@ -347,9 +401,11 @@ class VerifierAgent:
         :meth:`_run_any`), the first child is still always evaluated (the
         always-at-least-one-evaluation contract), but each subsequent child
         checks the deadline first; once it has passed, the rest of the round
-        is skipped with status "error" (never observed) via
-        :meth:`_skip_rest`, bounding the overshoot to at most one more leaf
-        call. Assert/single_shot rounds pass ``bound_by_deadline=False``: a
+        is skipped via :meth:`_skip_rest`, bounding the overshoot to at most
+        one more leaf call. A skipped child that ``previous`` already observed
+        keeps that verdict; one with no earlier observation is recorded
+        "error" (never observed), not "fail".
+        Assert/single_shot rounds pass ``bound_by_deadline=False``: a
         one-shot evaluation must still cover every needed child regardless of
         its (already-zero) deadline.
         """
@@ -366,6 +422,7 @@ class VerifierAgent:
                     children,
                     reasons,
                     status="error",
+                    previous=previous,
                 )
                 break
             res = self._run(child, deadline, single_shot=True)
@@ -401,11 +458,19 @@ class VerifierAgent:
         if single_shot:
             return self._eval_none_round(node, deadline, bound_by_deadline=False)
         return self._poll_rounds(
-            lambda: self._eval_none_round(node, deadline, bound_by_deadline=True), deadline
+            lambda previous: self._eval_none_round(
+                node, deadline, bound_by_deadline=True, previous=previous
+            ),
+            deadline,
         )
 
     def _eval_none_round(
-        self, node: NoneSpec, deadline: float, *, bound_by_deadline: bool = False
+        self,
+        node: NoneSpec,
+        deadline: float,
+        *,
+        bound_by_deadline: bool = False,
+        previous: VerificationResult | None = None,
     ) -> VerificationResult:
         """Run one bounded pass over ``node``'s children, stopping at the first pass.
 
@@ -420,7 +485,9 @@ class VerifierAgent:
         leaf call, the same way and for the same converge-only reason as
         :meth:`_eval_any_round`: the first child always runs, later children
         check the deadline first and, once it has passed, the rest of the
-        round is skipped with status "error" via :meth:`_skip_rest`.
+        round is skipped via :meth:`_skip_rest` — carrying forward whatever
+        ``previous`` observed, and recording "error" only for a child with no
+        earlier verdict.
         """
         start = time.monotonic()
         children: list[VerificationResult] = []
@@ -435,6 +502,7 @@ class VerifierAgent:
                     children,
                     reasons,
                     status="error",
+                    previous=previous,
                 )
                 break
             res = self._run(child, deadline, single_shot=True)
@@ -456,7 +524,7 @@ class VerifierAgent:
 
     @staticmethod
     def _poll_rounds(
-        run_round: Callable[[], VerificationResult], deadline: float
+        run_round: Callable[[VerificationResult | None], VerificationResult], deadline: float
     ) -> VerificationResult:
         """Poll ``run_round`` until it succeeds or ``deadline`` passes.
 
@@ -468,13 +536,22 @@ class VerifierAgent:
         against an already-past deadline, mirroring how a single_shot round
         would run. The elapsed time reported spans every round polled, not
         just the last one.
+
+        Only the last round is reported, so each round is handed the one
+        before it and carries forward any child it does not get to re-evaluate
+        (see :meth:`_carry_forward`). ``poll_until`` clamps its final sleep to
+        the time remaining and then polls once more, so the last round of a
+        never-converging entry starts at (or just past) the deadline by
+        construction: without the carry-forward every child after the first
+        would be reported "error" on every such entry, discarding every round
+        that did observe them.
         """
         start = time.monotonic()
         last: VerificationResult | None = None
 
         def predicate() -> bool:
             nonlocal last
-            last = run_round()
+            last = run_round(last)
             return last.success
 
         poll_until(predicate, timeout_sec=max(0.0, deadline - time.monotonic()))
