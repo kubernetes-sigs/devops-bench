@@ -418,3 +418,34 @@ def test_nested_parallel_inside_sequence(agent: VerifierAgent) -> None:
     assert res.success is True
     assert res.children[0].success is True
     assert len(res.children[0].children) == 2
+
+
+def test_a_converge_child_that_polls_to_the_deadline_reports_its_verdict(
+    agent: VerifierAgent,
+) -> None:
+    """A child that used its whole budget must not be recorded as unobserved.
+
+    Reproduces deploy-hello-app's ``disruption-and-scaling``: a converging
+    objective whose children poll for resources that never appear. Each child
+    reaches a real "not there" verdict right at the deadline. Waiting only to
+    the deadline raced them, so the group was scored "error" and dropped out of
+    both sides of the correctness fraction, inflating the run's score.
+    """
+    spec = {
+        "type": "parallel",
+        "checks": [
+            _leaf(succeed=False, tag="pdb", sleep_for=2.1),
+            _leaf(succeed=False, tag="hpa", sleep_for=2.1),
+        ],
+    }
+
+    # The budget must clear _MIN_LEAF_BUDGET_SECONDS so the leaves actually run
+    # rather than being short-circuited, and each leaf must outlast it slightly
+    # the way a real poll does.
+    res = agent.wait_for_condition(spec, timeout_sec=2.0)
+
+    assert res.status == "fail", "an observed absence must count as a fail, not an error"
+    assert [c.status for c in res.children] == ["fail", "fail"]
+    assert all(c.reason.startswith("leaf:") for c in res.children), (
+        "the children's real reasons must survive, not the placeholder"
+    )
