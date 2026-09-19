@@ -1,0 +1,68 @@
+# Storefront frontend. nginx that serves a static /healthz and reverse-proxies "/"
+# to the backend Service. When the backend has no ready endpoints (the injected
+# regional outage), "/" returns 502 — i.e. users see 5xx from this region.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-nginx
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 80;
+        location = /healthz {
+          add_header Content-Type text/plain;
+          return 200 'ok\n';
+        }
+        location / {
+          proxy_pass http://backend:8080;
+          proxy_connect_timeout 2s;
+          proxy_read_timeout 3s;
+          proxy_next_upstream off;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    app: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: conf
+          configMap:
+            name: frontend-nginx
