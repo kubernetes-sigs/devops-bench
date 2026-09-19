@@ -335,6 +335,10 @@ def _parse_error_rows(errors: Any) -> list[CheckRow]:
         rows.append(
             CheckRow(
                 name=_text(item.get("name")),
+                title=_text(item.get("title")),
+                description=_text(item.get("description")),
+                group=_text(item.get("group")),
+                failure_hint=_text(item.get("failure_hint")),
                 role=_text(item.get("role")) or "objective",
                 severity=_text(item.get("severity")),
                 status="error",

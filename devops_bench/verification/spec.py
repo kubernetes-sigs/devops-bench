@@ -369,15 +369,29 @@ class VerificationEntry(BaseModel):
         return "converge" if self.role == "objective" else "assert"
 
 
-def _declared_scoring(item: Any) -> dict[str, str]:
-    """The ``role`` / ``severity`` an unparseable entry declared, when they are strings.
+# What an entry that never evaluated still gets to say about itself on the
+# record: how it was meant to score, and how the author described it.
+_DECLARED_ERROR_FIELDS = ("role", "severity", "title", "description", "group", "failure_hint")
+
+
+def _declared_fields(item: Any) -> dict[str, str]:
+    """The scoring and display fields an unparseable entry declared as strings.
 
     Read off the raw mapping because the entry never became a model. Anything
     that is not a string is left out rather than guessed at.
     """
     if not isinstance(item, dict):
         return {}
-    return {key: item[key] for key in ("role", "severity") if isinstance(item.get(key), str)}
+    return {key: item[key] for key in _DECLARED_ERROR_FIELDS if isinstance(item.get(key), str)}
+
+
+def _entry_fields(entry: VerificationEntry) -> dict[str, str]:
+    """The same fields as :func:`_declared_fields`, from an entry that did parse."""
+    return {
+        key: value
+        for key in _DECLARED_ERROR_FIELDS
+        if isinstance(value := getattr(entry, key), str)
+    }
 
 
 def parse_entries(raw: Any) -> tuple[list[VerificationEntry], list[dict[str, str]]]:
@@ -394,8 +408,10 @@ def parse_entries(raw: Any) -> tuple[list[VerificationEntry], list[dict[str, str
     Returns:
         A ``(entries, errors)`` pair. Each error is a ``{"name", "reason"}``
         mapping, matching the shape already written to result records, plus
-        the entry's declared ``role`` and ``severity`` when it stated them as
-        strings, so a result can say which kind of check never evaluated.
+        the entry's declared ``role``, ``severity``, and display fields
+        (``title``, ``description``, ``group``, ``failure_hint``) when it
+        stated them as strings, so a result can still say what the check that
+        never evaluated was for.
     """
     if raw is None:
         return [], []
@@ -424,7 +440,7 @@ def parse_entries(raw: Any) -> tuple[list[VerificationEntry], list[dict[str, str
                 {
                     "name": label,
                     "reason": _clean_validation_message(exc),
-                    **_declared_scoring(item),
+                    **_declared_fields(item),
                 }
             )
             continue
@@ -433,8 +449,7 @@ def parse_entries(raw: Any) -> tuple[list[VerificationEntry], list[dict[str, str
                 {
                     "name": entry.name,
                     "reason": f"duplicate verification entry name {entry.name!r}",
-                    "role": entry.role,
-                    **({"severity": entry.severity} if entry.severity else {}),
+                    **_entry_fields(entry),
                 }
             )
             continue

@@ -552,6 +552,10 @@ def test_build_rows_surfaces_parse_errors_as_error_checks() -> None:
                 "reason": "unknown verifier type 'resource_propertie'",
                 "role": "safeguard",
                 "severity": "catastrophic",
+                "title": "No hello-app Deployment in kube-system",
+                "description": "No Deployment labelled app=hello-app exists in kube-system.",
+                "group": "safety",
+                "failure_hint": "The app was applied to the wrong namespace.",
             },
         ],
     }
@@ -561,8 +565,13 @@ def test_build_rows_surfaces_parse_errors_as_error_checks() -> None:
     assert checks[1]["role"] == "objective"  # declared nothing usable: the fallback
     assert checks[1]["weight"] == 1.0
     assert checks[1]["reason"] == "not evaluated: unknown verifier type 'external_http_probe'"
-    # A safeguard that never ran reads as one, not as an objective.
+    assert (checks[1]["title"], checks[1]["group"]) == ("", "")
+    # A safeguard that never ran reads as one, with its author-written text intact.
     assert (checks[2]["role"], checks[2]["severity"]) == ("safeguard", "catastrophic")
+    assert checks[2]["title"] == "No hello-app Deployment in kube-system"
+    assert checks[2]["description"] == "No Deployment labelled app=hello-app exists in kube-system."
+    assert checks[2]["group"] == "safety"
+    assert checks[2]["failureHint"] == "The app was applied to the wrong namespace."
 
 
 def test_build_rows_carries_cached_and_reasoning() -> None:
