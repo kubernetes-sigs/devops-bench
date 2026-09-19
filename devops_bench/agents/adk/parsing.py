@@ -36,6 +36,10 @@ An event from a remote A2A agent also carries the raw task envelope under
 answer lives in the task's ``status.message``, while the ``content.parts`` ADK
 builds alongside it hold a *mirror of the last artifact* — so the envelope, not
 the content, is what the judge should grade.
+
+In a multi-agent tree, the sub-agent that made a call is recovered from the
+``author`` ADK stamps on every event — see :func:`_attribute_actors` for when
+that is applied and why it is not applied unconditionally.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from devops_bench.agents.result import ToolCall, empty_tokens
+from devops_bench.agents.result import ROOT_ACTOR, ToolCall, empty_tokens
 
 __all__: list[str] = ["parse_event_stream"]
 
@@ -143,6 +147,65 @@ def _a2a_status(task: Mapping[str, Any]) -> tuple[str | None, str | None]:
     return state, ("".join(texts) or None)
 
 
+# ADK names the agent that produced an event on ``author``. It is the only
+# delegation signal a ``SequentialAgent`` tree emits — those sub-agents run
+# without a ``transfer_to_agent`` call between them, so without this field their
+# calls are indistinguishable from the root agent making every call itself.
+_AUTHOR_FIELD = "author"
+
+
+def _author_of(event: Mapping[str, Any]) -> str | None:
+    """Return the stripped :data:`_AUTHOR_FIELD` on ``event``, if usable."""
+    author = event.get(_AUTHOR_FIELD)
+    return author.strip() if isinstance(author, str) and author.strip() else None
+
+
+def _attribute_actors(
+    trajectory: list[ToolCall],
+    authors: Sequence[str | None],
+    root_name: str | None,
+) -> None:
+    """Stamp :attr:`ToolCall.actor` on the calls of a delegating run, in place.
+
+    A run where every call came from the root agent is left untouched, so its
+    trajectory serializes exactly as it did before attribution existed. That
+    matters beyond tidiness: the metrics layer re-serializes the trajectory into
+    judge prompts, so stamping ``actor`` on single-agent runs — which ADK gives
+    us the name for just as readily — would perturb scores for runs that have no
+    delegation to describe.
+
+    Only :attr:`~devops_bench.agents.result.ToolCall.actor` is set.
+    ``call_id`` / ``parent_id`` are left unset because ADK's ``author`` says
+    *who* made a call but nothing about which delegation it was made inside; the
+    result is an attributed trajectory, not a nested one.
+
+    Args:
+        trajectory: Parsed calls in emission order, mutated in place.
+        authors: The ``author`` of the event each call arrived on, positionally
+            aligned with ``trajectory``. ``None`` where the event carried none.
+        root_name: Name of the agent the harness drove, used to distinguish the
+            top-level agent from its delegates. ``None`` when the caller cannot
+            supply it, in which case delegation is inferred from the authors
+            alone and no call is claimed for the root.
+    """
+    distinct = {author for author in authors if author}
+    if root_name is None:
+        # Without the root's name, a single author cannot be told apart from a
+        # lone delegate doing all the work, so two names are the only safe
+        # evidence of delegation.
+        delegated = len(distinct) > 1
+    else:
+        delegated = any(author != root_name for author in distinct)
+    if not delegated:
+        return
+    for entry, author in zip(trajectory, authors, strict=True):
+        if author is None:
+            continue
+        # A delegate keeps the name ADK gave it; only the agent the harness
+        # actually drove is the root, and only when we were told which that is.
+        entry.actor = ROOT_ACTOR if author == root_name else author
+
+
 def _response_text(response: Any) -> tuple[str, bool]:
     """Render a tool response as trajectory text and report whether it failed.
 
@@ -225,6 +288,7 @@ def _canonical_tokens(sums: Mapping[str, int], seen: set[str]) -> dict[str, int 
 
 def parse_event_stream(
     events: Sequence[Any],
+    root_name: str | None = None,
 ) -> tuple[str, list[dict], dict[str, int | None], list[str]]:
     """Fold a serialized ADK event stream into the canonical result shape.
 
@@ -243,15 +307,26 @@ def parse_event_stream(
 
     Args:
         events: Serialized ``Event`` mappings in the order ADK yielded them.
+        root_name: Name of the agent the harness drove. Supplying it lets a
+            delegating tree's root be reported as
+            :data:`~devops_bench.agents.result.ROOT_ACTOR` and lets a tree whose
+            work all happens in one sub-agent still be recognized as delegating.
+            Omitting it degrades attribution, never corrupts it.
 
     Returns:
         A ``(output, trajectory, tokens, errors)`` tuple. ``trajectory`` is a
         list of ``ToolCall.to_dict()`` mappings in call order; a call whose
         result never arrived stays ``status="called"`` with ``result=None``.
+        Entries carry ``actor`` only when the run delegated; a single-agent run
+        serializes exactly as it did before attribution existed.
     """
     output_parts: list[str] = []
     errors: list[str] = []
     trajectory: list[ToolCall] = []
+    # The ``author`` each call arrived under, positionally aligned with
+    # ``trajectory``. Held aside rather than stamped as we go: whether to
+    # attribute at all is only decidable once every author has been seen.
+    authors: list[str | None] = []
     # Calls still awaiting a result: keyed by ADK's correlation id, with a FIFO
     # queue for the id-less calls some models emit.
     pending_by_id: dict[str, ToolCall] = {}
@@ -275,6 +350,7 @@ def parse_event_stream(
 
         partial = bool(event.get("partial"))
         user_content = _is_user_content(event)
+        author = _author_of(event)
 
         # A remote agent's answer is the A2A task's status message. Take it in
         # place of the event's own text, which mirrors the trailing artifact.
@@ -314,6 +390,7 @@ def parse_event_stream(
                     args=dict(args) if isinstance(args, Mapping) else {},
                 )
                 trajectory.append(entry)
+                authors.append(author)
                 call_id = call.get("id")
                 if call_id is None:
                     pending_unkeyed.append(entry)
@@ -341,6 +418,7 @@ def parse_event_stream(
 
     output = "".join(output_parts)
     tokens = _canonical_tokens(sums, seen)
+    _attribute_actors(trajectory, authors, root_name)
     return output, [entry.to_dict() for entry in trajectory], tokens, errors
 
 

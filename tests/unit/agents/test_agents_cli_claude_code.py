@@ -58,17 +58,30 @@ def _stream(*events: dict) -> str:
     return "\n".join(json.dumps(event) for event in events) + "\n"
 
 
-def _assistant(*blocks: dict, msg_id: str | None = None, usage: dict | None = None) -> dict:
+def _assistant(
+    *blocks: dict,
+    msg_id: str | None = None,
+    usage: dict | None = None,
+    parent: str | None = None,
+) -> dict:
     message: dict = {"content": list(blocks)}
     if msg_id is not None:
         message["id"] = msg_id
     if usage is not None:
         message["usage"] = usage
-    return {"type": "assistant", "message": message}
+    event: dict = {"type": "assistant", "message": message}
+    if parent is not None:
+        # Tags the turn as coming from inside a delegation, exactly as the CLI
+        # does for a subagent's turns.
+        event["parent_tool_use_id"] = parent
+    return event
 
 
-def _user(*blocks: dict) -> dict:
-    return {"type": "user", "message": {"content": list(blocks)}}
+def _user(*blocks: dict, parent: str | None = None) -> dict:
+    event: dict = {"type": "user", "message": {"content": list(blocks)}}
+    if parent is not None:
+        event["parent_tool_use_id"] = parent
+    return event
 
 
 SAMPLE_STREAM = _stream(
@@ -230,6 +243,215 @@ def test_parse_stream_json_emits_canonical_trajectory() -> None:
             "result": "v1.30",
             "status": "completed",
         },
+    ]
+
+
+def test_parse_stream_json_omits_attribution_when_nothing_delegated() -> None:
+    """A single-agent run serializes exactly as it did before attribution existed.
+
+    The metrics layer re-serializes the trajectory into the judge's prompt, so an
+    ``actor`` key appearing on runs that never delegate would move their scores.
+    """
+    _output, trajectory, _tokens, _errors = parse_stream_json(SAMPLE_STREAM)
+    assert all(entry.keys() == {"name", "args", "result", "status"} for entry in trajectory)
+
+
+# Mirrors a real ``--verbose`` capture, minus the CLI's own ``subagent_type``
+# stamp: the top-level agent runs a tool, spawns a delegate named only by the
+# *model* in the spawning call's arguments, and the delegate's turns come back on
+# the same stream tagged with the spawning call's id. Exercises the
+# lowest-authority naming source; the CLI-stamped ones are covered below.
+DELEGATED_STREAM = _stream(
+    _assistant({"type": "tool_use", "id": "root-1", "name": "Read", "input": {"f": "a.yaml"}}),
+    _user({"type": "tool_result", "tool_use_id": "root-1", "content": "kind: Pod"}),
+    _assistant(
+        {
+            "type": "tool_use",
+            "id": "spawn-1",
+            "name": "Task",
+            "input": {"subagent_type": "cluster", "prompt": "inspect the cluster"},
+        }
+    ),
+    _assistant(
+        {"type": "tool_use", "id": "sub-1", "name": "Bash", "input": {"command": "kubectl get po"}},
+        parent="spawn-1",
+    ),
+    _user({"type": "tool_result", "tool_use_id": "sub-1", "content": "pod//x"}, parent="spawn-1"),
+    _user({"type": "tool_result", "tool_use_id": "spawn-1", "content": "one pod is crashing"}),
+    {"type": "result", "subtype": "success", "result": "Root cause: bad image tag."},
+)
+
+
+def test_parse_stream_json_attributes_subagent_calls_to_their_delegate() -> None:
+    """A delegate's calls are labeled with its role, not merged into the router's."""
+    _output, trajectory, _tokens, errors = parse_stream_json(DELEGATED_STREAM)
+    assert errors == []
+    assert [(e["name"], e["actor"]) for e in trajectory] == [
+        ("Read", "root"),
+        ("Task", "root"),
+        ("Bash", "cluster"),
+    ]
+    # The delegate's call links back to the call that spawned it, so a metric can
+    # reconstruct the fleet rather than reading a flat list.
+    assert trajectory[2]["parent_id"] == trajectory[1]["call_id"] == "spawn-1"
+    assert trajectory[0]["call_id"] == "root-1"
+    assert "parent_id" not in trajectory[0]
+
+
+def test_parse_stream_json_still_folds_results_into_attributed_calls() -> None:
+    """Attribution rides alongside the existing result/status folding."""
+    _output, trajectory, _tokens, _errors = parse_stream_json(DELEGATED_STREAM)
+    assert trajectory[2]["result"] == "pod//x"
+    assert all(entry["status"] == "completed" for entry in trajectory)
+
+
+def test_parse_stream_json_names_a_delegate_from_the_envelope_stamp() -> None:
+    """The CLI stamps ``subagent_type`` on each delegated turn; that names the actor."""
+    blob = _stream(
+        _assistant({"type": "tool_use", "id": "spawn-1", "name": "Task", "input": {}}),
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "spawn-1",
+            "subagent_type": "operator",
+            "message": {"content": [{"type": "tool_use", "id": "sub-1", "name": "Bash"}]},
+        },
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    assert [e["actor"] for e in trajectory] == ["root", "operator"]
+
+
+def test_parse_stream_json_names_a_delegate_from_the_task_lifecycle_event() -> None:
+    """``system``/``task_started`` names the delegate, keyed by the spawning call."""
+    blob = _stream(
+        _assistant({"type": "tool_use", "id": "spawn-1", "name": "Task", "input": {}}),
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "tool_use_id": "spawn-1",
+            "subagent_type": "cluster",
+            "spawn_depth": 1,
+        },
+        _assistant(
+            {"type": "tool_use", "id": "sub-1", "name": "Bash", "input": {}}, parent="spawn-1"
+        ),
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    assert [e["actor"] for e in trajectory] == ["root", "cluster"]
+
+
+def test_parse_stream_json_prefers_the_cli_stamp_over_the_model_supplied_label() -> None:
+    """The label the agent under test passed loses to the one the CLI stamped.
+
+    The argument is model-authored, so it is the one an agent could misreport;
+    the stamp is the CLI's own bookkeeping.
+    """
+    blob = _stream(
+        _assistant(
+            {
+                "type": "tool_use",
+                "id": "spawn-1",
+                "name": "Task",
+                "input": {"subagent_type": "read-only-auditor"},
+            }
+        ),
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "tool_use_id": "spawn-1",
+            "subagent_type": "operator",
+        },
+        _assistant(
+            {"type": "tool_use", "id": "sub-1", "name": "Bash", "input": {}}, parent="spawn-1"
+        ),
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    assert trajectory[1]["actor"] == "operator"
+
+
+def test_parse_stream_json_names_a_delegate_whose_spawning_call_never_arrived() -> None:
+    """A truncated stream can lose the spawning ``tool_use`` block.
+
+    The delegated turn still carries its own name, so the call is attributed
+    rather than falling back to an anonymous label.
+    """
+    blob = _stream(
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "spawn-gone",
+            "subagent_type": "cluster",
+            "message": {"content": [{"type": "tool_use", "id": "sub-1", "name": "Bash"}]},
+        },
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    assert [e["actor"] for e in trajectory] == ["cluster"]
+
+
+def test_parse_stream_json_keeps_two_unnamed_delegates_apart() -> None:
+    """Distinct anonymous delegates must not collapse onto one actor.
+
+    Two workers sharing a label reads as a single agent having made every call —
+    the same misattribution as folding them into the root, one level down.
+    """
+    blob = _stream(
+        _assistant({"type": "tool_use", "id": "spawn-a", "name": "Task", "input": {}}),
+        _assistant({"type": "tool_use", "id": "spawn-b", "name": "Task", "input": {}}),
+        _assistant({"type": "tool_use", "id": "a1", "name": "Bash", "input": {}}, parent="spawn-a"),
+        _assistant({"type": "tool_use", "id": "b1", "name": "Bash", "input": {}}, parent="spawn-b"),
+        _assistant({"type": "tool_use", "id": "a2", "name": "Read", "input": {}}, parent="spawn-a"),
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    actors = [e["actor"] for e in trajectory]
+    assert actors == ["root", "root", "subagent-1", "subagent-2", "subagent-1"]
+
+
+def test_parse_stream_json_labels_an_unnamed_delegate_as_a_subagent() -> None:
+    """A delegation whose spawning call names no role is still not read as the router's.
+
+    Folding it into ``root`` would assert the top-level agent made a call it did
+    not make — the misattribution this exists to prevent.
+    """
+    blob = _stream(
+        _assistant({"type": "tool_use", "id": "spawn-1", "name": "Task", "input": {}}),
+        _assistant(
+            {"type": "tool_use", "id": "sub-1", "name": "Bash", "input": {}}, parent="spawn-1"
+        ),
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    assert [(e["name"], e["actor"]) for e in trajectory] == [
+        ("Task", "root"),
+        ("Bash", "subagent-1"),
+    ]
+
+
+def test_parse_stream_json_attributes_a_nested_delegation_to_the_inner_delegate() -> None:
+    """A delegate that itself delegates: the innermost call is the inner delegate's."""
+    blob = _stream(
+        _assistant(
+            {
+                "type": "tool_use",
+                "id": "spawn-outer",
+                "name": "Task",
+                "input": {"subagent_type": "cluster"},
+            }
+        ),
+        _assistant(
+            {
+                "type": "tool_use",
+                "id": "spawn-inner",
+                "name": "Task",
+                "input": {"subagent_type": "operator"},
+            },
+            parent="spawn-outer",
+        ),
+        _assistant(
+            {"type": "tool_use", "id": "leaf", "name": "Bash", "input": {}}, parent="spawn-inner"
+        ),
+    )
+    _output, trajectory, _tokens, _errors = parse_stream_json(blob)
+    assert [(e["name"], e["actor"]) for e in trajectory] == [
+        ("Task", "root"),
+        ("Task", "cluster"),
+        ("Bash", "operator"),
     ]
 
 
