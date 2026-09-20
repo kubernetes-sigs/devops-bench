@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: freight
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: freight-quota
+  namespace: freight
+  labels:
+    owner: platform-team
+  annotations:
+    governance.acme.io/owner: platform-team
+    governance.acme.io/ticket: https://tickets.acme.internal/CAP-2107
+spec:
+  hard:
+    requests.memory: 896Mi
