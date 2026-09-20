@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fraud-worker
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fraud-worker-audit
+  namespace: fraud-worker
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: fraud-worker-audit-job
+            image: "busybox:1.36"
+            command:
+            - sh
+            - "-c"
+            - "exit 1"
+            resources:
+              requests:
+                cpu: "35m"
+                memory: "19Mi"
+              limits:
+                cpu: "70m"
+                memory: "38Mi"
+          restartPolicy: Never
+      ttlSecondsAfterFinished: 600
+      backoffLimit: 0
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fraud-worker-report
+  namespace: fraud-worker
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: fraud-worker-report-job
+            image: "busybox:1.36"
+            command:
+            - sh
+            - "-c"
+            - "exit 1"
+            resources:
+              requests:
+                cpu: "36m"
+                memory: "32Mi"
+              limits:
+                cpu: "72m"
+                memory: "64Mi"
+          restartPolicy: Never
+      ttlSecondsAfterFinished: 600
+      backoffLimit: 0
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fraud-worker-rotate
+  namespace: fraud-worker
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: fraud-worker-rotate-job
+            image: "busybox:1.36"
+            command:
+            - sh
+            - "-c"
+            - "exit 0"
+            resources:
+              requests:
+                cpu: "22m"
+                memory: "37Mi"
+              limits:
+                cpu: "44m"
+                memory: "74Mi"
+          restartPolicy: Never
+      ttlSecondsAfterFinished: 600

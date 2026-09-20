@@ -1,0 +1,805 @@
+{
+  "seed": 106,
+  "namespaces_requested": 20,
+  "namespaces_generated": 20,
+  "archetype_counts": {
+    "queue-pipeline": 3,
+    "legacy-dormant": 2,
+    "flaky-dev": 4,
+    "cross-namespace-consumer": 5,
+    "web-chain": 1,
+    "reconciler-owned": 2,
+    "batch-cron": 1,
+    "stateful-store": 1,
+    "daemon-agent": 1
+  },
+  "namespaces": [
+    {
+      "name": "audit-api",
+      "archetype": "queue-pipeline",
+      "domain": "audit",
+      "manifest_file": "manifests/audit-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "audit-api-broker",
+          "role": "cache"
+        },
+        {
+          "kind": "Service",
+          "name": "audit-api-broker",
+          "role": "cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-api-publisher",
+          "role": "producer"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-api-drainer",
+          "role": "consumer"
+        }
+      ],
+      "params": {
+        "producer_interval_s": 5,
+        "consumer_interval_s": 1
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "audit-api-broker",
+          "namespace": "audit-api"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-api-publisher",
+          "namespace": "audit-api"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-api-drainer",
+          "namespace": "audit-api"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "queue_service_fqdn": "audit-api-broker.audit-api.svc.cluster.local"
+    },
+    {
+      "name": "fraud-api",
+      "archetype": "legacy-dormant",
+      "domain": "fraud",
+      "manifest_file": "manifests/fraud-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-v1",
+          "role": "dormant"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-legacy",
+          "role": "dormant"
+        }
+      ],
+      "params": {},
+      "healthy_workloads": [],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-v1",
+          "namespace": "fraud-api",
+          "reason": "scaled-to-zero"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-legacy",
+          "namespace": "fraud-api",
+          "reason": "scaled-to-zero"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "billing-api",
+      "archetype": "flaky-dev",
+      "domain": "billing",
+      "manifest_file": "manifests/billing-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "billing-api-experimental",
+          "role": "crashloop"
+        },
+        {
+          "kind": "Deployment",
+          "name": "billing-api-steady",
+          "role": "healthy"
+        }
+      ],
+      "params": {
+        "crash_delay_s": 5
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "billing-api-steady",
+          "namespace": "billing-api"
+        }
+      ],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "billing-api-experimental",
+          "namespace": "billing-api",
+          "reason": "crashloop"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "fraud-cache",
+      "archetype": "queue-pipeline",
+      "domain": "fraud",
+      "manifest_file": "manifests/fraud-cache.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "fraud-cache-redis",
+          "role": "cache"
+        },
+        {
+          "kind": "Service",
+          "name": "fraud-cache-redis",
+          "role": "cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-cache-writer",
+          "role": "producer"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-cache-reader",
+          "role": "consumer"
+        }
+      ],
+      "params": {
+        "producer_interval_s": 1,
+        "consumer_interval_s": 3
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "fraud-cache-redis",
+          "namespace": "fraud-cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-cache-writer",
+          "namespace": "fraud-cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-cache-reader",
+          "namespace": "fraud-cache"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "queue_service_fqdn": "fraud-cache-redis.fraud-cache.svc.cluster.local"
+    },
+    {
+      "name": "identity-sync",
+      "archetype": "cross-namespace-consumer",
+      "domain": "identity",
+      "manifest_file": "manifests/identity-sync.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "identity-sync-bridge",
+          "role": "caller"
+        }
+      ],
+      "params": {
+        "traffic_interval_s": 4,
+        "target_namespace": "notifications-sync",
+        "target_fqdn": "notifications-sync-web.notifications-sync.svc.cluster.local"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "identity-sync-bridge",
+          "namespace": "identity-sync"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "depends_on": "notifications-sync"
+    },
+    {
+      "name": "notifications-sync",
+      "archetype": "web-chain",
+      "domain": "notifications",
+      "manifest_file": "manifests/notifications-sync.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-web",
+          "role": "frontend"
+        },
+        {
+          "kind": "Service",
+          "name": "notifications-sync-web",
+          "role": "frontend"
+        },
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-backend",
+          "role": "backend"
+        },
+        {
+          "kind": "Service",
+          "name": "notifications-sync-backend",
+          "role": "backend"
+        }
+      ],
+      "params": {
+        "frontend_replicas": 3,
+        "backend_replicas": 3
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-web",
+          "namespace": "notifications-sync"
+        },
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-backend",
+          "namespace": "notifications-sync"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "frontend_service": "notifications-sync-web"
+    },
+    {
+      "name": "recommender-api",
+      "archetype": "flaky-dev",
+      "domain": "recommender",
+      "manifest_file": "manifests/recommender-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "recommender-api-canary",
+          "role": "crashloop"
+        },
+        {
+          "kind": "Deployment",
+          "name": "recommender-api-stable",
+          "role": "healthy"
+        }
+      ],
+      "params": {
+        "crash_delay_s": 11
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "recommender-api-stable",
+          "namespace": "recommender-api"
+        }
+      ],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "recommender-api-canary",
+          "namespace": "recommender-api",
+          "reason": "crashloop"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "warehouse-sync",
+      "archetype": "reconciler-owned",
+      "domain": "warehouse",
+      "manifest_file": "manifests/warehouse-sync.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-sync-pool",
+          "role": "managed"
+        },
+        {
+          "kind": "ConfigMap",
+          "name": "warehouse-sync-desired-state",
+          "role": "desired-state"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "warehouse-sync-reconciler"
+        },
+        {
+          "kind": "Role",
+          "name": "warehouse-sync-reconciler"
+        },
+        {
+          "kind": "RoleBinding",
+          "name": "warehouse-sync-reconciler"
+        },
+        {
+          "kind": "CronJob",
+          "name": "warehouse-sync-reconciler",
+          "role": "reconciler"
+        }
+      ],
+      "params": {
+        "desired_replicas": 2
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-sync-pool",
+          "namespace": "warehouse-sync"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [
+        {
+          "name": "warehouse-sync-reconciler",
+          "schedule": "*/2 * * * *",
+          "expect": "succeed",
+          "ttl_seconds_after_finished": null,
+          "role": "reconciler"
+        }
+      ]
+    },
+    {
+      "name": "fraud-worker",
+      "archetype": "batch-cron",
+      "domain": "fraud",
+      "manifest_file": "manifests/fraud-worker.yaml",
+      "objects": [
+        {
+          "kind": "CronJob",
+          "name": "fraud-worker-audit"
+        },
+        {
+          "kind": "CronJob",
+          "name": "fraud-worker-report"
+        },
+        {
+          "kind": "CronJob",
+          "name": "fraud-worker-rotate"
+        }
+      ],
+      "params": {
+        "job_count": 3
+      },
+      "healthy_workloads": [],
+      "excluded_workloads": [],
+      "cronjobs": [
+        {
+          "name": "fraud-worker-audit",
+          "schedule": "*/5 * * * *",
+          "expect": "fail",
+          "ttl_seconds_after_finished": null
+        },
+        {
+          "name": "fraud-worker-report",
+          "schedule": "*/5 * * * *",
+          "expect": "fail",
+          "ttl_seconds_after_finished": 300
+        },
+        {
+          "name": "fraud-worker-rotate",
+          "schedule": "*/1 * * * *",
+          "expect": "succeed",
+          "ttl_seconds_after_finished": 600
+        }
+      ]
+    },
+    {
+      "name": "catalog-cache",
+      "archetype": "cross-namespace-consumer",
+      "domain": "catalog",
+      "manifest_file": "manifests/catalog-cache.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "catalog-cache-client",
+          "role": "caller"
+        }
+      ],
+      "params": {
+        "traffic_interval_s": 10,
+        "target_namespace": "notifications-sync",
+        "target_fqdn": "notifications-sync-web.notifications-sync.svc.cluster.local"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "catalog-cache-client",
+          "namespace": "catalog-cache"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "depends_on": "notifications-sync"
+    },
+    {
+      "name": "telemetry-worker",
+      "archetype": "flaky-dev",
+      "domain": "telemetry",
+      "manifest_file": "manifests/telemetry-worker.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "telemetry-worker-experimental",
+          "role": "crashloop"
+        },
+        {
+          "kind": "Deployment",
+          "name": "telemetry-worker-stable",
+          "role": "healthy"
+        }
+      ],
+      "params": {
+        "crash_delay_s": 14
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "telemetry-worker-stable",
+          "namespace": "telemetry-worker"
+        }
+      ],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "telemetry-worker-experimental",
+          "namespace": "telemetry-worker",
+          "reason": "crashloop"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "checkout-gateway",
+      "archetype": "cross-namespace-consumer",
+      "domain": "checkout",
+      "manifest_file": "manifests/checkout-gateway.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "checkout-gateway-client",
+          "role": "caller"
+        }
+      ],
+      "params": {
+        "traffic_interval_s": 4,
+        "target_namespace": "notifications-sync",
+        "target_fqdn": "notifications-sync-web.notifications-sync.svc.cluster.local"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "checkout-gateway-client",
+          "namespace": "checkout-gateway"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "depends_on": "notifications-sync"
+    },
+    {
+      "name": "telemetry-sync",
+      "archetype": "stateful-store",
+      "domain": "telemetry",
+      "manifest_file": "manifests/telemetry-sync.yaml",
+      "objects": [
+        {
+          "kind": "Service",
+          "name": "telemetry-sync-ledger",
+          "role": "headless"
+        },
+        {
+          "kind": "StatefulSet",
+          "name": "telemetry-sync-ledger",
+          "role": "store"
+        }
+      ],
+      "params": {
+        "storage_size": "2Gi"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "StatefulSet",
+          "name": "telemetry-sync-ledger",
+          "namespace": "telemetry-sync"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": []
+    },
+    {
+      "name": "search-api",
+      "archetype": "cross-namespace-consumer",
+      "domain": "search",
+      "manifest_file": "manifests/search-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "search-api-caller",
+          "role": "caller"
+        }
+      ],
+      "params": {
+        "traffic_interval_s": 2,
+        "target_namespace": "notifications-sync",
+        "target_fqdn": "notifications-sync-web.notifications-sync.svc.cluster.local"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "search-api-caller",
+          "namespace": "search-api"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "depends_on": "notifications-sync"
+    },
+    {
+      "name": "catalog-api",
+      "archetype": "legacy-dormant",
+      "domain": "catalog",
+      "manifest_file": "manifests/catalog-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "catalog-api-v1",
+          "role": "dormant"
+        }
+      ],
+      "params": {},
+      "healthy_workloads": [],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "catalog-api-v1",
+          "namespace": "catalog-api",
+          "reason": "scaled-to-zero"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "warehouse-gateway",
+      "archetype": "reconciler-owned",
+      "domain": "warehouse",
+      "manifest_file": "manifests/warehouse-gateway.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-gateway-managed",
+          "role": "managed"
+        },
+        {
+          "kind": "ConfigMap",
+          "name": "warehouse-gateway-desired-state",
+          "role": "desired-state"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "warehouse-gateway-controller"
+        },
+        {
+          "kind": "Role",
+          "name": "warehouse-gateway-controller"
+        },
+        {
+          "kind": "RoleBinding",
+          "name": "warehouse-gateway-controller"
+        },
+        {
+          "kind": "CronJob",
+          "name": "warehouse-gateway-controller",
+          "role": "reconciler"
+        }
+      ],
+      "params": {
+        "desired_replicas": 2
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-gateway-managed",
+          "namespace": "warehouse-gateway"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [
+        {
+          "name": "warehouse-gateway-controller",
+          "schedule": "*/1 * * * *",
+          "expect": "succeed",
+          "ttl_seconds_after_finished": null,
+          "role": "reconciler"
+        }
+      ]
+    },
+    {
+      "name": "identity-gateway",
+      "archetype": "cross-namespace-consumer",
+      "domain": "identity",
+      "manifest_file": "manifests/identity-gateway.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "identity-gateway-relay",
+          "role": "caller"
+        }
+      ],
+      "params": {
+        "traffic_interval_s": 6,
+        "target_namespace": "notifications-sync",
+        "target_fqdn": "notifications-sync-web.notifications-sync.svc.cluster.local"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "identity-gateway-relay",
+          "namespace": "identity-gateway"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "depends_on": "notifications-sync"
+    },
+    {
+      "name": "identity-api",
+      "archetype": "daemon-agent",
+      "domain": "identity",
+      "manifest_file": "manifests/identity-api.yaml",
+      "objects": [
+        {
+          "kind": "DaemonSet",
+          "name": "identity-api-shipper",
+          "role": "agent"
+        }
+      ],
+      "params": {
+        "tick_interval_s": 40
+      },
+      "healthy_workloads": [
+        {
+          "kind": "DaemonSet",
+          "name": "identity-api-shipper",
+          "namespace": "identity-api"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": []
+    },
+    {
+      "name": "audit-cache",
+      "archetype": "queue-pipeline",
+      "domain": "audit",
+      "manifest_file": "manifests/audit-cache.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "audit-cache-cache",
+          "role": "cache"
+        },
+        {
+          "kind": "Service",
+          "name": "audit-cache-cache",
+          "role": "cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-cache-producer",
+          "role": "producer"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-cache-reader",
+          "role": "consumer"
+        }
+      ],
+      "params": {
+        "producer_interval_s": 5,
+        "consumer_interval_s": 5
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "audit-cache-cache",
+          "namespace": "audit-cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-cache-producer",
+          "namespace": "audit-cache"
+        },
+        {
+          "kind": "Deployment",
+          "name": "audit-cache-reader",
+          "namespace": "audit-cache"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "queue_service_fqdn": "audit-cache-cache.audit-cache.svc.cluster.local"
+    },
+    {
+      "name": "recommender-worker",
+      "archetype": "flaky-dev",
+      "domain": "recommender",
+      "manifest_file": "manifests/recommender-worker.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "recommender-worker-preview",
+          "role": "crashloop"
+        },
+        {
+          "kind": "Deployment",
+          "name": "recommender-worker-stable",
+          "role": "healthy"
+        }
+      ],
+      "params": {
+        "crash_delay_s": 6
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "recommender-worker-stable",
+          "namespace": "recommender-worker"
+        }
+      ],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "recommender-worker-preview",
+          "namespace": "recommender-worker",
+          "reason": "crashloop"
+        }
+      ],
+      "cronjobs": []
+    }
+  ],
+  "edges": [
+    {
+      "from": "identity-sync",
+      "to": "notifications-sync",
+      "type": "cross-namespace-http"
+    },
+    {
+      "from": "catalog-cache",
+      "to": "notifications-sync",
+      "type": "cross-namespace-http"
+    },
+    {
+      "from": "checkout-gateway",
+      "to": "notifications-sync",
+      "type": "cross-namespace-http"
+    },
+    {
+      "from": "search-api",
+      "to": "notifications-sync",
+      "type": "cross-namespace-http"
+    },
+    {
+      "from": "identity-gateway",
+      "to": "notifications-sync",
+      "type": "cross-namespace-http"
+    }
+  ]
+}

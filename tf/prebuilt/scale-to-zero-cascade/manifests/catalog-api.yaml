@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: catalog-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api-v1
+  namespace: catalog-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: catalog-api-v1
+    lifecycle: legacy
+  annotations:
+    substrate/decommissioned: "true"
+    substrate/decommission-reason: "cost review, awaiting sign-off"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: catalog-api-v1
+  template:
+    metadata:
+      labels:
+        app: catalog-api-v1
+    spec:
+      containers:
+      - name: catalog-api-v1
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "17m"
+            memory: "17Mi"
+          limits:
+            cpu: "34m"
+            memory: "34Mi"

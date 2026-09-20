@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: identity-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-sync-bridge
+  namespace: identity-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: identity-sync-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-sync-bridge
+  template:
+    metadata:
+      labels:
+        app: identity-sync-bridge
+    spec:
+      containers:
+      - name: identity-sync-bridge
+        image: "busybox:1.36"
+        command:
+        - sh
+        - "-c"
+        - "while true; do if wget -q -O /dev/null -S http://notifications-sync-web.notifications-sync.svc.cluster.local/ 2>&1 | grep HTTP; then :; else echo \"identity-sync: FAILED to connect to http://notifications-sync-web.notifications-sync.svc.cluster.local/\"; fi; sleep 4; done"
+        resources:
+          requests:
+            cpu: "39m"
+            memory: "53Mi"
+          limits:
+            cpu: "78m"
+            memory: "106Mi"

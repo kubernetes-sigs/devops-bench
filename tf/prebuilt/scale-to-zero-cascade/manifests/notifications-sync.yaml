@@ -1,0 +1,223 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+# 400Mi against 292Mi of boot requests (3 web x 61Mi + 3 backend x 23Mi +
+# 3 indexer x 12Mi + deploy-runner x 4Mi). The inflated indexer only overruns
+# it once web is back at three replicas.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: notifications-sync-compute
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  hard:
+    requests.memory: "400Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-sync-web
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: notifications-sync-web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: notifications-sync-web
+  template:
+    metadata:
+      labels:
+        app: notifications-sync-web
+    spec:
+      containers:
+      - name: notifications-sync-web
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "31m"
+            memory: "61Mi"
+          limits:
+            cpu: "62m"
+            memory: "122Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications-sync-web
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: notifications-sync-web
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-sync-backend
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: notifications-sync-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: notifications-sync-backend
+  template:
+    metadata:
+      labels:
+        app: notifications-sync-backend
+    spec:
+      containers:
+      - name: notifications-sync-backend
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "30m"
+            memory: "23Mi"
+          limits:
+            cpu: "60m"
+            memory: "46Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications-sync-backend
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: notifications-sync-backend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+# setup.sh inflates requests.memory to 40Mi (limits.memory to 80Mi) after the
+# ConfigMap fault has landed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-sync-indexer
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: notifications-sync-indexer
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: notifications-sync-indexer
+  # A quota-wedged rollout flips Progressing to False within 60s; healthy
+  # rollouts of this image finish in seconds.
+  progressDeadlineSeconds: 60
+  template:
+    metadata:
+      labels:
+        app: notifications-sync-indexer
+    spec:
+      containers:
+      - name: notifications-sync-indexer
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "12Mi"
+          limits:
+            cpu: "20m"
+            memory: "24Mi"
+---
+# deploy-runner's requests.memory stays at 4Mi because it counts against the
+# quota arithmetic; limits.memory is 96Mi because kubectl is OOM-killed under
+# small limits.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: deploy-runner
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deploy-runner
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deploy-runner
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+subjects:
+- kind: ServiceAccount
+  name: deploy-runner
+  namespace: notifications-sync
+roleRef:
+  kind: Role
+  name: deploy-runner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deploy-runner
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: deploy-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deploy-runner
+  template:
+    metadata:
+      labels:
+        app: deploy-runner
+    spec:
+      serviceAccountName: deploy-runner
+      containers:
+      - name: deploy-runner
+        image: "bitnamilegacy/kubectl:1.29"
+        command:
+        - sh
+        - "-c"
+        - "while true; do kubectl -n notifications-sync rollout restart deployment/notifications-sync-indexer >/dev/null 2>&1; RC=$?; if [ \"$RC\" -eq 0 ]; then echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) restart notifications-sync-indexer\"; else echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) restart notifications-sync-indexer failed rc=$RC\"; fi; sleep 90; done"
+        resources:
+          requests:
+            cpu: "20m"
+            memory: "4Mi"
+          limits:
+            cpu: "40m"
+            memory: "96Mi"

@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: identity-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: identity-api-shipper
+  namespace: identity-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: identity-api-shipper
+spec:
+  selector:
+    matchLabels:
+      app: identity-api-shipper
+  template:
+    metadata:
+      labels:
+        app: identity-api-shipper
+    spec:
+      containers:
+      - name: identity-api-shipper
+        image: "busybox:1.36"
+        command:
+        - sh
+        - "-c"
+        - "while true; do echo tick $(date +%s); sleep 40; done"
+        resources:
+          requests:
+            cpu: "23m"
+            memory: "23Mi"
+          limits:
+            cpu: "46m"
+            memory: "46Mi"
