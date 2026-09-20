@@ -1,0 +1,57 @@
+# workload-3 is declared in gitops-state but never created; reconciling it is
+# part of the task.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-1
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: workload-1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workload-1
+  template:
+    metadata:
+      labels:
+        app: workload-1
+    spec:
+      containers:
+      - name: app
+        image: nginx:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-2
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: workload-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: workload-2
+  template:
+    metadata:
+      labels:
+        app: workload-2
+    spec:
+      containers:
+      - name: app
+        image: redis:latest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitops-state
+  namespace: {{ .Values.namespace }}
+data:
+  workloads: |
+    - name: workload-1
+      image: nginx:latest
+    - name: workload-2
+      image: redis:latest
+    - name: workload-3
+      image: memcached:latest

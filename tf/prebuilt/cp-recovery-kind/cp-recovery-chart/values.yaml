@@ -1,0 +1,3 @@
+# Overridden by the helm_release in ../main.tf.
+namespace: cp-recovery
+clusterName: devops-bench-kind
