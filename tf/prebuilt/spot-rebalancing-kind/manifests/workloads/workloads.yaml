@@ -5,9 +5,6 @@ metadata:
   labels:
     purpose: cost-optimization
 ---
-# CRITICAL / stateful — cannot tolerate Spot preemption, must stay on on-demand
-# capacity. Also over-provisioned: requests far exceed the rightsizing report's
-# recommendation.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,7 +37,6 @@ spec:
               cpu: "1"
               memory: "1Gi"
 ---
-# CRITICAL / stateful — session data store, must stay on on-demand.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -73,7 +69,6 @@ spec:
               cpu: "250m"
               memory: "512Mi"
 ---
-# BATCH — fault-tolerant, safe to run on Spot. Also over-provisioned.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -106,7 +101,6 @@ spec:
               cpu: "1"
               memory: "512Mi"
 ---
-# BATCH — fault-tolerant, safe to run on Spot. Heavily over-provisioned.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -139,7 +133,6 @@ spec:
               cpu: "2"
               memory: "2Gi"
 ---
-# BATCH — fault-tolerant, safe to run on Spot. Already right-sized (not in the report).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
