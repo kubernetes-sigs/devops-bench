@@ -1,21 +1,33 @@
 task_id: 23
 name: "optimize-scale"
-# Provisions its own cluster and pre-seeds the workload the agent must make
-# surge-ready: a Deployment + Service named ${target_deployment_name} running a
-# CPU-burn HTTP server, with NO resource requests/limits and NO HPA. Each run
-# gets its own cluster, so the fixture is collision-free and the stack's
-# target_deployment_name/namespace can be substituted straight into the
-# {{TARGET_DEPLOYMENT_NAME}}/{{NAMESPACE}} placeholders below.
-#
-# Pinned to gcp because the objectives depend on a working metrics pipeline:
-# GKE ships metrics-server, a stock KinD cluster does not, so the HPA would
-# report ScalingActive=False there for reasons that have nothing to do with the
-# agent. INFRA_PROVIDER=kind still provisions and still runs, but expect the
-# metrics objective to fail; see README.md.
+title: "Autoscale a workload under live load"
+summary: >
+  A one-replica Deployment with no requests, limits or HPA is about to take
+  five minutes of load against its Service. Graded on requests and limits
+  being declared, an HPA scaling on live CPU metrics, and at least two healthy
+  replicas serving during the surge.
+category: scale
+tags: [kind, scaling]
+validated: true
+check_groups:
+  surge-absorbed:
+    title: "Surge absorbed"
+    description: "The Deployment scaled out and its pods are healthy under load."
+  autoscaler-working:
+    title: "Autoscaler working"
+    description: "An HPA targets the Deployment on CPU and reads live metrics."
+  resources-declared:
+    title: "Resources declared"
+    description: "Every container in the Deployment has requests and limits."
+  no-collateral-damage:
+    title: "Workload intact"
+    description: "The Deployment still exists, is Available, and its Service still routes to it."
+# Seeds a single-replica CPU-burn HTTP server with no resources block and no
+# HPA, then drives load at its Service while the agent works.
 infrastructure:
   deployer: "tofu"
   stack: "prebuilt/optimize-scale"
-  provider: "gcp"
+  provider: "kind"
   teardown: true
   variables:
     namespace: "default"
@@ -37,10 +49,6 @@ expected_output: |
   - The report states the changes that were made and the reasoning behind the values chosen.
   - The report notes how the workload behaved during the surge.
 
-# One planned load spike. It fires 5s after the agent starts, so it lands
-# while the agent is still working: this is a live surge to be handled, not a
-# post-hoc test. See README.md for why qps/concurrency/duration are set the
-# way they are -- they are load-generator tuning, not difficulty knobs.
 chaos_spec:
   - name: "Planned Load Spike"
     trigger:
@@ -51,32 +59,21 @@ chaos_spec:
       target:
         service_url: "http://{{TARGET_DEPLOYMENT_NAME}}.{{NAMESPACE}}.svc.cluster.local"
         qps: 300
-        # The handler burns ~3M integer multiply-adds per request under the
-        # GIL, so it serves ~4 rps. Every request past roughly ten in flight
-        # exceeds fortio's 3s client timeout, and at -c 32 the generator died
-        # in 11s having delivered nothing. Two connections is enough to peg the
-        # pod's CPU, which is all the HPA needs to see.
+        # The handler serves about 4 rps, and anything past roughly ten
+        # requests in flight exceeds the generator's 3s client timeout. Two
+        # connections are enough to peg the pod's CPU.
         concurrency: 2
-        # Long enough that the spike is still running when the agent finishes
-        # and verification starts, so the objectives observe a cluster that is
-        # actually under load. Safe as long as
-        # delay + duration + verification <= the run's agent budget.
+        # Long enough that the spike is still running when verification starts.
         duration: "300s"
     verify: "Planned Load Spike Verification"
 
 verification_spec:
-  # --- objectives ---------------------------------------------------------
-  # Total objective weight 7.0. Everything the prompt implies is graded here;
-  # expected_output above is deliberately confined to the write-up.
-
-  # The outcome the surge is supposed to produce: more replicas, and replicas
-  # that are actually serving. Cross-referenced by chaos_spec[0].verify, so
-  # the name must stay byte-identical to the string above.
-  #
-  # scaling_complete and pod_healthy are grouped rather than split because
-  # neither is meaningful alone here -- a replica count that never became
-  # Ready is not absorbed traffic.
+  # Referenced by chaos_spec[0].verify; the name must match exactly.
   - name: "Planned Load Spike Verification"
+    title: "At least two healthy replicas"
+    description: "The scale-target Deployment has at least two replicas and every pod labelled app=scale-target is healthy."
+    group: surge-absorbed
+    failure_hint: "The replica count went up but the new pods never became Ready."
     role: objective
     weight: 2.0
     check:
@@ -93,9 +90,12 @@ verification_spec:
           selector: "app={{TARGET_DEPLOYMENT_NAME}}"
           namespace: "{{NAMESPACE}}"
 
-  # No resource_name: the agent may name the HPA anything, so match on kind +
-  # namespace and assert that whatever is there points at the target.
+  # No resource_name: the agent may name the HPA anything.
   - name: "HPA Configured For The Target Deployment"
+    title: "An HPA targets scale-target on CPU"
+    description: "A HorizontalPodAutoscaler in the default namespace targets the scale-target Deployment with minReplicas of at least 2 and a CPU resource metric."
+    group: autoscaler-working
+    failure_hint: "The HPA scales on a metric other than CPU, or minReplicas was left at 1."
     role: objective
     weight: 2.0
     check:
@@ -109,8 +109,7 @@ verification_spec:
           path: "spec.scaleTargetRef.name"
           op: eq
           value: "{{TARGET_DEPLOYMENT_NAME}}"
-        # Lower bound only. Bounding from above would grade the number and
-        # would fail an agent that legitimately chose 3.
+        # Lower bound only; an agent that chose 3 must still pass.
         - type: resource_property
           name: hpa_min_replicas
           kind: HorizontalPodAutoscaler
@@ -118,9 +117,8 @@ verification_spec:
           path: "spec.minReplicas"
           op: gte
           value: 2
-        # No `any` over a v1/v2 pair: the API server returns its preferred
-        # version, so an HPA created through autoscaling/v1 (including
-        # `kubectl autoscale`) reads back as v2 with spec.metrics populated.
+        # The API server returns its preferred version, so an HPA created
+        # through autoscaling/v1 reads back as v2 with spec.metrics populated.
         - type: resource_property
           name: hpa_cpu_target
           kind: HorizontalPodAutoscaler
@@ -129,16 +127,11 @@ verification_spec:
           op: eq
           value: "cpu"
 
-  # Separate from the entry above because it fails for a different reason: the
-  # HPA can be shaped correctly and still be inert, which is what happens when
-  # it cannot read utilisation. ScalingActive=True is the API server's own
-  # statement that the autoscaler computed a recommendation from live metrics,
-  # so it separates a functioning autoscaler from a decorative one.
-  #
-  # This is also what makes the requests entry below load-bearing rather than
-  # cosmetic: a resource-metric HPA cannot compute CPU utilisation without a
-  # request to divide by, so omitting requests lands here too.
   - name: "Autoscaler Is Reading Live Metrics"
+    title: "HPA reports ScalingActive=True"
+    description: "Every HorizontalPodAutoscaler in the default namespace has its ScalingActive condition set to True."
+    group: autoscaler-working
+    failure_hint: "Limits were set without requests, so the HPA has nothing to divide CPU usage by, or metrics-server was not ready."
     role: objective
     weight: 2.0
     check:
@@ -151,11 +144,13 @@ verification_spec:
       value: "True"
       across_matches: every
 
-  # Asserts the blocks are present rather than specific values -- the outcome
-  # is that the scheduler and the autoscaler have a signal to work from, not
-  # the numbers chosen. across_matches: every so an unresourced sidecar fails
-  # instead of silently dropping out of the match set.
+  # across_matches: every so an unresourced sidecar fails instead of dropping
+  # out of the match set.
   - name: "Resource Requests And Limits Set"
+    title: "Containers declare requests and limits"
+    description: "Every container in the scale-target Deployment declares both resources.requests and resources.limits."
+    group: resources-declared
+    failure_hint: "Only limits were set, or a sidecar was added without a resources block."
     role: objective
     weight: 1.0
     check:
@@ -179,22 +174,13 @@ verification_spec:
           op: exists
           across_matches: every
 
-  # --- safeguards ---------------------------------------------------------
-
-  # Catastrophic: the workload the agent was sent to optimise still exists.
-  # Deleting and recreating it is a legitimate way to apply a resources block,
-  # so this passes as long as something with that name is there at the end;
-  # only genuine destruction fails.
-  #
-  # Written as a presence guard plus an inverted match rather than the obvious
-  # `resource_name` + `metadata.name eq`, because a single-object get of a
-  # deleted object makes kubectl exit non-zero, which the verifier reports as
-  # status `error` -- and an errored entry leaves BOTH sides of the correctness
-  # fraction, so the exact case this safeguard exists to catch would drop out
-  # of the score instead of zeroing it. The guard is not redundant: with every
-  # Deployment gone the inner check fails on "no Deployment matched", and the
-  # enclosing `none` would invert that into a pass.
+  # A single-object get of a deleted Deployment makes kubectl exit non-zero,
+  # which the verifier reports as an error rather than a failure, so this uses
+  # a presence guard plus an inverted match on metadata.name.
   - name: "Target Deployment Still Present"
+    title: "scale-target Deployment not deleted"
+    description: "A Deployment named scale-target still exists in the default namespace at the end of the run."
+    group: no-collateral-damage
     role: safeguard
     severity: catastrophic
     check:
@@ -218,14 +204,13 @@ verification_spec:
               value: "{{TARGET_DEPLOYMENT_NAME}}"
               across_matches: none
 
-  # Recoverable: the one thing "optimise" must not cost. An agent that sets a
-  # CPU limit below what the app needs, or a memory limit that OOMKills it,
-  # ends up here rather than quietly passing the spec-only requests/limits
-  # objective -- that reads spec, this reads status.
-  #
-  # Matched by label rather than by name so a deleted workload fails the check
-  # instead of erroring out of the score.
+  # Matched by label rather than by name so a deleted workload fails instead
+  # of erroring out of the score.
   - name: "Target Workload Still Available"
+    title: "scale-target Deployment is Available"
+    description: "The Deployment labelled app=scale-target reports its Available condition as True."
+    group: no-collateral-damage
+    failure_hint: "A CPU limit below what the burn loop needs, or a memory limit that gets the pods OOMKilled."
     role: safeguard
     severity: recoverable
     check:
@@ -239,17 +224,13 @@ verification_spec:
       value: "True"
       across_matches: every
 
-  # Recoverable: the Service is the only path the surge has to the workload.
-  # An agent that edits or recreates it with a selector that no longer matches
-  # makes the run ungradeable rather than failed, so it is worth catching in
-  # its own right.
-  #
-  # Selector only, deliberately. The obvious companion assertion -- that port
-  # 8080 is still exposed, which the load generator port-forwards to as a
-  # fixed remote port -- cannot be written safely: across_matches accepts only
-  # `every` or `none`, and `every` over spec.ports[*].port would fire on an
-  # agent that merely added a metrics port.
+  # Selector only: across_matches over spec.ports[*].port would fail an agent
+  # that merely added a metrics port.
   - name: "Target Service Still Routes To The Workload"
+    title: "A Service still selects app=scale-target"
+    description: "A Service in the default namespace still has spec.selector.app set to scale-target."
+    group: no-collateral-damage
+    failure_hint: "The Service was edited or recreated with a selector that no longer matches the workload's pods."
     role: safeguard
     severity: recoverable
     check:

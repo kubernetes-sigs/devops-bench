@@ -31,9 +31,8 @@ variable "cluster_name" {
 variable "location" {
   description = "GCP zone/region or 'local'"
   type        = string
-  # Empty by default so the cluster router picks the provider-appropriate value
-  # (us-central1-a for GKE, "local" for KinD), matching the minimum/gpu-stress-test
-  # stacks. A literal "local" here would be forwarded verbatim to the GKE module.
+  # Empty so the cluster module picks the provider default; a literal "local"
+  # would be forwarded verbatim to the GKE module.
   default = ""
 }
 
@@ -49,9 +48,9 @@ variable "machine_type" {
 
 
 variable "node_image" {
-  description = "The KinD node image to use"
+  description = "The kind node image. metrics-server v0.9.0 is verified against v1.30.0."
   type        = string
-  default     = null
+  default     = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
 }
 
 variable "kubeconfig_path" {
