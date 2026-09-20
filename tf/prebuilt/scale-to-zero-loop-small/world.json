@@ -1,0 +1,338 @@
+{
+  "seed": 106,
+  "namespaces_requested": 20,
+  "namespaces_generated": 20,
+  "archetype_counts": {
+    "queue-pipeline": 3,
+    "legacy-dormant": 2,
+    "flaky-dev": 4,
+    "cross-namespace-consumer": 5,
+    "web-chain": 1,
+    "reconciler-owned": 2,
+    "batch-cron": 1,
+    "stateful-store": 1,
+    "daemon-agent": 1
+  },
+  "namespaces": [
+    {
+      "name": "fraud-api",
+      "archetype": "legacy-dormant",
+      "domain": "fraud",
+      "manifest_file": "manifests/fraud-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-v1",
+          "role": "dormant"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-legacy",
+          "role": "dormant"
+        }
+      ],
+      "params": {},
+      "healthy_workloads": [],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-v1",
+          "namespace": "fraud-api",
+          "reason": "scaled-to-zero"
+        },
+        {
+          "kind": "Deployment",
+          "name": "fraud-api-legacy",
+          "namespace": "fraud-api",
+          "reason": "scaled-to-zero"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "billing-api",
+      "archetype": "flaky-dev",
+      "domain": "billing",
+      "manifest_file": "manifests/billing-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "billing-api-experimental",
+          "role": "crashloop"
+        },
+        {
+          "kind": "Deployment",
+          "name": "billing-api-steady",
+          "role": "healthy"
+        }
+      ],
+      "params": {
+        "crash_delay_s": 5
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "billing-api-steady",
+          "namespace": "billing-api"
+        }
+      ],
+      "excluded_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "billing-api-experimental",
+          "namespace": "billing-api",
+          "reason": "crashloop"
+        }
+      ],
+      "cronjobs": []
+    },
+    {
+      "name": "notifications-sync",
+      "archetype": "web-chain",
+      "domain": "notifications",
+      "manifest_file": "manifests/notifications-sync.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-web",
+          "role": "frontend"
+        },
+        {
+          "kind": "Service",
+          "name": "notifications-sync-web",
+          "role": "frontend"
+        },
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-backend",
+          "role": "backend"
+        },
+        {
+          "kind": "Service",
+          "name": "notifications-sync-backend",
+          "role": "backend"
+        },
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-pinger",
+          "role": "traffic-generator"
+        }
+      ],
+      "params": {
+        "frontend_replicas": 3,
+        "backend_replicas": 3,
+        "traffic_interval_s": 10
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-web",
+          "namespace": "notifications-sync"
+        },
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-backend",
+          "namespace": "notifications-sync"
+        },
+        {
+          "kind": "Deployment",
+          "name": "notifications-sync-pinger",
+          "namespace": "notifications-sync"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "frontend_service": "notifications-sync-web"
+    },
+    {
+      "name": "warehouse-sync",
+      "archetype": "reconciler-owned",
+      "domain": "warehouse",
+      "manifest_file": "manifests/warehouse-sync.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-sync-pool",
+          "role": "managed"
+        },
+        {
+          "kind": "ConfigMap",
+          "name": "warehouse-sync-desired-state",
+          "role": "desired-state"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "warehouse-sync-reconciler"
+        },
+        {
+          "kind": "Role",
+          "name": "warehouse-sync-reconciler"
+        },
+        {
+          "kind": "RoleBinding",
+          "name": "warehouse-sync-reconciler"
+        },
+        {
+          "kind": "CronJob",
+          "name": "warehouse-sync-reconciler",
+          "role": "reconciler"
+        }
+      ],
+      "params": {
+        "desired_replicas": 2
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-sync-pool",
+          "namespace": "warehouse-sync"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [
+        {
+          "name": "warehouse-sync-reconciler",
+          "schedule": "*/2 * * * *",
+          "expect": "succeed",
+          "ttl_seconds_after_finished": null,
+          "role": "reconciler"
+        }
+      ]
+    },
+    {
+      "name": "fraud-worker",
+      "archetype": "batch-cron",
+      "domain": "fraud",
+      "manifest_file": "manifests/fraud-worker.yaml",
+      "objects": [
+        {
+          "kind": "CronJob",
+          "name": "fraud-worker-audit"
+        },
+        {
+          "kind": "CronJob",
+          "name": "fraud-worker-report"
+        },
+        {
+          "kind": "CronJob",
+          "name": "fraud-worker-rotate"
+        }
+      ],
+      "params": {
+        "job_count": 3
+      },
+      "healthy_workloads": [],
+      "excluded_workloads": [],
+      "cronjobs": [
+        {
+          "name": "fraud-worker-audit",
+          "schedule": "*/5 * * * *",
+          "expect": "fail",
+          "ttl_seconds_after_finished": null
+        },
+        {
+          "name": "fraud-worker-report",
+          "schedule": "*/5 * * * *",
+          "expect": "fail",
+          "ttl_seconds_after_finished": 300
+        },
+        {
+          "name": "fraud-worker-rotate",
+          "schedule": "*/1 * * * *",
+          "expect": "succeed",
+          "ttl_seconds_after_finished": 600
+        }
+      ]
+    },
+    {
+      "name": "search-api",
+      "archetype": "cross-namespace-consumer",
+      "domain": "search",
+      "manifest_file": "manifests/search-api.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "search-api-caller",
+          "role": "caller"
+        }
+      ],
+      "params": {
+        "traffic_interval_s": 2,
+        "target_namespace": "notifications-sync",
+        "target_fqdn": "notifications-sync-web.notifications-sync.svc.cluster.local"
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "search-api-caller",
+          "namespace": "search-api"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [],
+      "depends_on": "notifications-sync"
+    },
+    {
+      "name": "warehouse-gateway",
+      "archetype": "reconciler-owned",
+      "domain": "warehouse",
+      "manifest_file": "manifests/warehouse-gateway.yaml",
+      "objects": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-gateway-managed",
+          "role": "managed"
+        },
+        {
+          "kind": "ConfigMap",
+          "name": "warehouse-gateway-desired-state",
+          "role": "desired-state"
+        },
+        {
+          "kind": "ServiceAccount",
+          "name": "warehouse-gateway-controller"
+        },
+        {
+          "kind": "Role",
+          "name": "warehouse-gateway-controller"
+        },
+        {
+          "kind": "RoleBinding",
+          "name": "warehouse-gateway-controller"
+        },
+        {
+          "kind": "CronJob",
+          "name": "warehouse-gateway-controller",
+          "role": "reconciler"
+        }
+      ],
+      "params": {
+        "desired_replicas": 2
+      },
+      "healthy_workloads": [
+        {
+          "kind": "Deployment",
+          "name": "warehouse-gateway-managed",
+          "namespace": "warehouse-gateway"
+        }
+      ],
+      "excluded_workloads": [],
+      "cronjobs": [
+        {
+          "name": "warehouse-gateway-controller",
+          "schedule": "*/1 * * * *",
+          "expect": "succeed",
+          "ttl_seconds_after_finished": null,
+          "role": "reconciler"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "search-api",
+      "to": "notifications-sync",
+      "type": "cross-namespace-http"
+    }
+  ]
+}

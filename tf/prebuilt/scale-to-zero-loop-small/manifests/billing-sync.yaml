@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: billing-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: billing-sync-config
+  namespace: billing-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+data:
+  target_namespace: "notifications-sync"
+  target_deployment: "notifications-sync-web"
+  replicas: "3"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: billing-sync-worker
+  namespace: billing-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: billing-sync-worker
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - patch
+- apiGroups:
+  - apps
+  resources:
+  - deployments/scale
+  verbs:
+  - get
+  - list
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: billing-sync-worker
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+subjects:
+- kind: ServiceAccount
+  name: billing-sync-worker
+  namespace: billing-sync
+roleRef:
+  kind: ClusterRole
+  name: billing-sync-worker
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-sync-worker
+  namespace: billing-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: billing-sync-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-sync-worker
+  template:
+    metadata:
+      labels:
+        app: billing-sync-worker
+    spec:
+      serviceAccountName: billing-sync-worker
+      containers:
+      - name: billing-sync-worker
+        image: "bitnamilegacy/kubectl:1.29"
+        command:
+        - sh
+        - "-c"
+        - "LAST=0; while true; do NS=$(cat /etc/desired/target_namespace 2>/dev/null || true); DEP=$(cat /etc/desired/target_deployment 2>/dev/null || true); WANT=$(cat /etc/desired/replicas 2>/dev/null || true); if [ -n \"$NS\" ] && [ -n \"$DEP\" ] && [ -n \"$WANT\" ]; then CUR=$(kubectl -n \"$NS\" get deployment \"$DEP\" -o jsonpath='{.spec.replicas}' 2>/dev/null || true); if [ -n \"$CUR\" ] && [ \"$CUR\" != \"$WANT\" ]; then kubectl -n \"$NS\" scale deployment/\"$DEP\" --replicas=\"$WANT\" >/dev/null 2>&1; RC=$?; if [ \"$RC\" -eq 0 ]; then echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) enforce target=$NS/$DEP old=$CUR new=$WANT\"; fi; fi; fi; NOW=$(date +%s); if [ $((NOW-LAST)) -ge 300 ]; then echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) heartbeat target=$NS/$DEP desired=$WANT\"; LAST=$NOW; fi; sleep 20; done"
+        volumeMounts:
+        - name: desired
+          mountPath: "/etc/desired"
+        resources:
+          requests:
+            cpu: "20m"
+            memory: "48Mi"
+          limits:
+            cpu: "40m"
+            memory: "96Mi"
+      volumes:
+      - name: desired
+        configMap:
+          name: billing-sync-config

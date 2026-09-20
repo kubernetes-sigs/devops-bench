@@ -1,0 +1,135 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warehouse-sync-pool
+  namespace: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: warehouse-sync-pool
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: warehouse-sync-pool
+  template:
+    metadata:
+      labels:
+        app: warehouse-sync-pool
+    spec:
+      containers:
+      - name: warehouse-sync-pool
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "22m"
+            memory: "58Mi"
+          limits:
+            cpu: "44m"
+            memory: "116Mi"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: warehouse-sync-desired-state
+  namespace: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+data:
+  replicas: "2"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: warehouse-sync-reconciler
+  namespace: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: warehouse-sync-reconciler
+  namespace: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - deployments/scale
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: warehouse-sync-reconciler
+  namespace: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+subjects:
+- kind: ServiceAccount
+  name: warehouse-sync-reconciler
+  namespace: warehouse-sync
+roleRef:
+  kind: Role
+  name: warehouse-sync-reconciler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: warehouse-sync-reconciler
+  namespace: warehouse-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: warehouse-sync-reconciler-job
+            image: "bitnamilegacy/kubectl:1.29"
+            command:
+            - sh
+            - "-c"
+            - "kubectl -n warehouse-sync scale deployment/warehouse-sync-pool --replicas=$(cat /etc/desired/replicas)"
+            volumeMounts:
+            - name: desired
+              mountPath: "/etc/desired"
+            resources:
+              requests:
+                cpu: "39m"
+                memory: "31Mi"
+              limits:
+                cpu: "78m"
+                memory: "62Mi"
+          restartPolicy: Never
+          volumes:
+          - name: desired
+            configMap:
+              name: warehouse-sync-desired-state
+          serviceAccountName: warehouse-sync-reconciler

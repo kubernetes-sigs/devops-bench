@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: billing-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-api-experimental
+  namespace: billing-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: billing-api-experimental
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-api-experimental
+  template:
+    metadata:
+      labels:
+        app: billing-api-experimental
+    spec:
+      containers:
+      - name: billing-api-experimental
+        image: "busybox:1.36"
+        command:
+        - sh
+        - "-c"
+        - "sleep 5; exit 1"
+        resources:
+          requests:
+            cpu: "37m"
+            memory: "48Mi"
+          limits:
+            cpu: "74m"
+            memory: "96Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: billing-api-steady
+  namespace: billing-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: billing-api-steady
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: billing-api-steady
+  template:
+    metadata:
+      labels:
+        app: billing-api-steady
+    spec:
+      containers:
+      - name: billing-api-steady
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "44m"
+            memory: "28Mi"
+          limits:
+            cpu: "88m"
+            memory: "56Mi"
