@@ -34,35 +34,36 @@ provider "google" {
   zone    = var.location
 }
 
-# 1. GKE Cluster & GCP IAM/Secrets provisioning
 module "cluster" {
-  source       = "./cluster"
-  project_id   = var.project_id
-  cluster_name = var.cluster_name
-  location     = var.location
-  node_count   = var.node_count
-  machine_type = var.machine_type
-  namespace    = var.namespace
+  source               = "./cluster"
+  project_id           = var.project_id
+  cluster_name         = var.cluster_name
+  location             = var.location
+  node_count           = var.node_count
+  machine_type         = var.machine_type
+  namespace            = var.namespace
+  token_creator_member = var.token_creator_member
 }
 
-# 2. Dynamic GKE Credentials Loading
 data "google_client_config" "default" {}
 
+# managed_endpoint rather than endpoint: endpoint falls back to the vcluster
+# submodule, whose resources these providers serve, so configuring them from
+# it is a dependency cycle.
 provider "kubernetes" {
-  host                   = "https://${module.cluster.endpoint}"
+  host                   = "https://${module.cluster.managed_endpoint}"
   token                  = data.google_client_config.default.access_token
   cluster_ca_certificate = base64decode(module.cluster.cluster_ca_certificate)
 }
 
 provider "helm" {
   kubernetes {
-    host                   = "https://${module.cluster.endpoint}"
+    host                   = "https://${module.cluster.managed_endpoint}"
     token                  = data.google_client_config.default.access_token
     cluster_ca_certificate = base64decode(module.cluster.cluster_ca_certificate)
   }
 }
 
-# 3. Kubernetes resources configuration
 module "k8s_config" {
   source                   = "./k8s_config"
   project_id               = var.project_id
@@ -79,4 +80,9 @@ output "cluster_name" {
 
 output "cluster_location" {
   value = module.cluster.cluster_location
+}
+
+output "agent_cloud_identity" {
+  description = "Run-unique service account the sandboxed agent's Secret Manager calls run as."
+  value       = module.cluster.agent_cloud_identity
 }

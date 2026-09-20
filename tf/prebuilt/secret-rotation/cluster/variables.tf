@@ -41,12 +41,20 @@ variable "namespace" {
   type        = string
   description = "Kubernetes Namespace to deploy secret rotation test app"
 
-  # This name is embedded in the run's service account ID as
-  # "sa-<namespace>-<8 hex>", and GCP caps a service account ID at 30
-  # characters. The fixed parts cost 12, leaving 18. Caught here because the
-  # apply-time failure is an opaque IAM 400 raised several resources later.
+  # Embedded in the "sa-<namespace>-<8 hex>" and "rot-<namespace>-<8 hex>"
+  # service account IDs, which GCP caps at 30 characters; the apply-time
+  # failure is an opaque IAM 400.
   validation {
-    condition     = length(var.namespace) <= 18
-    error_message = "namespace must be at most 18 characters: it is embedded in the 'sa-<namespace>-<8 hex>' service account ID, which GCP caps at 30."
+    condition = (
+      length(var.namespace) <= 17 &&
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.namespace))
+    )
+    error_message = "namespace must be an RFC 1123 label of 1 to 17 characters: it is embedded in the 'rot-<namespace>-<8 hex>' service account ID, which GCP caps at 30."
   }
+}
+
+variable "token_creator_member" {
+  type        = string
+  description = "IAM member (user:... or serviceAccount:...) allowed to mint tokens for the agent's rotator service account; empty derives it from the provisioner's ADC identity when possible"
+  default     = ""
 }

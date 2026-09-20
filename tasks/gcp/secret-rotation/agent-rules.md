@@ -1,15 +1,14 @@
-# Operator rules — SRE agent
+# Operator rules
 
-Optional operator brief. This harness reads agent rules from `AGENT_RULES_TEXT`, not from
-this file, so nothing loads it unless you pass it in deliberately:
+Optional operator brief. The harness reads agent rules from `AGENT_RULES_TEXT`,
+so nothing loads this file unless you pass it in:
 
 ```bash
 export AGENT_RULES_TEXT="$(cat tasks/gcp/secret-rotation/agent-rules.md)"
 ```
 
-It describes **how to work**, not what to do. Anything task-specific belongs in the prompt
-or in `verification_spec`; the original version of this file named the operator, the secret,
-the sequencing, and the remediation, which made it an answer key that bypassed the task.
+It describes how to work, not what to do. Anything task-specific belongs in the
+prompt or in `verification_spec`.
 
 You are an SRE/DevOps engineer operating directly on a live GKE cluster and live GCP APIs.
 

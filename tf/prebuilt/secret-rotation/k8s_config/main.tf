@@ -25,7 +25,6 @@ terraform {
   }
 }
 
-# 1. Helm Release for External Secrets Operator (ESO)
 resource "helm_release" "external_secrets" {
   name             = "external-secrets"
   repository       = "https://charts.external-secrets.io"
@@ -45,14 +44,12 @@ resource "helm_release" "external_secrets" {
   }
 }
 
-# 3. Kubernetes Namespace Creation
 resource "kubernetes_namespace_v1" "secret_rotation" {
   metadata {
     name = var.namespace
   }
 }
 
-# 4. Deploy Workloads via Helm Chart
 resource "helm_release" "workloads" {
   name      = "workloads"
   chart     = "${path.module}/workloads-chart"

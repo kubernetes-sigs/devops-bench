@@ -25,16 +25,12 @@ terraform {
   }
 }
 
-# Per-run random suffix so concurrent runs of the same task never collide on the
-# project-global GCP resource names (service accounts, Secret Manager secrets).
-# Created once per run and stable on re-apply (it lives in this run's state). The
-# k8s namespace is intentionally NOT suffixed — it is cluster-scoped, so two
-# separate clusters can both use the same namespace.
+# Project-global names (service accounts, Secret Manager secrets) carry a
+# per-run suffix. The namespace does not: it is cluster-scoped.
 resource "random_id" "run" {
   byte_length = 4
 }
 
-# 1. GKE Cluster Provisioning
 module "cluster" {
   source                   = "../../../modules/cluster"
   infra_provider           = "gcp"
@@ -44,16 +40,13 @@ module "cluster" {
   node_count               = var.node_count
   machine_type             = var.machine_type
   enable_workload_identity = true
-  # BYO-credentials model: the agent runs as the operator-provided broad runner
-  # identity (the bastion VM SA), which is assumed to already hold the infra
-  # perms it needs. So this stack does NOT grant it container.admin — the
-  # module's project-level grant is disabled here (empty string -> count 0) to
-  # avoid a shared binding that concurrent runs would fight over at teardown.
+  # The agent's runner identity already holds the permissions it needs. A
+  # per-run stack must not manage a project IAM binding on a shared principal,
+  # because one run's destroy would revoke it for a concurrent run.
   agent_service_account = ""
   enable_iap_ssh        = true
 }
 
-# 3. GCP Secret Manager Setup
 resource "google_secret_manager_secret" "db_credentials" {
   secret_id = "db-credentials-${var.namespace}-${random_id.run.hex}"
   project   = var.project_id
@@ -67,17 +60,16 @@ resource "google_secret_manager_secret_version" "db_credentials_v1" {
   secret_data = "compromised-password-v1"
 }
 
-# 4. GCP IAM & GSA Configuration
 resource "google_service_account" "secret_rotation_sa" {
   account_id   = "sa-${var.namespace}-${random_id.run.hex}"
   display_name = "GSA for GKE ExternalSecrets Secret Manager access"
   project      = var.project_id
 }
 
-resource "google_project_iam_member" "secret_accessor" {
-  project = var.project_id
-  role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.secret_rotation_sa.email}"
+resource "google_secret_manager_secret_iam_member" "secret_accessor" {
+  secret_id = google_secret_manager_secret.db_credentials.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.secret_rotation_sa.email}"
 }
 
 resource "google_service_account_iam_member" "workload_identity" {
@@ -86,13 +78,47 @@ resource "google_service_account_iam_member" "workload_identity" {
   member             = "serviceAccount:${var.project_id}.svc.id.goog[external-secrets/external-secrets]"
 }
 
-# 10. Runner identity: BYO credentials.
-#
-# The agent runs as the operator-provided broad runner identity (the bastion VM
-# SA, assumed pre-provisioned with the infra permissions it needs). This stack
-# intentionally grants that identity NOTHING: adding per-run/project bindings to
-# a shared SA is what caused concurrent runs to fight at teardown (one run's
-# destroy revoked the binding the other still needed). A least-privilege,
-# per-run runner SA is a tracked follow-up. The per-run resources above (the
-# workload SA + secret) are name-suffixed via random_id so concurrent runs of
-# this task never collide.
+# Identity the sandboxed agent's Secret Manager calls run as: a run-unique
+# service account holding only the two roles the rotation needs, on this run's
+# secret. The harness impersonates it to mint a short-lived token, and the
+# tokenCreator grant below is SA-level so it tears down with the run.
+resource "google_service_account" "agent_rotator" {
+  account_id   = "rot-${var.namespace}-${random_id.run.hex}"
+  display_name = "Scoped identity for the sandboxed agent's Secret Manager calls"
+  project      = var.project_id
+}
+
+resource "google_secret_manager_secret_iam_member" "agent_version_manager" {
+  secret_id = google_secret_manager_secret.db_credentials.id
+  role      = "roles/secretmanager.secretVersionManager"
+  member    = "serviceAccount:${google_service_account.agent_rotator.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "agent_secret_accessor" {
+  secret_id = google_secret_manager_secret.db_credentials.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.agent_rotator.email}"
+}
+
+# An explicit var.token_creator_member wins; otherwise the provisioner's
+# identity comes from the ADC userinfo endpoint. Without the userinfo-email
+# scope the email is null, the binding is skipped and the token mint fails loud.
+data "google_client_openid_userinfo" "provisioner" {}
+
+locals {
+  provisioner_email = data.google_client_openid_userinfo.provisioner.email
+  token_creator_member = (
+    var.token_creator_member != "" ? var.token_creator_member
+    : local.provisioner_email == null || local.provisioner_email == "" ? ""
+    : endswith(local.provisioner_email, "gserviceaccount.com")
+    ? "serviceAccount:${local.provisioner_email}"
+    : "user:${local.provisioner_email}"
+  )
+}
+
+resource "google_service_account_iam_member" "agent_rotator_token_creator" {
+  count              = local.token_creator_member == "" ? 0 : 1
+  service_account_id = google_service_account.agent_rotator.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = local.token_creator_member
+}
