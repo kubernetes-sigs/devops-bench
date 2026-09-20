@@ -103,6 +103,9 @@ resource "null_resource" "setup" {
       KUBECONFIG     = var.infra_provider == "vcluster" ? try(local_sensitive_file.vcluster_kubeconfig[0].filename, pathexpand(var.kubeconfig_path)) : pathexpand(var.kubeconfig_path)
       REPO_PATH      = pathexpand(local.repo_path)
       MANIFESTS_DIR  = "${path.module}/manifests"
+      # setup.sh reads $HOME under set -u; a local-exec only inherits what
+      # the caller had.
+      HOME = pathexpand("~")
     }
   }
 }

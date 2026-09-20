@@ -90,6 +90,9 @@ echo "==> Removing Kyverno's built-in report cleanup CronJobs..."
 kubectl delete cronjob -n kyverno --all --ignore-not-found
 kubectl delete job -n kyverno --all --ignore-not-found
 
+echo "==> Aggregating a Kyverno policy-editor role into edit..."
+kubectl apply -f "${MANIFESTS_DIR}/rbac/"
+
 echo "==> Applying compliance policies (audit mode)..."
 # The Kyverno admission webhook (mutate-policy.kyverno.svc) can take several seconds
 # to start serving *after* its deployment reports Available, so a plain apply can fail
@@ -229,6 +232,10 @@ rm -rf "${WORK}"
 # Point the bare repo's HEAD at main so a plain `git clone` checks it out.
 git -c safe.bareRepository=all -C "${REPO_PATH}" symbolic-ref HEAD refs/heads/main
 
+# The agent may run as a different uid than the provisioner. An unreadable
+# repo makes the agent rebuild one from cluster state and get graded on that.
+chmod -R a+rX "${REPO_PATH}"
+chmod a+x "$(dirname "${REPO_PATH}")"
 
 echo "==> Setup complete."
 echo "    Kyverno is auditing; violations will surface in PolicyReports:"

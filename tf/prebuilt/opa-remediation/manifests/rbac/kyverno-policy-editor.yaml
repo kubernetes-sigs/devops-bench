@@ -1,0 +1,14 @@
+# Kyverno aggregates its policy roles into view and admin only. An agent bound
+# to edit needs update and patch to switch a ClusterPolicy to Enforce. No
+# create or delete, so dismantling the policy engine still trips its safeguard.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno-policy-editor
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    devops-bench.io/stack: opa-remediation
+rules:
+  - apiGroups: ["kyverno.io"]
+    resources: ["clusterpolicies", "policies"]
+    verbs: ["get", "list", "watch", "update", "patch"]
