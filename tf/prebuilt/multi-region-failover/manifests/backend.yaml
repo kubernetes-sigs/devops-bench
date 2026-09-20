@@ -1,7 +1,5 @@
-# Storefront backend. Serves a fixed 200 response on all paths. It consumes the
-# `app-config` ConfigMap and `app-secret` Secret via envFrom (marked optional so a
-# region that is missing them still starts — that omission is the config drift the
-# agent must reconcile in the standby region during post-failover validation).
+# The envFrom references are optional so a region missing app-config and
+# app-secret still starts; that omission is the standby's config drift.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -1,6 +1,5 @@
-# Storefront frontend. nginx that serves a static /healthz and reverse-proxies "/"
-# to the backend Service. When the backend has no ready endpoints (the injected
-# regional outage), "/" returns 502 — i.e. users see 5xx from this region.
+# nginx serves /healthz itself and proxies "/" to the backend Service, so a
+# region whose backend has no ready endpoints returns 502 on "/".
 apiVersion: v1
 kind: ConfigMap
 metadata:

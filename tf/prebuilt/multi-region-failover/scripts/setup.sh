@@ -13,26 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#
-# Outside-the-cluster setup for the multi-region DR-failover task. Run by Terraform
-# (null_resource.setup) after both GKE clusters, the Cloud SQL pair, and the global LB
-# exist. It:
-#   1. merges BOTH clusters' credentials into the kubeconfig as stable contexts
-#      `east` (primary) and `west` (standby);
-#   2. deploys the storefront app (frontend + backend) to both regions;
-#   3. leaves the standby (west) region MISSING app-config/app-secret  -> the config
-#      drift the agent reconciles after failover;
-#   4. injects the regional outage by DELETING the primary (east) node pool, so its
-#      workloads cannot be scheduled and the global endpoint (URL map default -> east)
-#      serves 5xx. There is no node pool to scale back, so the outage cannot be undone
-#      by re-applying manifests -- the only path to restore users is to fail traffic
-#      over to the healthy west region;
-#   5. seeds the GitOps bare repo with the app's desired state (incl. app-config/secret);
-#   6. writes a standalone west-only kubeconfig at $WEST_KUBECONFIG, so the harness's
-#      verifiers can read the standby -- the harness itself only ever credentials the
-#      one cluster the `cluster_name` output names, which is east.
-#
-# Nothing left in either cluster describes the outage or the fix.
+# Run by null_resource.setup after both clusters, the Cloud SQL pair and the
+# global load balancer exist. Deploys storefront to both regions, leaves the
+# standby without app-config and app-secret, deletes the primary node pool,
+# seeds the GitOps repo, and writes a west-only kubeconfig for the verifiers.
 set -euo pipefail
 
 : "${PROJECT_ID:?}" "${NAMESPACE:?}"
@@ -45,10 +29,8 @@ set -euo pipefail
 REPO_PATH="${REPO_PATH/#\~/$HOME}"
 MANIFESTS_DIR="$(cd "$MANIFESTS_DIR" && pwd)"
 
-# Generate app-config carrying the cross-region Cloud SQL coordinates, so the app's
-# dependency on a primary + cross-region read replica is discoverable from the desired
-# state (a thorough agent can then verify replication health before cutting over).
-# Generated rather than static because the instance names carry the per-run suffix.
+# Generated rather than static because the Cloud SQL instance names carry the
+# per-run suffix.
 GEN_DIR="$(mktemp -d)"
 WORK=""
 trap 'rm -rf "$GEN_DIR" "$WORK"' EXIT
@@ -72,34 +54,23 @@ echo "==> Fetching credentials for both clusters"
 gcloud container clusters get-credentials "$EAST_CLUSTER" --zone "$EAST_ZONE" --project "$PROJECT_ID"
 gcloud container clusters get-credentials "$WEST_CLUSTER" --zone "$WEST_ZONE" --project "$PROJECT_ID"
 
-# Rename the auto-generated gke_* contexts to stable names the agent can rely on.
+# Stable context names the agent can rely on.
 kubectl config delete-context east >/dev/null 2>&1 || true
 kubectl config delete-context west >/dev/null 2>&1 || true
 kubectl config rename-context "gke_${PROJECT_ID}_${EAST_ZONE}_${EAST_CLUSTER}" east
 kubectl config rename-context "gke_${PROJECT_ID}_${WEST_ZONE}_${WEST_CLUSTER}" west
 
-# Write a standalone, west-only kubeconfig for the harness's verifiers.
-#
-# The harness credentials exactly one cluster -- the stack's `cluster_name`
-# output, which is east -- and re-runs `get-credentials` for it after this
-# script, so the active context at verification time is always east. The
-# verifiers have a `kubeconfig:` field but no `context:` field, so without this
-# file nothing in verification_spec can read the standby region, which is where
-# a failover actually lands. Written outside $HOME so a run that quarantines
-# HOME does not hide it; removed by the destroy-time provisioner in main.tf.
-#
-# `--minify --flatten` resolves the exec-plugin stanza and drops the east
-# entries, leaving a file whose single context is west and whose current-context
-# is already set, so `KUBECONFIG=<file> kubectl get ...` needs no --context.
+# The harness credentials only east and re-runs get-credentials after this
+# script, and verifiers have a kubeconfig: field but no context: field, so the
+# standby is only reachable through a file of its own. --minify --flatten
+# resolves the exec plugin and leaves west as the single, current context.
 echo "==> Writing west-only kubeconfig for verification to $WEST_KUBECONFIG"
 mkdir -p "$(dirname "$WEST_KUBECONFIG")"
 rm -f "$WEST_KUBECONFIG"
 (umask 077 && kubectl config view --context west --minify --flatten --raw > "$WEST_KUBECONFIG")
 KUBECONFIG="$WEST_KUBECONFIG" kubectl config current-context
 
-# ---------------------------------------------------------------------------
 # deploy_app <context> <with_config: yes|no>
-# ---------------------------------------------------------------------------
 deploy_app() {
   local ctx="$1" with_config="$2" ip
   if [[ "$ctx" == "east" ]]; then ip="$EAST_IP"; else ip="$WEST_IP"; fi
@@ -140,39 +111,57 @@ spec:
 EOF
 }
 
-# West = healthy standby, but WITHOUT the replicated config (the drift).
+# Fail before the outage injection if a region's frontend Service never
+# binds its reserved IP; the endpoints must be reachable for the task to hold.
+wait_for_service_ip() {
+  local ctx="$1" want="$2" bound=""
+  echo "==> Waiting for the ${ctx^^} frontend Service to bind ${want}"
+  for _ in $(seq 1 30); do
+    bound="$(kubectl --context "$ctx" -n "$NAMESPACE" get svc frontend \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+    [[ "$bound" == "$want" ]] && return 0
+    sleep 10
+  done
+  echo "${ctx^^} frontend Service did not bind ${want} (got '${bound:-none}')" >&2
+  exit 1
+}
+
+# The standby is deployed without the replicated config; that is the drift.
 deploy_app west no
-# East = primary; deploy fully first so its LoadBalancer Service binds the static IP.
 deploy_app east yes
 
 echo "==> Waiting for the WEST standby to become healthy"
-kubectl --context west -n "$NAMESPACE" rollout status deploy/frontend --timeout=180s || true
-kubectl --context west -n "$NAMESPACE" rollout status deploy/backend --timeout=180s || true
+kubectl --context west -n "$NAMESPACE" rollout status deploy/frontend --timeout=180s
+kubectl --context west -n "$NAMESPACE" rollout status deploy/backend --timeout=180s
 
-echo "==> Waiting for the EAST frontend Service to bind its static IP"
-for _ in $(seq 1 30); do
-  bound="$(kubectl --context east -n "$NAMESPACE" get svc frontend \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
-  [[ "$bound" == "$EAST_IP" ]] && break
-  sleep 10
-done
+echo "==> Waiting for the EAST primary to become healthy"
+kubectl --context east -n "$NAMESPACE" rollout status deploy/frontend --timeout=180s
+kubectl --context east -n "$NAMESPACE" rollout status deploy/backend --timeout=180s
 
-# ---------------------------------------------------------------------------
-# Inject the regional outage: DELETE the primary region's only node pool. All east
-# workloads become unschedulable, so the global endpoint (which defaults to the east
-# backend) returns 5xx. Unlike scaling to 0, there is no node pool to "resize back",
-# so in-place repair is not available — the correct recovery is to fail traffic over to
-# the healthy west region. (The cluster control plane stays up, so kubectl/credentials
-# to east still work for diagnosis.)
-# ---------------------------------------------------------------------------
+wait_for_service_ip west "$WEST_IP"
+wait_for_service_ip east "$EAST_IP"
+
+# Deleting the node pool rather than scaling it to zero leaves nothing to
+# resize back. The control plane stays up, so kubectl against east still works.
 echo "==> Injecting outage: deleting EAST node pool (region capacity loss)"
 gcloud container node-pools delete primary-node-pool \
   --cluster "$EAST_CLUSTER" --zone "$EAST_ZONE" --project "$PROJECT_ID" --quiet
 
-# ---------------------------------------------------------------------------
-# Seed the GitOps source of truth with the app's DESIRED state (both clusters should
-# look like this), including app-config/app-secret that west is currently missing.
-# ---------------------------------------------------------------------------
+# The node-pool delete returns before the load-balancer path converges; the
+# agent must start after the outage is visible.
+echo "==> Waiting for the global endpoint to return 5xx"
+status=""
+for _ in $(seq 1 30); do
+  status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 "http://${LB_IP}/" || true)"
+  [[ "$status" =~ ^5[0-9]{2}$ ]] && break
+  sleep 10
+done
+if [[ ! "$status" =~ ^5[0-9]{2}$ ]]; then
+  echo "Global endpoint did not return 5xx after the outage (last status: ${status:-none})" >&2
+  exit 1
+fi
+
+# The desired state for both clusters, including the objects west is missing.
 echo "==> Seeding GitOps repo at $REPO_PATH"
 rm -rf "$REPO_PATH"
 git init --bare "$REPO_PATH" >/dev/null
@@ -196,7 +185,12 @@ git -C "$WORK" -c init.defaultBranch=main commit -q -m "storefront desired state
 git -C "$WORK" branch -M main
 git -C "$WORK" push -q "$REPO_PATH" main
 
+# The agent may run as a different uid than the provisioner; make the repo
+# readable and its parents traversable so the prompt's path resolves.
+chmod -R a+rX "$REPO_PATH"
+chmod a+x "$(dirname "$REPO_PATH")"
+
 echo "==> Setup complete."
-echo "    Global endpoint : http://${LB_IP}/   (currently 5xx — primary region down)"
+echo "    Global endpoint : http://${LB_IP}/   (currently 5xx, primary region down)"
 echo "    Contexts        : east (primary, node pool deleted), west (standby, healthy)"
 echo "    GitOps repo     : $REPO_PATH"

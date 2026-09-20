@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The harness reads `cluster_name` + `cluster_location` and runs
-# `gcloud container clusters get-credentials` for that single cluster. We return the
-# PRIMARY (east) cluster here; the setup script additionally merges the WEST context
-# into the kubeconfig (as `east`/`west`) so the agent has both regions available.
+# The harness runs get-credentials for the single cluster these two outputs
+# name, so they return the primary (east).
 output "cluster_name" {
   value = module.east.cluster_name
 }
@@ -32,16 +30,12 @@ output "west_cluster_location" {
   value = module.west.location
 }
 
-# Standalone west-only kubeconfig written by setup.sh, for verifiers that must
-# read the standby region. The task's verification_spec spells the same path
-# with the {{CLUSTER_NAME}} placeholder; if you change the layout in
-# locals.west_kubeconfig, change the task too.
+# The task's verification_spec spells this path with {{CLUSTER_NAME}}; change
+# both together.
 output "west_kubeconfig_path" {
   value = local.west_kubeconfig
 }
 
-# Global anycast IP that fronts the storefront. Users hit this; the agent discovers it
-# (e.g. `gcloud compute forwarding-rules list`) and re-points the URL map behind it.
 output "lb_ip" {
   value = google_compute_global_address.lb_ip.address
 }

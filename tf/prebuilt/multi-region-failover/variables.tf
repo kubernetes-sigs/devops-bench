@@ -21,7 +21,7 @@ variable "cluster_name" {
   type        = string
   description = <<-EOT
     Base name for the stack. The two regional GKE clusters are named
-    "e-<cluster_name>" (primary, east) and "w-<cluster_name>" (standby, west) — the
+    "e-<cluster_name>" (primary, east) and "w-<cluster_name>" (standby, west), the
     region marker is a PREFIX, not a suffix, so it stays within the node-SA
     name-truncation window (see locals in main.tf). The global LB / Cloud SQL
     resources derive their names from it too. Supplied by the harness
@@ -29,18 +29,16 @@ variable "cluster_name" {
     harness credentials it.
   EOT
 
-  # GKE caps a cluster name at 40 characters, and the names that actually reach
-  # the API are prefixed, so the base has 38 to work with. Caught here because
-  # the apply-time failure names "e-<cluster_name>", not the input that was too
-  # long. ("multi-region-failover" is 21, so this is headroom, not a squeeze.)
+  # GKE caps a cluster name at 40 characters and the names that reach the API
+  # carry a two-character prefix.
   validation {
     condition     = length(var.cluster_name) <= 38
     error_message = "cluster_name must be at most 38 characters: the clusters are named 'e-<cluster_name>' and 'w-<cluster_name>', and GKE caps a cluster name at 40."
   }
 }
 
-# Declared so `tofu apply -var location=...` from the harness's GCP variable resolver
-# does not fail; this stack pins its own regions/zones (see below) and ignores it.
+# Declared so the harness's standard -var location does not fail; this stack
+# pins its own regions and zones.
 variable "location" {
   type        = string
   description = "Unused. Present only to accept the harness's standard -var location."
