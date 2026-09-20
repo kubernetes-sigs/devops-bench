@@ -1,7 +1,5 @@
-# Application manifests under version control. These intentionally use deprecated
-# API versions (networking.k8s.io/v1beta1 Ingress, policy/v1beta1 PodDisruptionBudget)
-# that have been removed in newer Kubernetes releases. They are the "originals" the
-# operator must audit and migrate to stable APIs before the cluster upgrade.
+# The Ingress and PodDisruptionBudget use v1beta1 APIs on purpose; they are what
+# the agent has to find and migrate.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

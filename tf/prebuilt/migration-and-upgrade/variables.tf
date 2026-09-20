@@ -40,7 +40,7 @@ variable "namespace" {
 
 variable "node_count" {
   type        = number
-  description = "Number of worker nodes. The kind sub-module derives its worker list from this, so it must be a number on every provider — a null here fails at plan time."
+  description = "Number of worker nodes. The kind sub-module derives its worker list from this, so it must be a number on every provider, a null here fails at plan time."
   default     = 1
 }
 
@@ -53,10 +53,8 @@ variable "machine_type" {
 variable "start_version" {
   type        = string
   description = "GKE Kubernetes version the cluster starts at (the agent upgrades to the next minor)."
-  # NOTE: GKE's supported version range drifts over time, so this default WILL go
-  # stale and eventually be rejected ("No valid versions with the prefix ..."). Set
-  # it to a currently-supported minor that ALSO has a next minor available; check
-  # with: gcloud container get-server-config --zone <zone>
+  # GKE's supported range drifts; pick a supported minor that has a next minor.
+  # gcloud container get-server-config --zone <zone>
   default = "1.33"
 }
 
@@ -75,5 +73,11 @@ variable "kubeconfig_path" {
 variable "repo_path" {
   type        = string
   description = "Local bare git repo the agent clones the manifests from. Empty (default) derives a per-run-unique path from cluster_name so concurrent runs on the shared bastion don't collide (see locals)."
+  default     = ""
+}
+
+variable "token_creator_member" {
+  type        = string
+  description = "IAM member (user:... or serviceAccount:...) allowed to mint tokens for the agent's upgrader service account; empty derives it from the provisioner's ADC identity when possible"
   default     = ""
 }
