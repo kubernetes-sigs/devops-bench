@@ -1,0 +1,290 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-sync-web
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: notifications-sync-web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: notifications-sync-web
+  template:
+    metadata:
+      labels:
+        app: notifications-sync-web
+    spec:
+      containers:
+      - name: notifications-sync-web
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "31m"
+            memory: "61Mi"
+          limits:
+            cpu: "62m"
+            memory: "122Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications-sync-web
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: notifications-sync-web
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-sync-backend
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: notifications-sync-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: notifications-sync-backend
+  template:
+    metadata:
+      labels:
+        app: notifications-sync-backend
+    spec:
+      containers:
+      - name: notifications-sync-backend
+        image: "nginx:1.25-alpine"
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "30m"
+            memory: "23Mi"
+          limits:
+            cpu: "60m"
+            memory: "46Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifications-sync-backend
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: notifications-sync-backend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifications-sync-pinger
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: notifications-sync-pinger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notifications-sync-pinger
+  template:
+    metadata:
+      labels:
+        app: notifications-sync-pinger
+    spec:
+      containers:
+      - name: notifications-sync-pinger
+        image: "busybox:1.36"
+        command:
+        - sh
+        - "-c"
+        - "while true; do wget -q -O /dev/null -S http://notifications-sync-web.notifications-sync.svc.cluster.local/ 2>&1 | grep HTTP; sleep 10; done"
+        resources:
+          requests:
+            cpu: "12m"
+            memory: "33Mi"
+          limits:
+            cpu: "24m"
+            memory: "66Mi"
+---
+# The allow rules are correct here; setup.sh misspells allow-from-search-api's
+# namespaceSelector at runtime so the change carries a managedFields trail.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notifications-sync-default-deny
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "default-deny"
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-identity-sync
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "scoped-allow"
+    substrate/client-namespace: "identity-sync"
+spec:
+  podSelector:
+    matchLabels:
+      app: notifications-sync-web
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: identity-sync
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-catalog-cache
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "scoped-allow"
+    substrate/client-namespace: "catalog-cache"
+spec:
+  podSelector:
+    matchLabels:
+      app: notifications-sync-web
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: catalog-cache
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-checkout-gateway
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "scoped-allow"
+    substrate/client-namespace: "checkout-gateway"
+spec:
+  podSelector:
+    matchLabels:
+      app: notifications-sync-web
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: checkout-gateway
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-search-api
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "scoped-allow"
+    substrate/client-namespace: "search-api"
+spec:
+  podSelector:
+    matchLabels:
+      app: notifications-sync-web
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: search-api
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-identity-gateway
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "scoped-allow"
+    substrate/client-namespace: "identity-gateway"
+spec:
+  podSelector:
+    matchLabels:
+      app: notifications-sync-web
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: identity-gateway
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-within-namespace
+  namespace: notifications-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+  annotations:
+    substrate/network-policy-tier: "same-namespace-allow"
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 80

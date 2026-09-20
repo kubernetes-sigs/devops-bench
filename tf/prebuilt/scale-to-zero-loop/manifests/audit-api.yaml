@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-api-broker
+  namespace: audit-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: audit-api-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-api-broker
+  template:
+    metadata:
+      labels:
+        app: audit-api-broker
+    spec:
+      containers:
+      - name: audit-api-broker
+        image: "redis:7-alpine"
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            cpu: "23m"
+            memory: "22Mi"
+          limits:
+            cpu: "46m"
+            memory: "44Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-api-broker
+  namespace: audit-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: audit-api-broker
+  ports:
+  - port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-api-publisher
+  namespace: audit-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: audit-api-publisher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-api-publisher
+  template:
+    metadata:
+      labels:
+        app: audit-api-publisher
+    spec:
+      containers:
+      - name: audit-api-publisher
+        image: "redis:7-alpine"
+        command:
+        - sh
+        - "-c"
+        - "while true; do redis-cli -h audit-api-broker LPUSH work item-$(date +%s) >/dev/null; sleep 5; done"
+        resources:
+          requests:
+            cpu: "36m"
+            memory: "23Mi"
+          limits:
+            cpu: "72m"
+            memory: "46Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-api-drainer
+  namespace: audit-api
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: audit-api-drainer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-api-drainer
+  template:
+    metadata:
+      labels:
+        app: audit-api-drainer
+    spec:
+      containers:
+      - name: audit-api-drainer
+        image: "redis:7-alpine"
+        command:
+        - sh
+        - "-c"
+        - "while true; do len=$(redis-cli -h audit-api-broker LLEN work); echo queue_depth=$len; redis-cli -h audit-api-broker RPOP work >/dev/null; sleep 1; done"
+        resources:
+          requests:
+            cpu: "33m"
+            memory: "30Mi"
+          limits:
+            cpu: "66m"
+            memory: "60Mi"

@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: telemetry-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-sync-ledger
+  namespace: telemetry-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: telemetry-sync-ledger
+  ports:
+  - port: 6379
+    targetPort: 6379
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: telemetry-sync-ledger
+  namespace: telemetry-sync
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: telemetry-sync-ledger
+spec:
+  serviceName: telemetry-sync-ledger
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telemetry-sync-ledger
+  template:
+    metadata:
+      labels:
+        app: telemetry-sync-ledger
+    spec:
+      containers:
+      - name: telemetry-sync-ledger
+        image: "redis:7-alpine"
+        ports:
+        - containerPort: 6379
+        volumeMounts:
+        - name: telemetry-sync-ledger-data
+          mountPath: "/data"
+        resources:
+          requests:
+            cpu: "38m"
+            memory: "52Mi"
+          limits:
+            cpu: "76m"
+            memory: "104Mi"
+  volumeClaimTemplates:
+  - metadata:
+      name: telemetry-sync-ledger-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: "2Gi"

@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audit-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-cache-cache
+  namespace: audit-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: audit-cache-cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-cache-cache
+  template:
+    metadata:
+      labels:
+        app: audit-cache-cache
+    spec:
+      containers:
+      - name: audit-cache-cache
+        image: "redis:7-alpine"
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            cpu: "36m"
+            memory: "16Mi"
+          limits:
+            cpu: "72m"
+            memory: "32Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-cache-cache
+  namespace: audit-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: audit-cache-cache
+  ports:
+  - port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-cache-producer
+  namespace: audit-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: audit-cache-producer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-cache-producer
+  template:
+    metadata:
+      labels:
+        app: audit-cache-producer
+    spec:
+      containers:
+      - name: audit-cache-producer
+        image: "redis:7-alpine"
+        command:
+        - sh
+        - "-c"
+        - "while true; do redis-cli -h audit-cache-cache LPUSH work item-$(date +%s) >/dev/null; sleep 5; done"
+        resources:
+          requests:
+            cpu: "13m"
+            memory: "37Mi"
+          limits:
+            cpu: "26m"
+            memory: "74Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-cache-reader
+  namespace: audit-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: audit-cache-reader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-cache-reader
+  template:
+    metadata:
+      labels:
+        app: audit-cache-reader
+    spec:
+      containers:
+      - name: audit-cache-reader
+        image: "redis:7-alpine"
+        command:
+        - sh
+        - "-c"
+        - "while true; do len=$(redis-cli -h audit-cache-cache LLEN work); echo queue_depth=$len; redis-cli -h audit-cache-cache RPOP work >/dev/null; sleep 5; done"
+        resources:
+          requests:
+            cpu: "27m"
+            memory: "62Mi"
+          limits:
+            cpu: "54m"
+            memory: "124Mi"

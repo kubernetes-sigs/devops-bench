@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fraud-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-cache-redis
+  namespace: fraud-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: fraud-cache-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-cache-redis
+  template:
+    metadata:
+      labels:
+        app: fraud-cache-redis
+    spec:
+      containers:
+      - name: fraud-cache-redis
+        image: "redis:7-alpine"
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "47Mi"
+          limits:
+            cpu: "20m"
+            memory: "94Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-cache-redis
+  namespace: fraud-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+spec:
+  selector:
+    app: fraud-cache-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-cache-writer
+  namespace: fraud-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: fraud-cache-writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-cache-writer
+  template:
+    metadata:
+      labels:
+        app: fraud-cache-writer
+    spec:
+      containers:
+      - name: fraud-cache-writer
+        image: "redis:7-alpine"
+        command:
+        - sh
+        - "-c"
+        - "while true; do redis-cli -h fraud-cache-redis LPUSH work item-$(date +%s) >/dev/null; sleep 1; done"
+        resources:
+          requests:
+            cpu: "23m"
+            memory: "34Mi"
+          limits:
+            cpu: "46m"
+            memory: "68Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-cache-reader
+  namespace: fraud-cache
+  labels:
+    app.kubernetes.io/managed-by: spike-substrate
+    app: fraud-cache-reader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-cache-reader
+  template:
+    metadata:
+      labels:
+        app: fraud-cache-reader
+    spec:
+      containers:
+      - name: fraud-cache-reader
+        image: "redis:7-alpine"
+        command:
+        - sh
+        - "-c"
+        - "while true; do len=$(redis-cli -h fraud-cache-redis LLEN work); echo queue_depth=$len; redis-cli -h fraud-cache-redis RPOP work >/dev/null; sleep 3; done"
+        resources:
+          requests:
+            cpu: "20m"
+            memory: "18Mi"
+          limits:
+            cpu: "40m"
+            memory: "36Mi"
