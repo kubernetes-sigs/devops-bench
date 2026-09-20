@@ -1,0 +1,85 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: archive
+  labels:
+    app: vault-config
+    owner: archive-team
+data:
+  APP_MODE: canary-v2
+  HTTP_TIMEOUT_MS: '1500'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: credentials
+  namespace: archive
+  labels:
+    app: vault
+    owner: archive-team
+type: Opaque
+stringData:
+  password: changeme
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: archive
+  labels:
+    app: vault
+    owner: archive-team
+spec:
+  clusterIP: None
+  selector:
+    app: vault
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+  namespace: archive
+  labels:
+    app: vault
+    owner: archive-team
+spec:
+  serviceName: vault
+  replicas: 4
+  selector:
+    matchLabels:
+      app: vault
+  template:
+    metadata:
+      labels:
+        app: vault
+        owner: archive-team
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+      - name: worker
+        image: busybox:1.36
+        args:
+        - sh
+        - -c
+        - sleep 100000
+        envFrom:
+        - secretRef:
+            name: credentials
+  updateStrategy:
+    rollingUpdate:
+      partition: 3
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vault-pdb
+  namespace: archive
+  labels:
+    app: vault
+    owner: archive-team
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: vault
