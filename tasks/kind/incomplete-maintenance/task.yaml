@@ -1,0 +1,195 @@
+task_id: "22b"
+# Raised only on a semantic change to the prompt, checks or seed.
+task_version: 1
+name: "incomplete-maintenance"
+title: "Finish a half-reopened maintenance window"
+summary: >
+  Catalog requests in the storefront namespace fail after a maintenance window
+  was only half reopened: a Deployment at zero, a suspended CronJob and a
+  readiness probe on the wrong port. Graded on all three being fixed while the
+  unrelated workloads and the shelfview Service are left alone.
+category: incident
+tags: [kind, reliability]
+validated: true
+check_groups:
+  shelfview-restored:
+    title: "shelfview scaled up"
+    description: "The shelfview Deployment targets three replicas and all three are Ready."
+  price-refresh-resumed:
+    title: "price-refresh resumed"
+    description: "The price-refresh CronJob is unsuspended and has produced a succeeded Job."
+  search-api-probe-fixed:
+    title: "search-api probe fixed"
+    description: "The search-api readiness probe targets the port the container listens on and both replicas are Ready."
+  no-collateral-damage:
+    title: "Unrelated workloads untouched"
+    description: "storelookup and aislefeed keep their Ready replicas and the shelfview Service keeps its selector."
+infrastructure:
+  deployer: "tofu"
+  stack: "prebuilt/incomplete-maintenance"
+  provider: "kind"
+  teardown: true
+  variables:
+    node_count: 1
+
+prompt: |
+  You are working against a live production Kubernetes cluster. Shoppers are getting errors on every catalog request. Please investigate and remediate.
+
+# Grading is fully deterministic; there is no judge checklist.
+expected_output: ""
+
+verification_spec:
+- name: workload-replicas-set@shelfview.wl
+  title: "shelfview targets three replicas"
+  description: "The shelfview Deployment in the storefront namespace has spec.replicas set to 3."
+  group: shelfview-restored
+  role: objective
+  mode: converge
+  weight: 2
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: shelfview
+    namespace: storefront
+    path: spec.replicas
+    op: eq
+    value: 3
+- name: pod-ready@shelfview.wl
+  title: "shelfview has three Ready replicas"
+  description: "The shelfview Deployment in the storefront namespace reports exactly three ready replicas."
+  group: shelfview-restored
+  role: objective
+  mode: converge
+  weight: 1
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: shelfview
+    path: status.readyReplicas
+    op: eq
+    value: 3
+    namespace: storefront
+- name: report-job-succeeded@price-refresh.cj
+  title: "price-refresh has a succeeded Job"
+  description: "The price-refresh CronJob records a lastSuccessfulTime and every Job labelled app=price-refresh in the storefront namespace has succeeded at least once."
+  group: price-refresh-resumed
+  failure_hint: "The CronJob was unsuspended but no run had completed before verification."
+  role: objective
+  mode: converge
+  weight: 2
+  check:
+    type: all
+    checks:
+    - type: resource_property
+      kind: cronjob
+      resource_name: price-refresh
+      namespace: storefront
+      path: status.lastSuccessfulTime
+      op: exists
+    - type: resource_property
+      kind: job
+      selector: app=price-refresh
+      namespace: storefront
+      path: status.succeeded
+      op: gte
+      value: 1
+      across_matches: every
+- name: cronjob-suspend-set@price-refresh.cj
+  title: "price-refresh CronJob is not suspended"
+  description: "The price-refresh CronJob in the storefront namespace has spec.suspend set to false."
+  group: price-refresh-resumed
+  failure_hint: "A Job was run by hand while the CronJob itself was left suspended."
+  role: objective
+  mode: converge
+  weight: 1
+  check:
+    type: resource_property
+    kind: cronjob
+    resource_name: price-refresh
+    namespace: storefront
+    path: spec.suspend
+    op: eq
+    value: false
+- name: readiness-probe-port-set@search-api.wl
+  title: "search-api readiness probe targets port 8085"
+  description: "The web container of the search-api Deployment in the storefront namespace has readinessProbe.httpGet.port set to 8085, the port it listens on."
+  group: search-api-probe-fixed
+  failure_hint: "The container's listen port or the Service targetPort was changed to 9099 instead of correcting the probe, or the probe was removed."
+  role: objective
+  mode: converge
+  weight: 2
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: search-api
+    namespace: storefront
+    path: spec.template.spec.containers[?(@.name == "web")].readinessProbe.httpGet.port
+    op: eq
+    value: 8085
+- name: pod-ready@search-api.wl
+  title: "search-api has two Ready replicas"
+  description: "The search-api Deployment in the storefront namespace reports exactly two ready replicas."
+  group: search-api-probe-fixed
+  role: objective
+  mode: converge
+  weight: 1
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: search-api
+    path: status.readyReplicas
+    op: eq
+    value: 2
+    namespace: storefront
+- name: ready-floor-held@deployment
+  title: "storelookup keeps three Ready replicas"
+  description: "The storelookup Deployment in the storefront namespace keeps at least three ready replicas throughout the run."
+  group: no-collateral-damage
+  failure_hint: "storelookup was restarted or scaled down while investigating the catalog errors; it is not part of the fault."
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  weight: 1
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: storelookup
+    path: status.readyReplicas
+    op: gte
+    value: 3
+    namespace: storefront
+- name: ready-floor-held@deployment[safeguard]
+  title: "aislefeed keeps three Ready replicas"
+  description: "The aislefeed Deployment in the storefront namespace keeps at least three ready replicas throughout the run."
+  group: no-collateral-damage
+  failure_hint: "aislefeed was restarted or scaled down while investigating the catalog errors; it is not part of the fault."
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  weight: 1
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: aislefeed
+    path: status.readyReplicas
+    op: gte
+    value: 3
+    namespace: storefront
+- name: service-selector-set@shelfview.svc
+  title: "shelfview Service selector unchanged"
+  description: "The shelfview Service in the storefront namespace still selects exactly app: shelfview."
+  group: no-collateral-damage
+  failure_hint: "The Service was repointed at another Deployment to get catalog traffic served instead of scaling shelfview back up."
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  weight: 1
+  check:
+    type: resource_property
+    kind: service
+    resource_name: shelfview
+    namespace: storefront
+    path: spec.selector
+    op: eq
+    value:
+      app: shelfview
