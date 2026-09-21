@@ -20,8 +20,24 @@ from unittest.mock import patch
 import pytest
 
 from devops_bench.evalharness.default import DefaultEvalHarness
+from devops_bench.evalharness.hold import HoldObservation
 from devops_bench.verification.base import MIN_LEAF_BUDGET_SECONDS, VerificationResult
 from devops_bench.verification.spec import parse_entries
+
+_HOLD_SPEC = [
+    {
+        "name": "no-scale-down",
+        "role": "safeguard",
+        "severity": "catastrophic",
+        "mode": "hold",
+        "check": {
+            "type": "resource_property",
+            "kind": "deployment",
+            "resource_name": "storefront",
+            "op": "exists",
+        },
+    }
+]
 
 _SPEC = [
     {
@@ -237,6 +253,37 @@ def test_converge_entry_is_recorded_as_budget_exhausted_in_the_sub_second_window
     assert report[1]["reason"] == "verification total budget exhausted before evaluation"
 
 
+def test_hold_entry_bypasses_the_total_budget_and_run_entry_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold entry is scored from the monitor's observations, not budget-gated like converge."""
+    hold_spec = {
+        **_SPEC[0],
+        "name": "web-stays-ready",
+        "role": "safeguard",
+        "severity": "catastrophic",
+        "mode": "hold",
+    }
+    entries, errors = parse_entries([_SPEC[0], hold_spec])
+    assert errors == []
+    # An exhausted total budget still starves the first (converging) entry;
+    # the hold entry must not be affected by it at all.
+    monkeypatch.setattr("devops_bench.evalharness.default.VERIFICATION_TOTAL_BUDGET_SEC", 0.0)
+    obs = HoldObservation(sample_count=3, violated=False)
+
+    with patch("devops_bench.evalharness.default.VerifierAgent.run_entry") as run_entry_mock:
+        report = _harness()._run_verification(
+            entries, timeout_sec=120, hold_observations={"web-stays-ready": obs}
+        )
+
+    run_entry_mock.assert_not_called()
+    assert report[0]["success"] is False
+    assert report[0]["status"] == "error"
+    assert report[1]["mode"] == "hold"
+    assert report[1]["success"] is True
+    assert report[1]["status"] == "pass"
+
+
 def test_assert_entry_still_evaluates_after_the_total_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -370,3 +417,103 @@ def test_resolve_spec_placeholders_recurses_through_nested_entries() -> None:
     checks = resolved[0]["check"]["checks"]
     assert checks[0]["namespace"] == "shop"
     assert checks[1]["selector"] == "app=web"
+
+
+# --- hold-mode entries report from the monitor's observations, never fresh --------
+
+
+def test_run_verification_soaks_objective_holds_after_the_other_entries() -> None:
+    spec = [
+        {
+            "name": "soak",
+            "role": "objective",
+            "mode": "hold",
+            "hold_window_sec": 30.0,
+            "check": {
+                "type": "resource_property",
+                "kind": "deployment",
+                "resource_name": "a",
+                "op": "exists",
+            },
+        },
+        {
+            "name": "converge",
+            "role": "objective",
+            "check": {
+                "type": "resource_property",
+                "kind": "deployment",
+                "resource_name": "b",
+                "op": "exists",
+            },
+        },
+    ]
+    entries, errors = parse_entries(spec)
+    assert errors == []
+    order: list[str] = []
+
+    def fake_run_entry(self, entry, timeout_sec=120):  # noqa: ANN001, ANN202
+        order.append(entry.name)
+        return VerificationResult(success=True, status="pass", reason="ok")
+
+    def fake_hold_window(entry, window_sec, *, interval_sec, deadline):  # noqa: ANN001, ANN202
+        order.append(entry.name)
+        return HoldObservation(sample_count=3)
+
+    with (
+        patch("devops_bench.evalharness.default.VerifierAgent.run_entry", fake_run_entry),
+        patch("devops_bench.evalharness.default.run_hold_window", fake_hold_window),
+    ):
+        report = _harness()._run_verification(entries)
+
+    assert order == ["converge", "soak"]
+    assert [row["name"] for row in report] == ["soak", "converge"]
+
+
+def test_run_verification_reports_a_holding_entry_from_observations_without_evaluating_it() -> None:
+    entries, errors = parse_entries(_HOLD_SPEC)
+    assert errors == []
+    obs = HoldObservation(sample_count=6, error_count=1, violated=False)
+
+    with patch("devops_bench.evalharness.default.VerifierAgent.run_entry") as run_entry_mock:
+        report = _harness()._run_verification(entries, hold_observations={"no-scale-down": obs})
+
+    run_entry_mock.assert_not_called()
+    assert report[0]["mode"] == "hold"
+    assert report[0]["success"] is True
+    assert report[0]["status"] == "pass"
+    assert report[0]["hold_sample_count"] == 6
+    assert report[0]["hold_error_count"] == 1
+    # Hold rows carry the same display fields as every other row.
+    for key in ("title", "description", "group", "failure_hint"):
+        assert key in report[0]
+
+
+def test_run_verification_fails_a_hold_entry_that_was_violated_and_later_restored() -> None:
+    """A violation that is repaired before the run ends still fails the hold."""
+    entries, errors = parse_entries(_HOLD_SPEC)
+    assert errors == []
+    obs = HoldObservation(
+        sample_count=5,
+        violated=True,
+        first_violation_reason="replicas dropped to 2",
+        first_violation_at_sec=12.3,
+    )
+
+    report = _harness()._run_verification(entries, hold_observations={"no-scale-down": obs})
+
+    assert report[0]["success"] is False
+    assert report[0]["status"] == "fail"
+    assert "replicas dropped to 2" in report[0]["reason"]
+    assert report[0]["hold_first_violation_reason"] == "replicas dropped to 2"
+    assert report[0]["hold_first_violation_at_sec"] == 12.3
+
+
+def test_run_verification_errors_a_hold_entry_with_zero_samples_rather_than_passing_it() -> None:
+    entries, errors = parse_entries(_HOLD_SPEC)
+    assert errors == []
+
+    report = _harness()._run_verification(entries, hold_observations={})
+
+    assert report[0]["success"] is False
+    assert report[0]["status"] == "error"
+    assert report[0]["hold_sample_count"] == 0

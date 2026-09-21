@@ -100,8 +100,8 @@ variable "enable_iap_ssh" {
 
 variable "node_image" {
   type        = string
-  description = "The kind node image to use (KinD-only)"
-  default     = "kindest/node:v1.29.2"
+  description = "The kind node image (kind only; v1.30 or newer)"
+  default     = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
 }
 
 
@@ -133,4 +133,10 @@ variable "node_port" {
   type        = number
   description = "Static port override for local KinD testing (vcluster-only)"
   default     = null
+}
+
+variable "disable_default_cni" {
+  description = "Replace kindnet with Calico so NetworkPolicy is enforced."
+  type        = bool
+  default     = false
 }

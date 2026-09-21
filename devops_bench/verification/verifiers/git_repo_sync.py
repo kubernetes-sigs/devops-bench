@@ -50,8 +50,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import model_validator
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 from devops_bench.verification.base import (
     VERIFIERS,
@@ -77,6 +78,19 @@ __all__ = ["GitRepoSyncVerifier"]
 
 _VALUE_OPS = ("eq", "ne", "gt", "gte", "lt", "lte", "contains", "matches")
 _SET_OPS = ("exists", "absent")
+
+
+def _yaml_loader() -> YAML:
+    """Return a fresh YAML 1.2 loader for one parse.
+
+    ``pure=True`` pins ruamel's Python implementation, whose scalar rules match
+    tasks/loader.py: only ``true``/``false`` are booleans, so a manifest key like
+    ``on:`` or a value of ``no`` stays a string and is compared as the agent
+    wrote it. The C backend can apply YAML 1.1 resolution instead. A new
+    instance per call, because ruamel does not promise a loader is reusable
+    after a parse error and this verifier polls.
+    """
+    return YAML(typ="safe", pure=True)
 
 
 class _GitError(RuntimeError):
@@ -228,8 +242,8 @@ class GitRepoSyncVerifier(BaseVerifier):
             return "error", f"could not read {self.file!r} from {repo}: {exc}", raw
 
         try:
-            docs = [d for d in yaml.safe_load_all(content) if d is not None]
-        except yaml.YAMLError as exc:
+            docs = [d for d in _yaml_loader().load_all(content) if d is not None]
+        except YAMLError as exc:
             # The agent left the file unparseable. That is an observation about
             # the repository's state, not a harness failure.
             return "fail", f"{self.file!r} at {self.ref} is not valid YAML: {exc}", raw

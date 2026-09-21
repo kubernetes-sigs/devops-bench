@@ -56,6 +56,12 @@ from devops_bench.core import (
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
+from devops_bench.evalharness.hold import (
+    HoldObservation,
+    SafeguardMonitor,
+    hold_verdict,
+    run_hold_window,
+)
 from devops_bench.evalharness.reporter import ResultReporter
 from devops_bench.evalharness.scenario import (
     VERIFICATION_TIMEOUT_SEC,
@@ -70,6 +76,7 @@ from devops_bench.verification import (
     VerifierAgent,
     parse_entries,
 )
+from devops_bench.verification.hold_defaults import effective_poll_interval
 
 __all__ = ["DefaultEvalHarness"]
 
@@ -506,6 +513,8 @@ class DefaultEvalHarness(Harness):
         self,
         entries: list[VerificationEntry],
         timeout_sec: float = VERIFICATION_TIMEOUT_SEC,
+        *,
+        hold_observations: dict[str, HoldObservation] | None = None,
     ) -> list[dict[str, Any]]:
         """Evaluate every entry against the live cluster after the agent finishes.
 
@@ -529,9 +538,29 @@ class DefaultEvalHarness(Harness):
         to short-circuit an under-budget leaf as a definite "deadline
         exhausted" outcome, and this entry was never observed either way.
 
+        A ``hold`` entry is never evaluated with a single ``run_entry`` call
+        here, but the two roles reach their observation differently.  A
+        ``safeguard`` hold entry was already sampled on a background thread
+        across the agent's turn (see
+        ``devops_bench.evalharness.hold.SafeguardMonitor``), and its outcome
+        comes entirely from ``hold_observations``. An ``objective`` hold
+        entry is soaked right here instead, via
+        :func:`~devops_bench.evalharness.hold.run_hold_window`, against this
+        same total-budget deadline: an objective starts false and must
+        become true and stay true, which can only be observed after the
+        agent's turn ends. A hold entry with zero samples either way is
+        recorded as an error, not a silent pass: a hold nobody watched must
+        not read as one that held.
+
         Args:
             entries: The task's parsed verification entries.
             timeout_sec: Per-entry budget for converging entries.
+            hold_observations: Name-keyed monitor observations for every
+                ``safeguard``-role ``hold`` entry, as returned by
+                :meth:`~devops_bench.evalharness.hold.SafeguardMonitor.get_observations`.
+                ``None`` (or a missing name) is treated the same as zero
+                samples. Never consulted for ``objective``-role hold entries,
+                which are soaked in this same pass instead.
 
         Returns:
             One raw mapping per entry, in declaration order, carrying the
@@ -541,62 +570,144 @@ class DefaultEvalHarness(Harness):
         agent = VerifierAgent()
         report: list[dict[str, Any]] = []
         total_deadline = time.monotonic() + VERIFICATION_TOTAL_BUDGET_SEC
+        hold_observations = hold_observations or {}
 
-        for entry in entries:
-            remaining = total_deadline - time.monotonic()
-            if entry.resolved_mode != "assert" and remaining < MIN_LEAF_BUDGET_SECONDS:
-                # Never evaluated, not a condition observed false.
-                report.append(
-                    {
-                        "name": entry.name,
-                        **_entry_display_fields(entry),
-                        "role": entry.role,
-                        "severity": entry.severity,
-                        "weight": entry.weight,
-                        "mode": entry.resolved_mode,
-                        "success": False,
-                        "status": "error",
-                        "reason": "verification total budget exhausted before evaluation",
-                        "elapsed_time": 0.0,
-                        "children": [],
-                    }
-                )
+        # Objective holds soak last, so converging objectives claim the shared
+        # budget before any soak can consume it. Rows keep declaration order.
+        rows: list[dict[str, Any] | None] = [None] * len(entries)
+        objective_holds: list[int] = []
+
+        for index, entry in enumerate(entries):
+            if entry.resolved_mode == "hold" and entry.role == "safeguard":
+                rows[index] = self._hold_report_entry(entry, hold_observations.get(entry.name))
                 continue
+            if entry.resolved_mode == "hold" and entry.role == "objective":
+                objective_holds.append(index)
+                continue
+            rows[index] = self._evaluate_entry(agent, entry, timeout_sec, total_deadline)
 
-            try:
-                result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
-                success = result.success
-                status = result.status
-                reason = result.reason
-                elapsed = result.elapsed_time
-                children = [child.model_dump() for child in result.children]
-            except Exception as exc:  # noqa: BLE001 - one entry must not abort the rest
-                _log.exception("verification entry %r failed to evaluate", entry.name)
-                success, status, reason, elapsed, children = (
-                    False,
-                    "error",
-                    f"evaluation error: {exc}",
-                    0.0,
-                    [],
+        for index in objective_holds:
+            entry = entries[index]
+            # hold_window_sec is required for an objective hold entry;
+            # normally enforced by VerificationEntry's own validation, so
+            # reaching here without it means a spec-validation bug let an
+            # invalid entry through to verification.
+            if entry.hold_window_sec is None:
+                raise ValueError(
+                    f"objective hold entry {entry.name!r} reached verification without "
+                    "hold_window_sec set; this should have been rejected at "
+                    "spec-validation time"
                 )
+            obs = run_hold_window(
+                entry,
+                entry.hold_window_sec,
+                interval_sec=effective_poll_interval(entry.hold_poll_interval_sec),
+                deadline=total_deadline,
+            )
+            rows[index] = self._hold_report_entry(entry, obs)
 
-            report.append(
-                {
-                    "name": entry.name,
-                    **_entry_display_fields(entry),
-                    "role": entry.role,
-                    "severity": entry.severity,
-                    "weight": entry.weight,
-                    "mode": entry.resolved_mode,
-                    "success": success,
-                    "status": status,
-                    "reason": reason,
-                    "elapsed_time": elapsed,
-                    "children": children,
-                }
+        report.extend(row for row in rows if row is not None)
+        return report
+
+    def _evaluate_entry(
+        self,
+        agent: VerifierAgent,
+        entry: VerificationEntry,
+        timeout_sec: float,
+        total_deadline: float,
+    ) -> dict[str, Any]:
+        """Evaluate one converge or assert entry against the shared deadline."""
+        remaining = total_deadline - time.monotonic()
+        if entry.resolved_mode != "assert" and remaining < MIN_LEAF_BUDGET_SECONDS:
+            # Never evaluated, not a condition observed false.
+            return {
+                "name": entry.name,
+                **_entry_display_fields(entry),
+                "role": entry.role,
+                "severity": entry.severity,
+                "weight": entry.weight,
+                "mode": entry.resolved_mode,
+                "success": False,
+                "status": "error",
+                "reason": "verification total budget exhausted before evaluation",
+                "elapsed_time": 0.0,
+                "children": [],
+            }
+
+        try:
+            result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
+            success = result.success
+            status = result.status
+            reason = result.reason
+            elapsed = result.elapsed_time
+            children = [child.model_dump() for child in result.children]
+        except Exception as exc:  # noqa: BLE001 - one entry must not abort the rest
+            _log.exception("verification entry %r failed to evaluate", entry.name)
+            success, status, reason, elapsed, children = (
+                False,
+                "error",
+                f"evaluation error: {exc}",
+                0.0,
+                [],
             )
 
-        return report
+        return {
+            "name": entry.name,
+            **_entry_display_fields(entry),
+            "role": entry.role,
+            "severity": entry.severity,
+            "weight": entry.weight,
+            "mode": entry.resolved_mode,
+            "success": success,
+            "status": status,
+            "reason": reason,
+            "elapsed_time": elapsed,
+            "children": children,
+        }
+
+    @staticmethod
+    def _hold_report_entry(entry: VerificationEntry, obs: HoldObservation | None) -> dict[str, Any]:
+        """Build one hold entry's report row from its driver's observation.
+
+        The verdict itself (pass / fail / error, and why) is delegated to
+        :func:`~devops_bench.evalharness.hold.hold_verdict` so both hold
+        drivers (the live safeguard monitor and the post-run objective
+        window) are scored by exactly one rule. ``obs is None`` (the entry's
+        name was missing from ``hold_observations`` entirely) is treated the
+        same as a fresh, zero-sample observation.
+
+        Args:
+            entry: The hold-mode entry being reported.
+            obs: The driver's observation for this entry, or ``None`` if the
+                entry's name was missing from ``hold_observations`` entirely.
+
+        Returns:
+            The report row for this entry, in the same shape
+            :func:`devops_bench.verification.rollup.rollup` consumes, plus
+            ``hold_sample_count`` / ``hold_error_count`` /
+            ``hold_first_violation_reason`` / ``hold_first_violation_at_sec``
+            so the outcome is auditable from the report alone.
+        """
+        success, status, reason = hold_verdict(obs if obs is not None else HoldObservation())
+
+        return {
+            "name": entry.name,
+            **_entry_display_fields(entry),
+            "role": entry.role,
+            "severity": entry.severity,
+            "weight": entry.weight,
+            "mode": entry.resolved_mode,
+            "success": success,
+            "status": status,
+            "reason": reason,
+            "elapsed_time": obs.observed_window_sec if obs is not None else 0.0,
+            "children": [],
+            "hold_observed_window_sec": obs.observed_window_sec if obs is not None else 0.0,
+            "hold_sample_count": obs.sample_count if obs is not None else 0,
+            "hold_error_count": obs.error_count if obs is not None else 0,
+            "hold_first_violation_reason": obs.first_violation_reason if obs is not None else None,
+            "hold_first_violation_at_sec": obs.first_violation_at_sec if obs is not None else None,
+        }
 
     # -- scenario (background chaos) --------------------------------------
 
@@ -893,6 +1004,8 @@ class DefaultEvalHarness(Harness):
         deployer: Any | None = None
         scenario_manager: ScenarioManager | None = None
         scenario_thread: threading.Thread | None = None
+        safeguard_monitor: SafeguardMonitor | None = None
+        hold_observations: dict[str, HoldObservation] = {}
         result: dict[str, Any] | None = None
         workspace_path: Path | None = None
         verification_parse_errors: list[dict[str, str]] = []
@@ -982,9 +1095,36 @@ class DefaultEvalHarness(Harness):
                         _CHAOS_ACTIVE_WAIT_SEC,
                     )
 
+            # Safeguard hold entries must be observed continuously from here
+            # through the end of the agent's turn, not just at the moment
+            # verification runs after the agent exits (see hold's module
+            # docstring for the failure this closes). Started as close to
+            # the agent's turn as possible so a chaos-induced state change is
+            # not mistaken for an agent-caused violation. Objective hold
+            # entries are deliberately excluded here: an objective starts
+            # false and must become true, so sampling it live would latch a
+            # spurious violation before the agent has done anything. Those
+            # are soaked instead in the post-run verification pass (see
+            # ``_run_verification``).
+            safeguard_hold_entries = [
+                entry
+                for entry in entries
+                if entry.resolved_mode == "hold" and entry.role == "safeguard"
+            ]
+            safeguard_monitor = SafeguardMonitor(safeguard_hold_entries)
+            # No cluster under no_infra, so there is nothing to sample.
+            if not self.no_infra:
+                safeguard_monitor.start()
+
             _log.info("executing agent for prompt: %s", prompt)
             before_files = snapshot_dir(workspace_path)
             agent_res = self.execute_agent(prompt, context)
+            # The agent's turn just ended; stop sampling immediately so the
+            # hold window is exactly "seed through the end of the agent's
+            # turn" rather than continuing to sample through the (potentially
+            # slow) post-processing below.
+            safeguard_monitor.stop()
+            hold_observations = safeguard_monitor.get_observations()
             # NOTE/TODO: This collects ALL frontmatter from bootstrapping, not just generated files.
             # Consider a more targeted filter in a future iteration.
             # Best-effort: a collection failure (I/O, permissions, a bad link in the
@@ -1008,7 +1148,9 @@ class DefaultEvalHarness(Harness):
                 verification_report: list[dict[str, Any]] = []
                 verification_status = "skipped_no_infra"
             else:
-                verification_report = self._run_verification(entries)
+                verification_report = self._run_verification(
+                    entries, hold_observations=hold_observations
+                )
                 verification_status = "evaluated"
 
             result = self._build_success_record(
@@ -1026,12 +1168,23 @@ class DefaultEvalHarness(Harness):
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
             _log.error("critical error during task %s: %s", task.name, exc)
+            # The exception may have landed before the success path's own
+            # stop()+get_observations() ran (e.g. the agent call itself
+            # raised), so stop here too. Idempotent: a second stop() on an
+            # already-stopped monitor is a no-op, mirroring how
+            # scenario_manager.stop() is already called from both the success
+            # path (via _drain_scenario) and this finally-adjacent path below.
+            if safeguard_monitor is not None:
+                safeguard_monitor.stop()
+                hold_observations = safeguard_monitor.get_observations()
             exception_verification_report: list[dict[str, Any]] = []
             if self.no_infra:
                 exception_verification_status = "skipped_no_infra"
             elif infra_up and entries:
                 try:
-                    exception_verification_report = self._run_verification(entries)
+                    exception_verification_report = self._run_verification(
+                        entries, hold_observations=hold_observations
+                    )
                     exception_verification_status = "evaluated"
                 except Exception:  # noqa: BLE001 - a crash here must not mask the original failure
                     _log.exception(
@@ -1065,6 +1218,10 @@ class DefaultEvalHarness(Harness):
                 # but the exception path reaches here without draining).
                 if scenario_thread is not None:
                     scenario_thread.join(timeout=_SCENARIO_JOIN_SEC)
+            if safeguard_monitor is not None:
+                # stop() is idempotent and never raises; this covers any path
+                # that skipped the two calls above.
+                safeguard_monitor.stop()
             if deployer is not None:
                 self._teardown(deployer, infra_config, task.name)
             if workspace_path is not None:

@@ -42,6 +42,8 @@ module "kind" {
   project_id      = var.project_id
   location        = var.location != "" ? var.location : "local"
   node_count      = var.node_count
+
+  disable_default_cni = var.disable_default_cni
 }
 
 
