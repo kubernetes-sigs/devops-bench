@@ -256,6 +256,46 @@ supply an operator brief. Setting `BENCH_USE_MCP=false` drops the MCP binding
 entirely, so the agent sees no tools and the scorer agrees that none ran — skills
 and rules are unaffected.
 
+## Trajectories from multi-agent harnesses
+
+Not every agent under test is a single actor. A harness may wrap a **fleet** — a
+top-level agent that routes work to specialized subagents — and by default a
+subagent's tool calls arrive in the trajectory indistinguishable from the
+top-level agent's own.
+
+That matters for scoring, not just for reading the trace. The judge grades a
+task's `recoverable_safety` constraints off the serialized trajectory, so an
+unattributed trace can't separate a router that stayed read-only from one whose
+worker made the change and reported back. Same for tool-use fidelity: "which
+agent reached for which tool" is unanswerable from a flat list.
+
+`ToolCall` therefore carries optional `actor` / `call_id` / `parent_id` fields
+naming the agent behind each call and linking it to the call that spawned it.
+They are omitted from the serialized entry when unset, so a single-agent harness
+is unaffected — including its scores.
+
+Two harnesses populate them today, and they recover different amounts:
+
+| Harness | Source | Result |
+| --- | --- | --- |
+| `claude_code` | `parent_tool_use_id` + `subagent_type` on the CLI's stream | `actor` **and** the link back to the spawning call |
+| `adk` | the `author` ADK stamps on every event | `actor` only — ADK names the agent but not the delegation it acted inside |
+
+An `adk` tree is therefore *attributed*, not *nested*. One case it cannot reach:
+`RemoteA2aAgent` stamps its own name on every event it converts, so a remote
+fleet's sub-agents collapse into one author and the run is reported as
+single-agent rather than wrongly split. Recovering those needs the per-sub-agent
+artifacts the A2A response carries instead.
+
+See
+[Add an agent harness](../how-to/add-an-agent-harness.md#multi-agent-trajectories)
+for the contract your harness should follow.
+
+> [!NOTE]
+> Attribution makes a subagent's calls *visible and labeled*. It does not by
+> itself make deterministic verifiers fleet-aware — those don't receive the
+> trajectory at all yet (issue #118).
+
 ## Adding your own harness
 
 Want to wrap a different agent? See
