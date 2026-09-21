@@ -64,7 +64,7 @@ class _AlwaysPass(BaseVerifier):
 class _FlipThenRestore(BaseVerifier):
     """Fails on sample number ``fail_at`` only, holds on every other sample.
 
-    Models the actual T-024 failure: the safeguard is violated mid-run and
+    Models a safeguard that is violated mid-run and
     restored before the run ends, so a check that only samples at the end
     never sees it.
     """
@@ -130,6 +130,9 @@ def _objective_hold_entry(check: dict[str, Any], **extra: Any) -> VerificationEn
         "role": "objective",
         "mode": "hold",
         "hold_window_sec": _SAMPLE_WINDOW_SEC,
+        # The test window is a fraction of a second, so the default 5s
+        # interval would be rejected as not smaller than the window.
+        "hold_poll_interval_sec": _POLL_INTERVAL_SEC,
         "check": check,
     }
     payload.update(extra)
@@ -152,7 +155,7 @@ def test_hold_that_holds_throughout_is_not_reported_as_violated() -> None:
 
 
 def test_a_violation_restored_before_the_run_ends_still_fails_the_hold_entry() -> None:
-    """Regression test for the T-024 replica-floor bug this monitor exists to fix."""
+    """A violation that is repaired before the run ends still fails the hold."""
     entry = _hold_entry(
         {"type": "sg_flip", "fail_at": 2}, hold_poll_interval_sec=_POLL_INTERVAL_SEC
     )
@@ -168,6 +171,20 @@ def test_a_violation_restored_before_the_run_ends_still_fails_the_hold_entry() -
     # The condition recovered and later samples kept passing; violated must
     # not be cleared by a later, healthy sample.
     assert obs.sample_count >= 3
+
+
+def test_start_returns_only_after_every_entry_has_its_first_sample() -> None:
+    entries = [
+        _hold_entry({"type": "sg_always_pass"}, name="first"),
+        _hold_entry({"type": "sg_always_pass"}, name="second"),
+    ]
+    monitor = SafeguardMonitor(entries)
+    monitor.start()
+    try:
+        observations = monitor.get_observations()
+        assert all(observations[e.name].sample_count >= 1 for e in entries)
+    finally:
+        monitor.stop()
 
 
 def test_a_check_that_errors_repeatedly_is_not_reported_as_a_violation() -> None:
@@ -233,8 +250,8 @@ def test_start_is_a_no_op_with_no_hold_entries() -> None:
     assert monitor.get_observations() == {}
 
 
-def test_mode_hold_now_parses_instead_of_raising() -> None:
-    """Was rejected outright at the schema level; hold now parses like any other mode."""
+def test_mode_hold_parses_like_any_other_mode() -> None:
+    """hold parses and resolves like converge and assert."""
     entry = _hold_entry({"type": "sg_always_pass"})
     assert entry.resolved_mode == "hold"
 
@@ -272,6 +289,39 @@ def test_run_one_stops_and_joins_the_safeguard_monitor_when_the_agent_raises(
 
     assert record["status"] == "failed"
     assert not any(t.name == "safeguard-monitor" for t in threading.enumerate())
+
+
+def test_run_one_does_not_start_the_safeguard_monitor_under_no_infra(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    started: list[str] = []
+    monkeypatch.setattr(
+        SafeguardMonitor, "start", lambda self: started.append("started"), raising=True
+    )
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c", no_infra=True)
+    monkeypatch.setattr(harness, "execute_agent", lambda prompt, ctx: {"output": "ok"})
+    monkeypatch.setattr(harness, "_run_verification", lambda entries, **kwargs: [])
+    task = Task.from_dict(
+        {
+            "task_id": "t",
+            "name": "demo",
+            "prompt": "p",
+            "infrastructure": {"deployer": "noop"},
+            "verification_spec": [
+                {
+                    "name": "no-scale-down",
+                    "role": "safeguard",
+                    "severity": "catastrophic",
+                    "mode": "hold",
+                    "check": {"type": "sg_always_pass"},
+                }
+            ],
+        }
+    )
+
+    harness._run_one(task, tmp_path)  # noqa: SLF001
+
+    assert started == []
 
 
 # --- _default_poll_interval: validating BENCH_HOLD_INTERVAL_SEC -----------
@@ -380,10 +430,9 @@ def test_hold_verdict_a_window_that_errors_then_recovers_and_ends_clean_is_a_pas
 def test_hold_verdict_a_single_trailing_error_after_clean_samples_is_a_pass() -> None:
     """A single errored sample at the end of the window is absorbed as noise.
 
-    Was previously an "error": one transient kubectl blip on the last poll
-    used to null the whole entry. Now the trailing-error rule only fires on
-    a sustained run of HOLD_TRAILING_ERROR_SAMPLES consecutive errors, so a
-    lone trailing error is treated the same as any other absorbed error.
+    The trailing-error rule fires only on a sustained run of
+    HOLD_TRAILING_ERROR_SAMPLES consecutive errors, so a lone trailing error
+    is treated the same as any other absorbed error.
     """
     obs = HoldObservation()
     _fold_sample(obs, _result(success=True, reason="held"), 0.0)
@@ -410,13 +459,10 @@ def test_hold_verdict_a_window_ending_on_two_consecutive_errors_is_an_error() ->
 
 
 def test_hold_verdict_a_sustained_trailing_error_reports_the_last_error_reason() -> None:
-    """Regression: the trailing-error verdict must carry the final sample's own reason.
+    """The trailing-error verdict carries the final sample's own reason.
 
-    The previous check above only asserts the string "never recovered", which
-    is also present in the verdict's generic boilerplate ("it never
-    recovered") regardless of any per-sample reason, so it does not actually
-    prove a sample's own reason reaches the verdict. Use a reason that shares
-    no words with that boilerplate to prove it.
+    The reason used here shares no words with the verdict's fixed text, so
+    the assertion proves the sample's reason reached the verdict.
     """
     obs = HoldObservation()
     _fold_sample(obs, _result(success=True, reason="held"), 0.0)
@@ -558,7 +604,7 @@ def test_run_verification_raises_when_an_objective_hold_entry_has_no_hold_window
         harness._run_verification([broken_entry])  # noqa: SLF001
 
 
-# --- role-based dispatch: the landmine regression --------------------------
+# --- role-based dispatch ----------------------------------------------------
 
 
 def test_objective_hold_entry_is_routed_to_run_hold_window_not_the_live_monitor(

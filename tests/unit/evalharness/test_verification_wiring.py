@@ -422,6 +422,53 @@ def test_resolve_spec_placeholders_recurses_through_nested_entries() -> None:
 # --- hold-mode entries report from the monitor's observations, never fresh --------
 
 
+def test_run_verification_soaks_objective_holds_after_the_other_entries() -> None:
+    spec = [
+        {
+            "name": "soak",
+            "role": "objective",
+            "mode": "hold",
+            "hold_window_sec": 30.0,
+            "check": {
+                "type": "resource_property",
+                "kind": "deployment",
+                "resource_name": "a",
+                "op": "exists",
+            },
+        },
+        {
+            "name": "converge",
+            "role": "objective",
+            "check": {
+                "type": "resource_property",
+                "kind": "deployment",
+                "resource_name": "b",
+                "op": "exists",
+            },
+        },
+    ]
+    entries, errors = parse_entries(spec)
+    assert errors == []
+    order: list[str] = []
+
+    def fake_run_entry(self, entry, timeout_sec=120):  # noqa: ANN001, ANN202
+        order.append(entry.name)
+        return VerificationResult(success=True, status="pass", reason="ok")
+
+    def fake_hold_window(entry, window_sec, *, interval_sec, deadline):  # noqa: ANN001, ANN202
+        order.append(entry.name)
+        return HoldObservation(sample_count=3)
+
+    with (
+        patch("devops_bench.evalharness.default.VerifierAgent.run_entry", fake_run_entry),
+        patch("devops_bench.evalharness.default.run_hold_window", fake_hold_window),
+    ):
+        report = _harness()._run_verification(entries)
+
+    assert order == ["converge", "soak"]
+    assert [row["name"] for row in report] == ["soak", "converge"]
+
+
 def test_run_verification_reports_a_holding_entry_from_observations_without_evaluating_it() -> None:
     entries, errors = parse_entries(_HOLD_SPEC)
     assert errors == []
@@ -436,10 +483,13 @@ def test_run_verification_reports_a_holding_entry_from_observations_without_eval
     assert report[0]["status"] == "pass"
     assert report[0]["hold_sample_count"] == 6
     assert report[0]["hold_error_count"] == 1
+    # Hold rows carry the same display fields as every other row.
+    for key in ("title", "description", "group", "failure_hint"):
+        assert key in report[0]
 
 
 def test_run_verification_fails_a_hold_entry_that_was_violated_and_later_restored() -> None:
-    """Regression: the T-024 replica-floor bug. A restored violation still fails."""
+    """A violation that is repaired before the run ends still fails the hold."""
     entries, errors = parse_entries(_HOLD_SPEC)
     assert errors == []
     obs = HoldObservation(

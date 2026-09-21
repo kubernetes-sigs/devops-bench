@@ -32,6 +32,7 @@ from pydantic_core import PydanticCustomError
 from devops_bench.core import NotRegisteredError
 from devops_bench.verification import verifiers as _verifiers  # noqa: F401
 from devops_bench.verification.base import VERIFIERS
+from devops_bench.verification.hold_defaults import HOLD_POLL_INTERVAL_SEC, effective_poll_interval
 
 __all__ = [
     "AllSpec",
@@ -410,6 +411,18 @@ class VerificationEntry(BaseModel):
                     "is 'hold': a safeguard hold's window is always the agent's turn, "
                     "so this field would be silently ignored"
                 )
+            if self.hold_window_sec is not None:
+                interval = effective_poll_interval(self.hold_poll_interval_sec)
+                if interval >= self.hold_window_sec:
+                    source = (
+                        "hold_poll_interval_sec"
+                        if self.hold_poll_interval_sec is not None
+                        else f"the default poll interval ({HOLD_POLL_INTERVAL_SEC}s)"
+                    )
+                    raise ValueError(
+                        f"{source} must be smaller than hold_window_sec: a window that "
+                        "fits a single sample is an assert, not a hold"
+                    )
         return self
 
     @property

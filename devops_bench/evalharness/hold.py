@@ -60,14 +60,17 @@ and larger piece of work and is not built here.
 from __future__ import annotations
 
 import copy
-import math
-import os
 import threading
 import time
 from dataclasses import dataclass
 
 from devops_bench.core import get_logger
 from devops_bench.verification import VerificationEntry, VerificationResult, VerifierAgent
+from devops_bench.verification.hold_defaults import (  # noqa: F401 - re-exported
+    HOLD_POLL_INTERVAL_SEC,
+    _default_poll_interval,
+    effective_poll_interval,
+)
 
 __all__ = [
     "HOLD_POLL_INTERVAL_SEC",
@@ -79,41 +82,6 @@ __all__ = [
 
 _log = get_logger("evalharness.hold")
 
-
-def _default_poll_interval() -> float:
-    """Parse ``BENCH_HOLD_INTERVAL_SEC`` as a finite float greater than zero.
-
-    Falls back to ``5.0`` when the variable is unset. Also falls back to
-    ``5.0``, logging a warning naming the variable and its offending value,
-    when the variable is set but is not a finite positive number, so a bad
-    override degrades to the safe default instead of raising a bare
-    ``ValueError`` deep inside module import or letting a zero/negative value
-    make the scheduler spin without sleeping.
-    """
-    raw = os.environ.get("BENCH_HOLD_INTERVAL_SEC")
-    if raw is None:
-        return 5.0
-    try:
-        value = float(raw)
-    except ValueError:
-        _log.warning("BENCH_HOLD_INTERVAL_SEC=%r is not a valid number; falling back to 5.0", raw)
-        return 5.0
-    if not math.isfinite(value) or value <= 0:
-        _log.warning(
-            "BENCH_HOLD_INTERVAL_SEC=%r must be a finite number greater than zero; "
-            "falling back to 5.0",
-            raw,
-        )
-        return 5.0
-    return value
-
-
-# Default seconds between samples for a hold entry that does not set its own
-# ``hold_poll_interval_sec``. Overridable via BENCH_HOLD_INTERVAL_SEC, a
-# module-level tunable in the same style as VERIFICATION_TIMEOUT_SEC /
-# VERIFICATION_TOTAL_BUDGET_SEC in devops_bench.evalharness.scenario (those
-# two are plain constants, not env-overridable).
-HOLD_POLL_INTERVAL_SEC = _default_poll_interval()
 
 # Consecutive errored samples required at the end of an observation window
 # before hold_verdict() reports "error" instead of "pass". One errored
@@ -138,6 +106,11 @@ _SCHEDULER_TICK_SEC = 1.0
 # devops_bench.verification.base.single_call_timeout) before returning, so the
 # join budget is set comfortably above that rather than at the poll interval.
 _DEFAULT_JOIN_TIMEOUT_SEC = 40.0
+
+# How long start() waits for the scheduler's first pass over every hold
+# entry before letting the agent's turn begin. One pass is one sample per
+# entry, each bounded by the leaf's own I/O timeout.
+_FIRST_PASS_TIMEOUT_SEC = 120.0
 
 
 @dataclass
@@ -176,8 +149,15 @@ class HoldObservation:
             until an errored sample is folded in. Lets a sustained-trailing-
             error verdict report what actually went wrong instead of only a
             generic message.
+        requested_window_sec: The window the entry asked for, in seconds.
+            ``None`` for a safeguard, whose window is the agent's turn.
+        observed_window_sec: How long the driver actually sampled, in
+            seconds. Shorter than ``requested_window_sec`` when the shared
+            verification budget cut the soak short.
     """
 
+    requested_window_sec: float | None = None
+    observed_window_sec: float = 0.0
     violated: bool = False
     first_violation_reason: str | None = None
     first_violation_at_sec: float | None = None
@@ -260,7 +240,8 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
        the entry was never actually observed at the point the window
        closed, and that is not a pass.
     5. Otherwise, pass, noting any absorbed (recovered) errors, including a
-       single trailing error too short to trigger rule 4.
+       single trailing error too short to trigger rule 4, and noting when the
+       shared verification budget cut an objective's window short.
 
     Args:
         obs: The observation to score.
@@ -300,6 +281,14 @@ def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
     reason = f"held for {obs.sample_count} sample(s) across the observation window"
     if obs.error_count > 0:
         reason += f" ({obs.error_count} sample(s) could not be evaluated)"
+    if (
+        obs.requested_window_sec is not None
+        and obs.observed_window_sec + 1.0 < obs.requested_window_sec
+    ):
+        reason += (
+            f"; the verification budget cut the window to {obs.observed_window_sec:.0f}s "
+            f"of the requested {obs.requested_window_sec:.0f}s"
+        )
     return True, "pass", reason
 
 
@@ -333,18 +322,27 @@ class SafeguardMonitor:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._start_time: float | None = None
+        self._first_pass_done = threading.Event()
 
     def start(self) -> None:
-        """Start the background sampling thread.
+        """Start the background sampling thread and wait for its first pass.
 
-        A no-op when there are no hold entries to watch, so callers do not
-        need to special-case an empty list.
+        Returns once every hold entry has been sampled once, so the agent's
+        turn cannot begin before the baseline is recorded. A no-op when there
+        are no hold entries to watch, so callers do not need to special-case
+        an empty list.
         """
         if not self._entries:
             return
         self._start_time = time.monotonic()
         self._thread = threading.Thread(target=self._run, daemon=True, name="safeguard-monitor")
         self._thread.start()
+        if not self._first_pass_done.wait(_FIRST_PASS_TIMEOUT_SEC):
+            _log.warning(
+                "safeguard monitor did not finish its first sampling pass within %ss; "
+                "starting the agent anyway",
+                _FIRST_PASS_TIMEOUT_SEC,
+            )
 
     def stop(self, join_timeout_sec: float = _DEFAULT_JOIN_TIMEOUT_SEC) -> None:
         """Signal the sampling thread to exit and join it with a bounded timeout.
@@ -368,6 +366,11 @@ class SafeguardMonitor:
                 "abandoning it (it is a daemon thread and cannot leak the process)",
                 join_timeout_sec,
             )
+        if self._start_time is not None:
+            observed = time.monotonic() - self._start_time
+            with self._lock:
+                for obs in self._observations.values():
+                    obs.observed_window_sec = observed
 
     def get_observations(self) -> dict[str, HoldObservation]:
         """Return a locked snapshot of every entry's observation so far.
@@ -404,20 +407,20 @@ class SafeguardMonitor:
                     due_at = next_due[entry.name]
                     if soonest is None or due_at < soonest:
                         soonest = due_at
+                self._first_pass_done.set()
                 sleep_for = _SCHEDULER_TICK_SEC
                 if soonest is not None:
                     sleep_for = min(sleep_for, max(0.0, soonest - time.monotonic()))
                 self._stop_event.wait(sleep_for)
             except Exception:  # noqa: BLE001 - a monitor bug must not kill the run
                 _log.exception("safeguard monitor scheduling loop hit an unexpected error")
+                self._first_pass_done.set()
                 self._stop_event.wait(_SCHEDULER_TICK_SEC)
 
     @staticmethod
     def _interval_for(entry: VerificationEntry) -> float:
-        """Resolve one entry's poll interval: its own, else the module default."""
-        if entry.hold_poll_interval_sec is not None:
-            return entry.hold_poll_interval_sec
-        return HOLD_POLL_INTERVAL_SEC
+        """Seconds between this entry's samples."""
+        return effective_poll_interval(entry.hold_poll_interval_sec)
 
     def _sample_one(self, entry: VerificationEntry) -> None:
         """Evaluate one entry once and fold the outcome into its observation.
@@ -484,7 +487,7 @@ def run_hold_window(
     Returns:
         The resulting :class:`HoldObservation`, ready for :func:`hold_verdict`.
     """
-    obs = HoldObservation()
+    obs = HoldObservation(requested_window_sec=window_sec)
     agent = VerifierAgent()
     start = time.monotonic()
     window_deadline = min(start + window_sec, deadline)
@@ -504,4 +507,5 @@ def run_hold_window(
             break
         time.sleep(min(interval_sec, remaining))
 
+    obs.observed_window_sec = time.monotonic() - start
     return obs

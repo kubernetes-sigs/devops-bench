@@ -57,7 +57,6 @@ from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
 from devops_bench.evalharness.hold import (
-    HOLD_POLL_INTERVAL_SEC,
     HoldObservation,
     SafeguardMonitor,
     hold_verdict,
@@ -77,6 +76,7 @@ from devops_bench.verification import (
     VerifierAgent,
     parse_entries,
 )
+from devops_bench.verification.hold_defaults import effective_poll_interval
 
 __all__ = ["DefaultEvalHarness"]
 
@@ -572,89 +572,98 @@ class DefaultEvalHarness(Harness):
         total_deadline = time.monotonic() + VERIFICATION_TOTAL_BUDGET_SEC
         hold_observations = hold_observations or {}
 
-        for entry in entries:
+        # Objective holds soak last, so converging objectives claim the shared
+        # budget before any soak can consume it. Rows keep declaration order.
+        rows: list[dict[str, Any] | None] = [None] * len(entries)
+        objective_holds: list[int] = []
+
+        for index, entry in enumerate(entries):
             if entry.resolved_mode == "hold" and entry.role == "safeguard":
-                report.append(self._hold_report_entry(entry, hold_observations.get(entry.name)))
+                rows[index] = self._hold_report_entry(entry, hold_observations.get(entry.name))
                 continue
             if entry.resolved_mode == "hold" and entry.role == "objective":
-                # hold_window_sec is required for an objective hold entry;
-                # normally enforced by VerificationEntry's own validation, so
-                # reaching here without it means a spec-validation bug let an
-                # invalid entry through to verification.
-                if entry.hold_window_sec is None:
-                    raise ValueError(
-                        f"objective hold entry {entry.name!r} reached verification without "
-                        "hold_window_sec set; this should have been rejected at "
-                        "spec-validation time"
-                    )
-                interval_sec = (
-                    entry.hold_poll_interval_sec
-                    if entry.hold_poll_interval_sec is not None
-                    else HOLD_POLL_INTERVAL_SEC
-                )
-                obs = run_hold_window(
-                    entry,
-                    entry.hold_window_sec,
-                    interval_sec=interval_sec,
-                    deadline=total_deadline,
-                )
-                report.append(self._hold_report_entry(entry, obs))
+                objective_holds.append(index)
                 continue
+            rows[index] = self._evaluate_entry(agent, entry, timeout_sec, total_deadline)
 
-            remaining = total_deadline - time.monotonic()
-            if entry.resolved_mode != "assert" and remaining < MIN_LEAF_BUDGET_SECONDS:
-                # Never evaluated, not a condition observed false.
-                report.append(
-                    {
-                        "name": entry.name,
-                        **_entry_display_fields(entry),
-                        "role": entry.role,
-                        "severity": entry.severity,
-                        "weight": entry.weight,
-                        "mode": entry.resolved_mode,
-                        "success": False,
-                        "status": "error",
-                        "reason": "verification total budget exhausted before evaluation",
-                        "elapsed_time": 0.0,
-                        "children": [],
-                    }
+        for index in objective_holds:
+            entry = entries[index]
+            # hold_window_sec is required for an objective hold entry;
+            # normally enforced by VerificationEntry's own validation, so
+            # reaching here without it means a spec-validation bug let an
+            # invalid entry through to verification.
+            if entry.hold_window_sec is None:
+                raise ValueError(
+                    f"objective hold entry {entry.name!r} reached verification without "
+                    "hold_window_sec set; this should have been rejected at "
+                    "spec-validation time"
                 )
-                continue
+            obs = run_hold_window(
+                entry,
+                entry.hold_window_sec,
+                interval_sec=effective_poll_interval(entry.hold_poll_interval_sec),
+                deadline=total_deadline,
+            )
+            rows[index] = self._hold_report_entry(entry, obs)
 
-            try:
-                result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
-                success = result.success
-                status = result.status
-                reason = result.reason
-                elapsed = result.elapsed_time
-                children = [child.model_dump() for child in result.children]
-            except Exception as exc:  # noqa: BLE001 - one entry must not abort the rest
-                _log.exception("verification entry %r failed to evaluate", entry.name)
-                success, status, reason, elapsed, children = (
-                    False,
-                    "error",
-                    f"evaluation error: {exc}",
-                    0.0,
-                    [],
-                )
+        report.extend(row for row in rows if row is not None)
+        return report
 
-            report.append(
-                {
-                    "name": entry.name,
-                    **_entry_display_fields(entry),
-                    "role": entry.role,
-                    "severity": entry.severity,
-                    "weight": entry.weight,
-                    "mode": entry.resolved_mode,
-                    "success": success,
-                    "status": status,
-                    "reason": reason,
-                    "elapsed_time": elapsed,
-                    "children": children,
-                }
+    def _evaluate_entry(
+        self,
+        agent: VerifierAgent,
+        entry: VerificationEntry,
+        timeout_sec: float,
+        total_deadline: float,
+    ) -> dict[str, Any]:
+        """Evaluate one converge or assert entry against the shared deadline."""
+        remaining = total_deadline - time.monotonic()
+        if entry.resolved_mode != "assert" and remaining < MIN_LEAF_BUDGET_SECONDS:
+            # Never evaluated, not a condition observed false.
+            return {
+                "name": entry.name,
+                **_entry_display_fields(entry),
+                "role": entry.role,
+                "severity": entry.severity,
+                "weight": entry.weight,
+                "mode": entry.resolved_mode,
+                "success": False,
+                "status": "error",
+                "reason": "verification total budget exhausted before evaluation",
+                "elapsed_time": 0.0,
+                "children": [],
+            }
+
+        try:
+            result = agent.run_entry(entry, timeout_sec=min(timeout_sec, remaining))
+            success = result.success
+            status = result.status
+            reason = result.reason
+            elapsed = result.elapsed_time
+            children = [child.model_dump() for child in result.children]
+        except Exception as exc:  # noqa: BLE001 - one entry must not abort the rest
+            _log.exception("verification entry %r failed to evaluate", entry.name)
+            success, status, reason, elapsed, children = (
+                False,
+                "error",
+                f"evaluation error: {exc}",
+                0.0,
+                [],
             )
 
-        return report
+        return {
+            "name": entry.name,
+            **_entry_display_fields(entry),
+            "role": entry.role,
+            "severity": entry.severity,
+            "weight": entry.weight,
+            "mode": entry.resolved_mode,
+            "success": success,
+            "status": status,
+            "reason": reason,
+            "elapsed_time": elapsed,
+            "children": children,
+        }
 
     @staticmethod
     def _hold_report_entry(entry: VerificationEntry, obs: HoldObservation | None) -> dict[str, Any]:
@@ -683,6 +692,7 @@ class DefaultEvalHarness(Harness):
 
         return {
             "name": entry.name,
+            **_entry_display_fields(entry),
             "role": entry.role,
             "severity": entry.severity,
             "weight": entry.weight,
@@ -690,8 +700,9 @@ class DefaultEvalHarness(Harness):
             "success": success,
             "status": status,
             "reason": reason,
-            "elapsed_time": 0.0,
+            "elapsed_time": obs.observed_window_sec if obs is not None else 0.0,
             "children": [],
+            "hold_observed_window_sec": obs.observed_window_sec if obs is not None else 0.0,
             "hold_sample_count": obs.sample_count if obs is not None else 0,
             "hold_error_count": obs.error_count if obs is not None else 0,
             "hold_first_violation_reason": obs.first_violation_reason if obs is not None else None,
@@ -1101,7 +1112,9 @@ class DefaultEvalHarness(Harness):
                 if entry.resolved_mode == "hold" and entry.role == "safeguard"
             ]
             safeguard_monitor = SafeguardMonitor(safeguard_hold_entries)
-            safeguard_monitor.start()
+            # No cluster under no_infra, so there is nothing to sample.
+            if not self.no_infra:
+                safeguard_monitor.start()
 
             _log.info("executing agent for prompt: %s", prompt)
             before_files = snapshot_dir(workspace_path)
@@ -1206,10 +1219,8 @@ class DefaultEvalHarness(Harness):
                 if scenario_thread is not None:
                     scenario_thread.join(timeout=_SCENARIO_JOIN_SEC)
             if safeguard_monitor is not None:
-                # Belt-and-suspenders: both the success and exception paths
-                # above already stop it, but this ensures the thread never
-                # outlives the task even if a future change adds a path that
-                # skips both (stop() is idempotent and never raises).
+                # stop() is idempotent and never raises; this covers any path
+                # that skipped the two calls above.
                 safeguard_monitor.stop()
             if deployer is not None:
                 self._teardown(deployer, infra_config, task.name)

@@ -16,6 +16,7 @@
 
 from typing import Any
 
+from devops_bench.verification.hold_defaults import HOLD_POLL_INTERVAL_SEC
 from devops_bench.verification.spec import parse_entries
 from devops_bench.verification.verifiers import PodHealthyVerifier
 
@@ -118,6 +119,22 @@ def test_hold_window_sec_is_rejected_on_an_assert_entry() -> None:
     )
     assert entries == []
     assert "hold_window_sec" in errors[0]["reason"]
+
+
+def test_hold_poll_interval_must_be_smaller_than_the_window() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="objective", mode="hold", hold_window_sec=30.0, hold_poll_interval_sec=30.0)]
+    )
+    assert entries == []
+    assert "smaller than hold_window_sec" in errors[0]["reason"]
+
+
+def test_hold_window_must_exceed_the_default_poll_interval() -> None:
+    entries, errors = parse_entries(
+        [_entry(role="objective", mode="hold", hold_window_sec=HOLD_POLL_INTERVAL_SEC)]
+    )
+    assert entries == []
+    assert "default poll interval" in errors[0]["reason"]
 
 
 def test_resolved_mode_never_derives_hold_from_role_defaults() -> None:
