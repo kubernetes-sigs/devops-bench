@@ -137,7 +137,11 @@ export BENCH_USE_MCP=false      # no MCP server is spawned; tools are dropped
 
 ### Example: adk harness on an existing ADK agent
 
-The SDK is an optional extra, so install it first: `uv sync --extra adk`.
+The SDK is an optional extra, so install it first: `uv sync --extra adk`. To
+point the harness at a *remote* ADK agent over A2A, use `uv sync --extra a2a`
+instead — it adds `a2a-sdk[grpc]` on top of `adk`. See
+[Harness extras](../getting-started.md#harness-extras) for why gRPC needs
+naming separately.
 
 ```bash
 export BENCH_AGENT_TYPE=adk
@@ -166,7 +170,7 @@ Anthropic, OpenAI, and others, but it requires `google-adk[extensions]`, which
 the `adk` extra does not install. Token accounting also assumes `google-genai`
 usage field names, so a `LiteLlm`-backed run may report usage incompletely.
 
-`AGENT_TARGET` accepts four spellings:
+`AGENT_TARGET` accepts five spellings:
 
 | Target | Resolves to |
 | --- | --- |
@@ -174,11 +178,50 @@ usage field names, so a `LiteLlm`-backed run may report usage incompletely.
 | `my_pkg.agent` | `root_agent` in that module |
 | `~/agents/my_agent` | an ADK agent directory (`<dir>/agent.py` exposing `root_agent`) |
 | `~/agents/my_agent/agent.py` | that file's `root_agent` |
+| `https://host/path/agent-card.json` | a remote agent, reached over A2A |
 
 If the resolved attribute is a factory rather than an agent, it is called with no
 arguments — an agent built lazily needs no wrapper. The imported agent is
 deep-copied before every run, so the harness's edits (model override, appended
 instruction text, MCP toolsets) never mutate the module a second run re-imports.
+
+### Remote agents over A2A
+
+A target carrying an `http://` or `https://` scheme names a remote agent card
+rather than anything local, and the harness builds a `RemoteA2aAgent` for it.
+That needs the `a2a` extra; without it the run fails with a
+`MissingDependencyError` naming the extra.
+
+```bash
+export BENCH_AGENT_TYPE=adk
+export AGENT_TARGET=https://triage.example.com/.well-known/agent-card.json
+```
+
+The remote agent's ADK node name is derived from the card's host
+(`triage.example.com` → `triage_example_com`), which is the name that appears as
+the event author.
+
+Transport is left to the server. The client advertises gRPC, JSON-RPC and
+HTTP+JSON in that order but does not set `use_client_preference`, so a card
+offering only JSON-RPC still connects. gRPC channels follow the URL's scheme:
+`https` dials TLS against the system trust store, `http` dials plaintext — which
+is what a port-forwarded or in-cluster endpoint needs. Any other scheme is
+rejected rather than quietly downgraded.
+
+> [!WARNING]
+> If you build the client yourself instead of going through
+> `devops_bench/agents/adk/a2a.py`, pass **both** `a2a_client_factory=` and
+> `httpx_client=` to `RemoteA2aAgent`, and make the client the same one the
+> factory's `ClientConfig` holds.
+>
+> `RemoteA2aAgent` creates an httpx client lazily on first use, and when it does
+> that while already holding a factory it calls
+> `_compat.rebind_client_factory_httpx`. On a2a-sdk 1.x that helper *discards*
+> the factory and returns a fresh one carrying only `[JSONRPC, HTTP+JSON]` — its
+> docstring calls dropping custom transports "intended behavior". Your gRPC
+> binding and channel factory go with it, and the failure surfaces later as a
+> transport-negotiation error that points nowhere near the cause. Supplying the
+> client up front means the lazy path never runs.
 
 ### Multi-agent trees
 
