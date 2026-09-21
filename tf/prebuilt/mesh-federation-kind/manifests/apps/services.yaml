@@ -1,0 +1,32 @@
+# The `sample` namespace + the cross-cluster workload. In an Istio multi-primary
+# mesh, the *Service* object must exist in every cluster that participates in
+# routing, while the backing *pods* can live in just one. Here:
+#   - the Service `backend` is created in BOTH clusters (setup.sh applies this to
+#     each), so each cluster's control plane knows the hostname,
+#   - the backend *Deployment* runs only in cluster-2 (see backend.yaml),
+#   - the client (`sleep`) runs only in cluster-1 (see frontend.yaml).
+# Once the clusters federate (cross-cluster endpoint discovery via remote
+# secrets), a call to `backend.sample.svc.cluster.local` from cluster-1 resolves
+# to the cluster-2 pods over the east-west gateway with mTLS.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sample
+  labels:
+    istio-injection: enabled
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: sample
+  labels:
+    app: backend
+    service: backend
+spec:
+  ports:
+    - port: 8080
+      name: http
+      targetPort: 8080
+  selector:
+    app: backend
