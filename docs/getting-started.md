@@ -133,6 +133,7 @@ The repo ships **skills for coding agents** in `.agents/skills/` — you invoke 
 | `run-parallel-evals` | Run a Task × Model × AgentConfig matrix in parallel, with monitoring and retries. | Comparing models or configs, or running many evals at once. |
 | `validate-eval` | Run a newly authored eval in a fix-and-retry loop until it's green. | Vetting a new task before setting `validated: true`. |
 | `diagnose-eval-failure` | Explain why a model scored low — the judge's reasons and the agent's trajectory, lined up against the rubric. | Understanding a low score on a completed run. |
+| `integrity-sweep` | Sweep a batch of scored runs for false scoring, harness bugs recorded as success, answer peeking, and environment circumvention. | Before curating or publishing a batch of results. |
 | `docs-sync` | Map a code change to the docs that describe it and update them in place. | After changing code the docs describe. |
 
 ## Where to go next
