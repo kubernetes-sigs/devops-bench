@@ -16,13 +16,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 import pytest
 
 from devops_bench.core import ConfigError
-from devops_bench.deployers.factory import get_deployer
+from devops_bench.deployers.factory import get_deployer, needs_cloud_project
 from devops_bench.deployers.noop import NoOpDeployer
 from devops_bench.deployers.tofu import _TF_ROOT, TFDeployer
 
@@ -400,3 +401,105 @@ def test_get_deployer_bench_tf_root_override(tmp_path, mocker, base_config, monk
     assert isinstance(deployer, TFDeployer)
     assert deployer.variables["infra_provider"] == "kind"
     assert deployer.tf_dir == str((custom_tf_root / "prebuilt/kind").resolve())
+
+
+class TestTheInfraProviderDisagreementWarning:
+    """A stale ``INFRA_PROVIDER`` export still wins, but never in silence.
+
+    The variable outlives the command that set it, so a run sent to the wrong
+    provider looks like a task bug rather than a shell one. Overriding is
+    still allowed -- the warning is what makes the override visible.
+    """
+
+    def test_a_disagreeing_env_override_warns_naming_both(
+        self, mocker, base_config, monkeypatch, caplog
+    ):
+        mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+        monkeypatch.setenv("INFRA_PROVIDER", "gcp")
+        with caplog.at_level(logging.WARNING, logger="devops_bench.deployers.factory"):
+            get_deployer(
+                {"deployer": "tofu", "stack": "prebuilt/kind", "provider": "kind"},
+                base_config["project_id"],
+                base_config["cluster_name"],
+                base_config["location"],
+            )
+        assert "gcp" in caplog.text
+        assert "kind" in caplog.text
+        assert "INFRA_PROVIDER" in caplog.text
+
+    def test_an_agreeing_env_override_is_quiet(self, mocker, base_config, monkeypatch, caplog):
+        """Exporting what the task already declares is not a mistake."""
+        mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+        monkeypatch.setenv("INFRA_PROVIDER", "KIND")  # case and spacing are normalized
+        with caplog.at_level(logging.WARNING, logger="devops_bench.deployers.factory"):
+            get_deployer(
+                {"deployer": "tofu", "stack": "prebuilt/kind", "provider": "kind"},
+                base_config["project_id"],
+                base_config["cluster_name"],
+                base_config["location"],
+            )
+        assert caplog.text == ""
+
+    def test_an_env_override_of_a_task_that_declares_nothing_is_quiet(
+        self, mocker, base_config, monkeypatch, caplog
+    ):
+        """With no ``provider:`` key there is nothing to disagree with."""
+        mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
+        monkeypatch.setenv("INFRA_PROVIDER", "gcp")
+        with caplog.at_level(logging.WARNING, logger="devops_bench.deployers.factory"):
+            get_deployer(
+                {"deployer": "tofu", "stack": "prebuilt/kind"},
+                base_config["project_id"],
+                base_config["cluster_name"],
+                base_config["location"],
+            )
+        assert caplog.text == ""
+
+
+class TestNeedsCloudProject:
+    """Answers the launcher's question: does this task bill to a project?"""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_provider(self, monkeypatch):
+        monkeypatch.delenv("INFRA_PROVIDER", raising=False)
+
+    @pytest.mark.parametrize(
+        ("infra_config", "expected"),
+        [
+            pytest.param({"provider": "gcp"}, True, id="declared-cloud"),
+            pytest.param({"provider": "kind"}, False, id="declared-kind"),
+            pytest.param({"provider": "vcluster"}, False, id="declared-vcluster"),
+            pytest.param({"provider": "GCP"}, True, id="declared-cloud-uppercase"),
+            pytest.param({}, False, id="empty-config-defaults-to-the-kind-stack"),
+            pytest.param({"stack": "prebuilt/kind"}, False, id="deduced-kind"),
+            pytest.param({"stack": "prebuilt/gcp"}, False, id="unresolvable-stack"),
+            pytest.param({"deployer": "noop"}, False, id="noop"),
+            pytest.param({"deployer": "noop", "provider": "gcp"}, False, id="noop-beats-provider"),
+        ],
+    )
+    def test_the_provider_decides(self, infra_config, expected):
+        assert needs_cloud_project(infra_config) is expected
+
+    def test_an_unresolvable_provider_is_not_a_project_requirement(self):
+        """``prebuilt/gcp`` names no provider, and saying so is get_deployer's job.
+
+        Answering ``True`` here would replace that accurate error with a
+        demand for a project id the task may not even need.
+        """
+        with pytest.raises(ConfigError, match="requires an explicit provider"):
+            get_deployer({"stack": "prebuilt/gcp"}, "p", "c", "us-central1-a")
+        assert needs_cloud_project({"stack": "prebuilt/gcp"}) is False
+
+    def test_an_unknown_provider_still_counts_as_a_cloud(self):
+        """Not on the local allowlist means treat it as billable.
+
+        ``get_deployer`` rejects the name afterwards; until then the safe
+        answer is the one that asks for a project rather than the one that
+        quietly sends a placeholder to an unknown cloud.
+        """
+        assert needs_cloud_project({"provider": "azure"}) is True
+
+    def test_an_env_override_is_honoured(self, monkeypatch):
+        """The survey has to resolve providers the way provisioning will."""
+        monkeypatch.setenv("INFRA_PROVIDER", "gcp")
+        assert needs_cloud_project({"provider": "kind"}) is True

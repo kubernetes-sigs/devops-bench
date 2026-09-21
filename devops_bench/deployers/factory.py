@@ -19,17 +19,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from devops_bench.core import ConfigError, get_bool, get_env, resolve_tf_root
+from devops_bench.core import ConfigError, get_bool, get_env, get_logger, resolve_tf_root
 from devops_bench.deployers.base import Deployer
 from devops_bench.deployers.noop import NoOpDeployer
 from devops_bench.deployers.tofu import TFDeployer
 from devops_bench.providers import PROVIDERS, ResolveContext
 
-__all__ = ["get_deployer"]
+__all__ = ["get_deployer", "needs_cloud_project"]
+
+_log = get_logger("deployers.factory")
 
 _DEFAULT_LOCATION = "us-central1-a"
 _DEFAULT_STACK = "prebuilt/kind"
 _DEDUCIBLE_PROVIDERS = frozenset({"kind", "vcluster"})
+
+# Providers that provision locally and bill nothing, so a run targeting only
+# these needs no cloud project id.
+_LOCAL_PROVIDERS = _DEDUCIBLE_PROVIDERS
 
 
 def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
@@ -56,7 +62,19 @@ def _select_provider(infra_config: dict[str, Any], stack: str) -> str:
         ConfigError: If no explicit provider is given and the stack does not
             deduce to a deducible local provider directory name.
     """
-    explicit = (get_env("INFRA_PROVIDER", "") or infra_config.get("provider") or "").strip().lower()
+    from_env = (get_env("INFRA_PROVIDER", "") or "").strip().lower()
+    declared = (infra_config.get("provider") or "").strip().lower()
+    if from_env and declared and from_env != declared:
+        # Almost always a stale export rather than an intent: the variable
+        # outlives the shell command that set it, and silently sending a task
+        # to the wrong provider looks like a task bug, not a configuration one.
+        _log.warning(
+            "INFRA_PROVIDER=%r overrides the provider %r declared by the task; "
+            "prefer the task's 'provider:' key and unset INFRA_PROVIDER",
+            from_env,
+            declared,
+        )
+    explicit = from_env or declared
     if explicit:
         return explicit
     stack_path = Path(stack).expanduser()
@@ -149,3 +167,32 @@ def get_deployer(
         variables=variables,
         custom_keys=set(custom_variables.keys()),
     )
+
+
+def needs_cloud_project(infra_config: dict[str, Any]) -> bool:
+    """Report whether provisioning this task requires a cloud project id.
+
+    Resolves the task's provider the same way :func:`get_deployer` does, but
+    without building a deployer or touching credentials, so a launcher can ask
+    the question before a run starts.
+
+    A task that provisions nothing (``deployer: noop``) needs no project, and
+    neither does one that resolves to a local, non-billable provider. A config
+    whose provider cannot be resolved also answers ``False``: demanding a
+    project id would replace its real error -- "this stack names no provider" --
+    with a misleading one, and ``get_deployer`` still raises that error before
+    anything is applied.
+
+    Args:
+        infra_config: Task infrastructure config.
+
+    Returns:
+        ``True`` when the task targets a provider that bills to a cloud project.
+    """
+    if (infra_config.get("deployer") or "").strip().lower() == "noop":
+        return False
+    try:
+        provider = _select_provider(infra_config, infra_config.get("stack") or _DEFAULT_STACK)
+    except ConfigError:
+        return False
+    return provider not in _LOCAL_PROVIDERS

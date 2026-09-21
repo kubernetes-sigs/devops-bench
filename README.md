@@ -37,7 +37,7 @@ A single run, end to end:
 | `claude` | Anthropic API, Vertex AI, or Bedrock. |
 | `ollama` | Local models. |
 
-**Infrastructure targets** — the OpenTofu deployer supports these targets (set `INFRA_PROVIDER`, or the task's `provider:` key):
+**Infrastructure targets** — the OpenTofu deployer supports these targets. A task names its own with the `provider:` key in its `infrastructure:` block; `INFRA_PROVIDER` can override it for a run, but prefer the task's key:
 
 | Key | Target |
 | :-- | :-- |
@@ -62,9 +62,10 @@ The `opa-remediation` task provisions its own local kind cluster, so a real end-
 
 ```bash
 export AGENT_API_KEY=...   # used by the agent's model provider and the default judge
-uv run devops-bench tasks/common/opa-remediation \
-  --project local-kind --cluster devops-bench-kind
+uv run devops-bench tasks/common/opa-remediation --cluster devops-bench-kind
 ```
+
+No `--project` is needed: the task targets kind, and a project id is only required once a task in the run targets a cloud.
 
 The results path is printed at the end of the run. The full walkthrough — prerequisites, judge configuration, exit codes — is in [Getting started](docs/getting-started.md); for cloud runs and parallel matrices, see the [run-evals how-to](docs/how-to/run-evals.md).
 

@@ -46,7 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         "source",
         help="Tasks directory or task spec file (.yaml / .yml / .json).",
     )
-    parser.add_argument("--project", dest="project_id", default=None, help="Cloud project id.")
+    parser.add_argument(
+        "--project",
+        dest="project_id",
+        default=None,
+        help="Cloud project id. Required only when a task in the run targets a cloud provider.",
+    )
     parser.add_argument("--cluster", dest="cluster_name", default=None, help="Target cluster name.")
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N tasks.")
     parser.add_argument("--results-root", default=None, help="Root directory for run artifacts.")

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -67,9 +67,24 @@ class FakeHarness:
         return list(_CANNED_RESULTS)
 
 
+@dataclass(frozen=True)
+class FakeTask:
+    """The two attributes ``run_benchmark`` reads off a loaded task."""
+
+    name: str
+    infrastructure: dict[str, object] = field(default_factory=dict)
+
+
 def _fake_load_tasks(count: int) -> Callable[[object, str], list[object]]:
     def _loader(self: object, source: str) -> list[object]:
-        return [{"task": i} for i in range(count)]
+        return [FakeTask(name=f"task-{i}") for i in range(count)]
+
+    return _loader
+
+
+def _load(*tasks: FakeTask) -> Callable[[object, str], list[object]]:
+    def _loader(self: object, source: str) -> list[object]:
+        return list(tasks)
 
     return _loader
 
@@ -133,6 +148,161 @@ def test_no_infra_uses_placeholders(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     harness = FakeHarness.instances[0]
     assert harness.project_id == "no-infra-project"
     assert harness.cluster_name == "no-infra-cluster"
+
+
+class TestTheProjectRequirementFollowsTheTasks:
+    """``PROJECT_ID`` is demanded by the tasks that bill, not by infra being on.
+
+    Every case here runs with infra enabled and a cluster name set, so the
+    only thing under test is whether the project id was required.
+    """
+
+    @staticmethod
+    def _config(tmp_path: Path, **overrides: object) -> BenchmarkConfig:
+        return replace(
+            BenchmarkConfig(
+                source="src",
+                cluster_name="bench",
+                results_root=str(tmp_path),
+            ),
+            **overrides,
+        )
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An INFRA_PROVIDER left in the shell would answer the question these
+        # tests are asking, so the tasks get to answer it instead.
+        monkeypatch.delenv("INFRA_PROVIDER", raising=False)
+        monkeypatch.delenv("BENCH_NO_INFRA", raising=False)
+
+    def test_a_kind_only_run_needs_no_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="opa", infrastructure={"provider": "kind"})),
+        )
+        run_benchmark(self._config(tmp_path))
+        assert FakeHarness.instances[0].project_id == "local-kind"
+
+    def test_a_task_that_deduces_kind_from_its_stack_needs_no_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No ``provider:`` key, but ``prebuilt/kind`` deduces one."""
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="opa", infrastructure={"stack": "prebuilt/kind"})),
+        )
+        run_benchmark(self._config(tmp_path))
+        assert FakeHarness.instances[0].project_id == "local-kind"
+
+    def test_a_noop_task_needs_no_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="plumbing", infrastructure={"deployer": "noop"})),
+        )
+        run_benchmark(self._config(tmp_path))
+        assert FakeHarness.instances[0].project_id == "local-kind"
+
+    def test_a_cloud_task_without_a_project_is_an_error_naming_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(
+                FakeTask(name="opa", infrastructure={"provider": "kind"}),
+                FakeTask(name="deploy-hello-app", infrastructure={"provider": "gcp"}),
+            ),
+        )
+        with pytest.raises(ConfigError) as excinfo:
+            run_benchmark(self._config(tmp_path))
+        message = str(excinfo.value)
+        assert "PROJECT_ID" in message
+        # Names the task that needs it, and only that one: a mixed run should
+        # not leave the operator guessing which task forced the requirement.
+        assert "deploy-hello-app" in message
+        assert "opa" not in message
+        assert FakeHarness.instances == []
+
+    def test_a_cloud_task_with_a_project_runs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="deploy-hello-app", infrastructure={"provider": "gcp"})),
+        )
+        run_benchmark(self._config(tmp_path, project_id="real-project"))
+        assert FakeHarness.instances[0].project_id == "real-project"
+
+    def test_the_survey_covers_only_the_tasks_the_limit_keeps(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A cloud task sliced off by ``--limit`` does not demand a project."""
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(
+                FakeTask(name="opa", infrastructure={"provider": "kind"}),
+                FakeTask(name="deploy-hello-app", infrastructure={"provider": "gcp"}),
+            ),
+        )
+        run_benchmark(self._config(tmp_path, limit=1))
+        assert FakeHarness.instances[0].task_count == 1
+        assert FakeHarness.instances[0].project_id == "local-kind"
+
+    def test_an_unresolvable_provider_does_not_demand_a_project(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Its real error is "this stack names no provider"; don't mask it.
+
+        The task cannot provision either way, but the launcher must not answer
+        with a misleading demand for a project id -- the deployer raises the
+        accurate error later, before anything is applied.
+        """
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="mystery", infrastructure={"stack": "prebuilt/minimum"})),
+        )
+        run_benchmark(self._config(tmp_path))
+        assert FakeHarness.instances[0].project_id == "local-kind"
+
+    def test_an_ambient_infra_provider_is_honoured_by_the_survey(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Validation must resolve providers the way provisioning will.
+
+        ``INFRA_PROVIDER`` still wins at deploy time, so a run it points at a
+        cloud has to be asked for a project id -- otherwise the launcher waves
+        the run through and the apply fails on a placeholder project.
+        """
+        _patch(monkeypatch)
+        monkeypatch.setenv("INFRA_PROVIDER", "gcp")
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="opa", infrastructure={"provider": "kind"})),
+        )
+        with pytest.raises(ConfigError, match="PROJECT_ID"):
+            run_benchmark(self._config(tmp_path))
+
+    def test_the_cluster_name_is_required_even_for_a_local_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _patch(monkeypatch)
+        monkeypatch.setattr(
+            "devops_bench.tasks.FileSystemTaskLoader.load_tasks",
+            _load(FakeTask(name="opa", infrastructure={"provider": "kind"})),
+        )
+        with pytest.raises(ConfigError, match="CLUSTER_NAME"):
+            run_benchmark(self._config(tmp_path, cluster_name=None))
+        assert FakeHarness.instances == []
 
 
 def test_agent_type_flag_overrides_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
