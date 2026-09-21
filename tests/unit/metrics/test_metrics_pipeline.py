@@ -24,6 +24,7 @@ end to end with ``deepeval`` mocked.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -505,6 +506,37 @@ def test_build_context_normalizes_tool_names_for_judge(mocker: MockerFixture) ->
     assert "default__generate_manifest" not in ctx.tool_case.actual_output
     assert res["tools"] == ["default__generate_manifest"]
     assert res["trajectory"][0]["name"] == "default__generate_manifest"
+
+
+def test_build_context_keeps_subagent_attribution_in_the_judge_trace(
+    mocker: MockerFixture,
+) -> None:
+    """Tool-name normalization must not drop the actor a call is attributed to.
+
+    The safeguard judge grades "did the agent respect this constraint" off this
+    trace, so without the actor it cannot tell a router that stayed read-only
+    from one whose worker mutated the cluster.
+    """
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(
+        trajectory=[
+            {"name": "Task", "status": "completed", "actor": "root", "call_id": "spawn-1"},
+            {
+                "name": "default__apply_manifest",
+                "status": "completed",
+                "actor": "cluster",
+                "parent_id": "spawn-1",
+            },
+        ],
+    )
+    ctx = pipeline._build_context(res, MagicMock(), True)
+    for case in (ctx.tool_case, ctx.all_case):
+        trace = json.loads(case.actual_output)["execution_trace"]
+        assert [entry["actor"] for entry in trace] == ["root", "cluster"]
+        assert trace[1]["parent_id"] == "spawn-1"
+    # Still normalized, and still non-destructive to the on-disk record.
+    assert "apply_manifest" in ctx.tool_case.actual_output
+    assert res["trajectory"][1]["name"] == "default__apply_manifest"
 
 
 def test_outcome_validity_override_only_when_generation_only(mocker: MockerFixture) -> None:
