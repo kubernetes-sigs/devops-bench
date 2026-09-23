@@ -61,9 +61,10 @@ it unset to run the agent on whatever model its author configured.
 
 `antigravity` is the exception: it does not go through the shared contract. It
 writes `AGENT_API_KEY` straight onto `GEMINI_API_KEY` and `GOOGLE_API_KEY` and
-maps the model onto `GEMINI_MODEL` (`agents/cli/antigravity/agent.py`), so it is
-Gemini-only in practice — pointing `AGENT_PROVIDER` at another provider will not
-route it.
+passes the model on `agy`'s own `--model` and `--effort` flags, after rewriting
+it into a spelling `agy` accepts (`agents/cli/antigravity/agent.py`; see
+[agy model ids](#agy-model-ids)). It is Gemini-only in practice — pointing
+`AGENT_PROVIDER` at another provider will not route it.
 
 > [!WARNING]
 > **`antigravity` runs with the operator's real `HOME`.** That is deliberate, so
@@ -92,7 +93,8 @@ each harness maps them onto its target.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `AGENT_MODEL` | unset | Model id; flows to the harness's target. |
+| `AGENT_MODEL` | unset | Model id; flows to the harness's target. See [agy model ids](#agy-model-ids) for the one harness that rewrites it. |
+| `AGENT_MODEL_EFFORT` | `high` | Reasoning tier for `antigravity`; ignored by every other harness. One of `low`, `medium`, `high` — an unknown value is rejected rather than passed through. Tiers vary by model; see [agy model ids](#agy-model-ids). |
 | `AGENT_PROVIDER` | unset | Provider key (e.g. `gemini`, `anthropic`, `google-vertex`). |
 | `AGENT_API_KEY` | unset | Routed onto the provider's key env var(s) via the shared contract; omitted for keyless backends (Vertex/Bedrock ADC). |
 | `AGENT_TARGET` | unset | Path to the CLI binary (`gemini` / `oc`). For `adk`, the **import target** of the agent to run (see below); required there. Ignored by `api`. |
@@ -108,6 +110,39 @@ each harness maps them onto its target.
 | `AGENT_ALLOWED_TOOLS` | unset | CSV of pre-approved tool names. |
 | `AGENT_SKILLS_PATHS` | unset | CSV of directories to discover `SKILL.md` files under. |
 | `AGENT_RULES_TEXT` | unset | Operator-brief text handed to the agent. |
+
+### agy model ids
+
+`AGENT_MODEL` is a single value shared by every arm and by the judge, and it is
+normally spelled for Vertex — `gemini-3.1-pro-preview`. The `antigravity`
+harness is the one exception: `agy` does not recognise the `-preview` suffix,
+and it refuses any selection that does not name a reasoning tier exactly once.
+Left alone it exits with `invalid model selection` before the run starts.
+
+So the harness rewrites the id rather than requiring the matrix to respell it —
+respelling `AGENT_MODEL` for that one arm would desynchronise its label from
+every other arm in the same run. `google/gemini-3.1-pro-preview` becomes
+`--model gemini-3.1-pro --effort high`. The flags it runs with are logged
+whenever they differ from `AGENT_MODEL` — including when only a tier was added,
+as for a bare `gemini-3.8-flash`.
+
+The tier is a scoring variable, not a formatting detail: `low` and `high` are
+materially different agents. `high` is the default because the other harnesses
+run their model with no reasoning throttle. Override it with
+`AGENT_MODEL_EFFORT`.
+
+Tiers vary by model, and the harness only checks `AGENT_MODEL_EFFORT` against
+the tiers some model offers. In `agy` 1.2.0 the Flash models take `low`,
+`medium`, and `high`, but Gemini 3.1 Pro takes only `low` and `high`, so
+`medium` on Pro is rejected by `agy` itself at startup, before the agent takes
+any action. The default, `high`, is valid for every model.
+
+A tier already spelled into `AGENT_MODEL` is honoured, and `AGENT_MODEL_EFFORT`
+is ignored. A slug suffix is split onto the flag — `gemini-3.1-pro-low`, or the
+Vertex spelling `gemini-3.1-pro-preview-low`, both become
+`--model gemini-3.1-pro --effort low`. The display-name form
+`Gemini 3.1 Pro (Low)` is passed through as `--model` with no `--effort`,
+because `agy` rejects a parenthesised tier and the flag together.
 
 ### Example: gemini CLI with MCP + skills
 

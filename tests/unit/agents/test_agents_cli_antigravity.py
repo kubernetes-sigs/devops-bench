@@ -22,12 +22,14 @@ import sqlite3
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from devops_bench.agents import capabilities
 from devops_bench.agents import config as agents_config
 from devops_bench.agents.cli.antigravity import agent as agy_mod
 from devops_bench.agents.cli.antigravity import parsing
 from devops_bench.core import subprocess as devops_subprocess
-from devops_bench.core.errors import SubprocessError
+from devops_bench.core.errors import ConfigError, SubprocessError
 
 
 def _jsonl(*records: dict) -> str:
@@ -300,7 +302,7 @@ def test_parse_transcript_jsonl_marks_trailing_pending_calls_as_interrupted():
 def test_build_settings_renders_mcp_and_model():
     mcp = capabilities.McpBinding(name="gke", command=("gke-mcp", "run"))
     settings = agy_mod._build_settings(
-        (mcp,), "google/gemini-3.5-flash", "my-project", "us-east1", skills_enabled=True
+        (mcp,), "gemini-3.5-flash", "my-project", "us-east1", skills_enabled=True
     )
 
     assert settings["experimental"]["skills"] is True
@@ -316,7 +318,7 @@ def test_build_settings_renders_mcp_and_model():
 
 
 def test_build_settings_omits_skills_block_when_disabled():
-    settings = agy_mod._build_settings((), "google/gemini-3.5-flash")
+    settings = agy_mod._build_settings((), "gemini-3.5-flash")
 
     assert "experimental" not in settings
     # No mcp servers, project, or location either: only modelConfigs remains.
@@ -334,22 +336,117 @@ def test_build_env_sets_auth_and_presets():
     assert env["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
     assert env["GEMINI_API_KEY"] == "secret-key"
     assert env["GOOGLE_API_KEY"] == "secret-key"
-    assert env["GEMINI_MODEL"] == "gemini-3.5-flash"
     assert env["OTEL_SDK_DISABLED"] == "true"
 
 
-def test_build_env_resolves_provider_qualified_model_name():
-    # GEMINI_MODEL must match the bare id used by --model= and modelConfigs,
-    # not the raw "provider/model" form.
+def test_build_env_does_not_set_gemini_model() -> None:
+    # GEMINI_MODEL is a Gemini CLI variable that agy ignores: setting it
+    # suggests a lever that does not exist. The model travels on --model.
     config = agents_config.AgentConfig(model="google/gemini-3.5-flash")
     env = agy_mod._build_env(config)
 
-    assert env["GEMINI_MODEL"] == "gemini-3.5-flash"
+    assert "GEMINI_MODEL" not in env
 
 
+class TestResolveModelName:
+    """agy takes an untiered slug plus --effort, and rejects Vertex spellings."""
+
+    def test_strips_provider_prefix_and_preview_suffix(self) -> None:
+        # What the matrix actually sends: one AGENT_MODEL shared with the
+        # judge, spelled for Vertex, which requires the -preview agy rejects.
+        assert agy_mod._resolve_model_name("google/gemini-3.1-pro-preview") == (
+            "gemini-3.1-pro",
+            "high",
+        )
+
+    def test_supplies_default_tier_when_id_names_none(self) -> None:
+        # agy has no untiered form; a bare slug is refused outright.
+        assert agy_mod._resolve_model_name("gemini-3.8-flash") == ("gemini-3.8-flash", "high")
+
+    def test_splits_a_tier_spelled_into_the_slug(self) -> None:
+        assert agy_mod._resolve_model_name("gemini-3.8-flash-medium") == (
+            "gemini-3.8-flash",
+            "medium",
+        )
+
+    def test_strips_preview_hidden_behind_a_tier_suffix(self) -> None:
+        # A Vertex id with a tier appended: the tier must come off first or
+        # -preview survives, and agy rejects any id that still carries it.
+        assert agy_mod._resolve_model_name("google/gemini-3.1-pro-preview-low") == (
+            "gemini-3.1-pro",
+            "low",
+        )
+
+    @pytest.mark.parametrize("tier", agy_mod._AGY_EFFORT_TIERS)
+    def test_every_known_tier_is_recognized_in_a_display_name(self, tier: str) -> None:
+        # A tier added to _AGY_EFFORT_TIERS but not recognized in a display
+        # name would get a second --effort, which agy rejects.
+        display = f"Gemini 3.8 Flash ({tier.title()})"
+
+        assert agy_mod._resolve_model_name(display) == (display, None)
+
+    def test_display_name_keeps_its_own_tier_and_takes_no_effort_flag(self) -> None:
+        # agy errors when --effort accompanies a parenthesised tier, so the
+        # resolver must report None rather than the default.
+        assert agy_mod._resolve_model_name("Gemini 3.1 Pro (Low)") == (
+            "Gemini 3.1 Pro (Low)",
+            None,
+        )
+
+    def test_display_name_tier_match_is_case_insensitive(self) -> None:
+        assert agy_mod._resolve_model_name("GEMINI 3.1 PRO (HIGH)") == (
+            "GEMINI 3.1 PRO (HIGH)",
+            None,
+        )
+
+
+class TestDefaultEffort:
+    """The tier is a scoring variable, so it is explicit and validated."""
+
+    def test_defaults_to_high(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(agy_mod._EFFORT_ENV, raising=False)
+
+        assert agy_mod._default_effort() == "high"
+
+    def test_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(agy_mod._EFFORT_ENV, "Low")
+
+        assert agy_mod._default_effort() == "low"
+
+    def test_unknown_tier_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Fail on the typo, not seconds later on agy's own startup error in
+        # the middle of a scored arm.
+        monkeypatch.setenv(agy_mod._EFFORT_ENV, "maximum")
+
+        with pytest.raises(ConfigError, match="maximum"):
+            agy_mod._default_effort()
+
+
+@pytest.mark.parametrize(
+    ("model", "want_model_flag", "want_effort_flag"),
+    [
+        # Id needs no rewrite; only the default tier is added.
+        ("gemini-3.5-flash", "--model=gemini-3.5-flash", "--effort=high"),
+        # Vertex spelling with a tier suffix: both rewritten.
+        ("google/gemini-3.1-pro-preview-low", "--model=gemini-3.1-pro", "--effort=low"),
+        # Display name carries its own tier; a second --effort is rejected.
+        ("Gemini 3.1 Pro (Low)", "--model=Gemini 3.1 Pro (Low)", None),
+    ],
+)
+@mock.patch.object(agy_mod, "_log")
 @mock.patch.object(pathlib.Path, "home")
 @mock.patch.object(devops_subprocess, "run")
-def test_agy_cli_agent_execute_flow(mock_run, mock_home, tmp_path):
+def test_agy_cli_agent_execute_flow(
+    mock_run,
+    mock_home,
+    mock_log,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    want_model_flag: str,
+    want_effort_flag: str | None,
+) -> None:
+    monkeypatch.delenv(agy_mod._EFFORT_ENV, raising=False)
     # Mock Path.home() to return a temp directory to avoid polluting real HOME
     mock_home.return_value = tmp_path
 
@@ -378,7 +475,7 @@ def test_agy_cli_agent_execute_flow(mock_run, mock_home, tmp_path):
 
     config = agents_config.AgentConfig(
         target="/bin/agy",
-        model="gemini-3.5-flash",
+        model=model,
         capabilities=capabilities.AllCapabilities(),
     )
     agent = agy_mod.AgyCliAgent(config)
@@ -399,6 +496,20 @@ def test_agy_cli_agent_execute_flow(mock_run, mock_home, tmp_path):
     assert "--dangerously-skip-permissions" in args
     assert "--prompt=run task" in args
     assert any(a.startswith("--gemini_dir=") for a in args)
+    assert want_model_flag in args
+    effort_flags = [a for a in args if a.startswith("--effort")]
+    assert effort_flags == ([want_effort_flag] if want_effort_flag else [])
+
+    # The tier is a scoring variable, so whenever one is added it is logged,
+    # even when the id itself needed no rewrite.
+    logged = " ".join(
+        call.args[0] % call.args[1:]
+        for call in (*mock_log.warning.call_args_list, *mock_log.info.call_args_list)
+    )
+    if want_effort_flag:
+        assert want_effort_flag.replace("=", " ") in logged
+    else:
+        assert "--effort" not in logged
 
 
 def _write_sample_transcript(
