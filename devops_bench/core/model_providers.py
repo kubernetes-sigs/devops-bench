@@ -46,6 +46,12 @@ class ProviderSpec(BaseModel):
             ``MODELS.get`` (e.g. ``gemini`` / ``claude`` / ``ollama``).
         oc_provider: openclaw wire-provider id used in ``provider/model`` and the
             per-run ``_PROVIDER_TRANSPORT`` lookup.
+        hermes_provider: Name ``hermes chat --provider`` accepts, defaulting to
+            ``None`` — hermes cannot serve this provider at all. Not derivable from
+            ``adapter_family``: hermes's ``vertex`` is Google-Vertex-Gemini only
+            (so ``anthropic-vertex`` has no equivalent and must fail loudly
+            rather than answer from a Gemini model) and its OpenAI transport is
+            spelled ``openai-api``.
         api_key_envs: Env var name(s) a CLI harness sets from ``config.api_key``.
             Empty for ``anthropic-vertex`` / ``anthropic-bedrock`` / ``ollama``
             (no key is ever threaded). ``google-vertex`` is keyless-ok but still
@@ -61,6 +67,7 @@ class ProviderSpec(BaseModel):
     canonical: str
     adapter_family: str
     oc_provider: str
+    hermes_provider: str | None = None
     api_key_envs: tuple[str, ...]
     keyless_ok: bool
     backend: str | None = None
@@ -78,6 +85,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="google",
         adapter_family="gemini",
         oc_provider="google",
+        hermes_provider="gemini",
         api_key_envs=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         keyless_ok=False,
         backend=None,
@@ -86,6 +94,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="google-vertex",
         adapter_family="gemini",
         oc_provider="google-vertex",
+        hermes_provider="vertex",
         api_key_envs=("GOOGLE_CLOUD_API_KEY",),
         keyless_ok=True,
         backend="vertex",
@@ -94,6 +103,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="anthropic",
         adapter_family="claude",
         oc_provider="anthropic",
+        hermes_provider="anthropic",
         api_key_envs=("ANTHROPIC_API_KEY",),
         keyless_ok=False,
         backend=None,  # claude infers api/vertex/bedrock from the environment
@@ -102,6 +112,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="anthropic-vertex",
         adapter_family="claude",
         oc_provider="anthropic-vertex",
+        hermes_provider=None,
         api_key_envs=(),
         keyless_ok=True,
         backend="vertex",
@@ -110,6 +121,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="anthropic-bedrock",
         adapter_family="claude",
         oc_provider="anthropic-bedrock",
+        hermes_provider="bedrock",
         api_key_envs=(),
         keyless_ok=True,
         backend="bedrock",
@@ -118,6 +130,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="openai",
         adapter_family="openai",  # no adapter module today: get_model raises NotRegisteredError
         oc_provider="openai",
+        hermes_provider="openai-api",
         api_key_envs=("OPENAI_API_KEY",),
         keyless_ok=False,
         backend=None,
@@ -126,6 +139,7 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="ollama",
         adapter_family="ollama",
         oc_provider="ollama",
+        hermes_provider="ollama",
         api_key_envs=(),  # optional key handled by the adapter via AGENT_API_KEY
         keyless_ok=True,
         backend=None,
