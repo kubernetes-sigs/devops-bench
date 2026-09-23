@@ -84,6 +84,7 @@ These variables still influence backend/transport details:
 | Variable | Effect |
 | --- | --- |
 | `GCP_PROJECT_ID` + `GCP_VERTEX_LOCATION` | Vertex project/region (`GCP_VERTEX_LOCATION` defaults to `global`). |
+| `GOOGLE_CLOUD_LOCATION` | Native Vertex-location override read by the Gemini CLI / antigravity harnesses; outranks `GCP_VERTEX_LOCATION`. `GCP_LOCATION` is *not* read for routing — it is the deployers' cluster zone. |
 | `ANTHROPIC_BACKEND` | Forces the Claude backend (`api`/`vertex`/`bedrock`) for the bare `anthropic` provider. |
 | `AWS_REGION` / `AWS_DEFAULT_REGION` | Region for the Claude Bedrock backend. |
 | `OLLAMA_BASE_URL` | Endpoint for the Ollama server (defaults to `http://localhost:11434/v1`). |
