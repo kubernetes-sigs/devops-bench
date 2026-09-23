@@ -52,6 +52,7 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "BENCH_CHEAT_RULES",
         "BENCH_CHEAT_INVENTORY",
         "AGENT_MCP_SERVER",
+        "AGENT_MCP_CONFIG",
         "AGENT_ALLOWED_TOOLS",
         "AGENT_SKILLS_PATHS",
         "AGENT_RULES_TEXT",

@@ -22,27 +22,43 @@ entries.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shlex
 import time
 from collections import deque
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from devops_bench.agents.api.mcp import MCPClient, extract_tool_text
 from devops_bench.agents.api.skills import (
-    SkillToolInfo,
     discover_skill_tools,
 )
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
+from devops_bench.agents.shared.mcp_probe import child_env
 from devops_bench.core import get_logger
 from devops_bench.models import LLMClient, get_model
 from devops_bench.models.utils.loop import LoopResult, ToolDispatcher, run_tool_loop
 
-__all__ = ["ApiAgent", "fold_trajectory", "extract_tokens"]
+if TYPE_CHECKING:  # pragma: no cover - typing-only import
+    from devops_bench.agents.capabilities import McpBinding
+
+__all__ = ["ApiAgent", "ToolNameConflictError", "fold_trajectory", "extract_tokens"]
 
 _log = get_logger("agents.api.agent")
+
+
+class ToolNameConflictError(RuntimeError):
+    """One tool name is claimed twice — by two granted MCP servers, or by a
+    discovered skill and a granted server.
+
+    Raised once the servers are up, since the advertised names are only known
+    then. Fatal for the run: serving whichever source happened to be resolved
+    first would score the arm against a toolset nobody chose.
+    """
+
 
 # Safety cap on agent turns; overridable via ``AgentConfig.max_turns``. Set high
 # because API agents legitimately take many tool-use turns — it only guards
@@ -227,7 +243,7 @@ def _first_int_attr(obj: Any, *names: str) -> int:
 
 
 def _build_dispatch(
-    mcp_client: MCPClient | None,
+    routes: Mapping[str, MCPClient],
     skill_resources: dict[str, str],
     errors: list[str],
 ) -> ToolDispatcher:
@@ -240,7 +256,8 @@ def _build_dispatch(
     on the next turn.
 
     Args:
-        mcp_client: Active :class:`MCPClient`, or ``None`` when MCP is off.
+        routes: Tool name to the session serving it, from :func:`_route_tools`.
+            Empty when no MCP server was granted.
         skill_resources: Map of skill tool name to the skill file's content
             (captured at discovery); populated by
             :func:`devops_bench.agents.api.skills.discover_skill_tools`.
@@ -259,10 +276,16 @@ def _build_dispatch(
             if name in skill_resources:
                 _log.info("Serving skill tool %s from discovery-time content", name)
                 return skill_resources[name]
+            mcp_client = routes.get(name)
             if mcp_client is None:
+                # Both cases are a name the model invented; they are worth
+                # distinguishing because the causes differ — a missing grant
+                # versus a tool no granted server advertises.
                 msg = (
                     f"Error: tool {name!r} requested but no MCP server is "
                     "configured for this agent."
+                    if not routes
+                    else f"Error: tool {name!r} is not advertised by any granted MCP server."
                 )
                 errors.append(msg)
                 return msg
@@ -287,51 +310,79 @@ def _build_dispatch(
     return dispatch
 
 
-async def _gather_tools(
-    mcp_client: MCPClient | None,
-    skill_tools: list[SkillToolInfo],
-) -> list[Any]:
-    """Return the combined MCP + skill tool list passed to ``format_tools``.
+def _open_server(binding: McpBinding) -> MCPClient:
+    """Build the (not yet entered) client for one granted server.
+
+    ``shlex.join`` round-trips :class:`MCPClient`'s own ``shlex.split`` so a
+    spaced argv token (``("uv run", "mcp-server")``) is rebuilt as a single
+    quoted word. ``child_env`` owns the runner-env read so this module stays
+    free of one.
+    """
+    return MCPClient(
+        shlex.join(binding.command),
+        env=child_env(binding) if binding.env else None,
+        cwd=binding.cwd or None,
+    )
+
+
+async def _route_tools(
+    sessions: list[tuple[McpBinding, MCPClient]],
+) -> tuple[list[Any], dict[str, MCPClient]]:
+    """List every server's tools and map each tool name to its owning session.
 
     Args:
-        mcp_client: Active MCP client, or ``None`` when MCP is off.
-        skill_tools: Skill tool descriptors from
-            :func:`discover_skill_tools`.
+        sessions: The open ``(binding, client)`` pairs, in grant order.
 
     Returns:
-        A list of tool objects (MCP-native or :class:`SkillToolInfo`) in MCP
-        order followed by skill order. Both are duck-typed (``name``,
-        ``description``, ``inputSchema``) so adapters' ``format_tools`` handles
-        them uniformly.
+        A ``(tools, routes)`` pair. ``tools`` is every server's advertised tool
+        in grant order, ready to concatenate with the skill tools;  ``routes``
+        maps a tool name to the client that serves it.
+
+    Raises:
+        ToolNameConflictError: If two servers advertise the same tool name.
     """
     tools: list[Any] = []
-    if mcp_client is not None:
-        tools_result = await mcp_client.list_tools()
-        tools.extend(tools_result.tools)
-    tools.extend(skill_tools)
-    return tools
+    routes: dict[str, MCPClient] = {}
+    owners: dict[str, str] = {}
+    for binding, mcp_client in sessions:
+        server = binding.name or "<unnamed>"
+        listed = await mcp_client.list_tools()
+        for tool in listed.tools:
+            name = getattr(tool, "name", "")
+            if name in routes:
+                raise ToolNameConflictError(
+                    f"servers {owners[name]!r} and {server!r} both advertise tool {name!r}; "
+                    "a call to it would be ambiguous, so the grant is rejected rather than "
+                    "routed to whichever server was listed first"
+                )
+            routes[name] = mcp_client
+            owners[name] = server
+            tools.append(tool)
+    return tools, routes
 
 
 async def _run_async(
     client: LLMClient,
     prompt: str,
-    mcp_server_path: str | None,
+    mcp_bindings: tuple[McpBinding, ...],
     skills_paths: tuple[str, ...],
     rules_text: str | None,
     max_turns: int,
 ) -> tuple[LoopResult, list[str], list[str]]:
     """Drive the tool-use loop and return its ``(LoopResult, errors, skills)``.
 
-    Opens an MCP session when ``mcp_server_path`` is set and discovers local
-    skills when ``skills_paths`` is non-empty — the two are independent. The
-    tool list is formatted by the caller and passed to :func:`run_tool_loop`
-    pre-formatted.
+    Opens one session per granted server and discovers local skills when
+    ``skills_paths`` is non-empty — the two are independent, and either may be
+    empty. Every session's tools are advertised together, and a call is routed
+    back to the server that advertised it. The tool list is formatted here and
+    passed to :func:`run_tool_loop` pre-formatted.
 
     Args:
         client: Neutral LLM client.
         prompt: Task prompt seeding the loop.
-        mcp_server_path: Command launching the MCP server, or ``None`` to skip
-            MCP entirely.
+        mcp_bindings: The MCP servers to launch — each binding's ``command``,
+            declared ``env`` (``${VAR}`` references resolved against the runner
+            env) and ``cwd``. Empty skips MCP entirely.
         skills_paths: Filesystem locations to discover local skills under.
         rules_text: Operator-brief text (the ``AgentRules.text`` payload)
             handed to the provider as the ``system_instruction``; ``None`` /
@@ -341,39 +392,44 @@ async def _run_async(
     Returns:
         A ``(loop_result, errors, skill_names)`` tuple. ``errors`` carries any
         per-tool dispatch failures recorded by the dispatcher.
+
+    Raises:
+        ToolNameConflictError: If two granted servers advertise the same tool,
+            or a discovered skill tool carries a granted server's tool name.
     """
     errors: list[str] = []
     skill_tools, skill_resources, skill_names = await asyncio.to_thread(
         discover_skill_tools, skills_paths
     )
-    system_instruction = rules_text or None
 
-    if not mcp_server_path:
-        formatted = client.format_tools(skill_tools)
-        dispatch = _build_dispatch(None, skill_resources, errors)
+    # One stack for every session, so a failure opening server N still tears
+    # down the N-1 already running rather than orphaning their subprocesses.
+    async with contextlib.AsyncExitStack() as stack:
+        sessions = [
+            (binding, await stack.enter_async_context(_open_server(binding)))
+            for binding in mcp_bindings
+        ]
+        mcp_tools, routes = await _route_tools(sessions)
+        # Skill names are checked against the routed MCP names for the same
+        # reason two servers are checked against each other: the model would be
+        # handed one name twice, and the dispatcher's skill-first rule would
+        # serve the skill while the MCP tool it shadows never runs.
+        clash = sorted(routes.keys() & skill_resources.keys())
+        if clash:
+            raise ToolNameConflictError(
+                f"skill tools {clash} collide with tools advertised by a granted MCP "
+                "server; the grant is rejected rather than serving the skill and "
+                "leaving the server's tool unreachable"
+            )
         loop_result = await run_tool_loop(
             client=client,
             goal=prompt,
-            tools=formatted,
-            system_instruction=system_instruction,
-            dispatch=dispatch,
+            tools=client.format_tools([*mcp_tools, *skill_tools]),
+            system_instruction=rules_text or None,
+            dispatch=_build_dispatch(routes, skill_resources, errors),
             max_turns=max_turns,
         )
-        return loop_result, errors, skill_names
-
-    async with MCPClient(mcp_server_path) as mcp_client:
-        tools = await _gather_tools(mcp_client, skill_tools)
-        formatted = client.format_tools(tools)
-        dispatch = _build_dispatch(mcp_client, skill_resources, errors)
-        loop_result = await run_tool_loop(
-            client=client,
-            goal=prompt,
-            tools=formatted,
-            system_instruction=system_instruction,
-            dispatch=dispatch,
-            max_turns=max_turns,
-        )
-        return loop_result, errors, skill_names
+    return loop_result, errors, skill_names
 
 
 @AGENTS.register("api")
@@ -384,9 +440,9 @@ class ApiAgent(AgentHarness):
     :class:`~devops_bench.agents.config.AgentConfig` — no environment reads
     happen inside this class. Capability gates:
 
-    * **MCP on/off** is driven by ``config.capabilities.mcp`` (presence of an
+    * **MCP on/off** is driven by ``config.capabilities.mcp_servers``: every
       :class:`~devops_bench.agents.capabilities.McpBinding` with a non-empty
-      ``command``).
+      ``command`` is launched and its tools advertised together.
     * **Skills on/off** is driven by ``config.capabilities.skills.paths``
       independently of MCP — an agent may run with skills only, MCP only,
       both, or neither.
@@ -434,27 +490,17 @@ class ApiAgent(AgentHarness):
         max_turns = (
             self.config.max_turns if self.config.max_turns is not None else _DEFAULT_MAX_TURNS
         )
-        mcp_servers = self.config.capabilities.mcp_servers
-        if len(mcp_servers) > 1:
-            _log.warning(
-                "API agent honors only the first MCP binding; ignoring %d additional server(s)",
-                len(mcp_servers) - 1,
-            )
-        mcp_binding = self.config.capabilities.mcp
-        # Only open an MCPClient when an MCP binding carries a launch command;
-        # an empty-command binding is treated as "no MCP". ``shlex.join``
-        # round-trips ``MCPClient``'s ``shlex.split`` so a spaced argv token
-        # (``("uv run", "mcp-server")``) is rebuilt as a single quoted word.
-        mcp_server_path = (
-            shlex.join(mcp_binding.command) if mcp_binding and mcp_binding.command else None
-        )
+        # Every granted server is launched. A command-less binding names a
+        # server the *CLI* agents host in-process; there is nothing for this
+        # agent to connect to, so it is not a server here.
+        launchable = tuple(b for b in self.config.capabilities.mcp_servers if b.command)
         skills_paths = self.config.capabilities.skills.paths
         rules_text = self.config.capabilities.rules.text
 
         run_coro = _run_async(
             llm_client,
             prompt,
-            mcp_server_path,
+            launchable,
             skills_paths,
             rules_text,
             max_turns,
@@ -478,6 +524,8 @@ class ApiAgent(AgentHarness):
             if timeout is None or elapsed < timeout:
                 raise
             return AgentResult.errored(f"API agent timed out after {timeout}s", latency=elapsed)
+        except ToolNameConflictError as exc:
+            return AgentResult.errored(f"MCP tool name conflict: {exc}")
 
         trajectory, orphan_errors = _fold_with_extraction_errors(loop_result.contents)
         tokens = extract_tokens(loop_result.response)
