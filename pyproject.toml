@@ -49,7 +49,7 @@ dependencies = [
 [project.optional-dependencies]
 adk = ["google-adk>=2.7.1"]
 anthropic = ["anthropic>=0.104.1"]
-openai = ["openai>=1.0.0"]
+openai = ["openai>=1.45.0"]
 
 [project.scripts]
 devops-bench = "devops_bench.cli:main"
