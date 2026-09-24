@@ -33,12 +33,11 @@ across harnesses.
 | `anthropic` | `claude` | `claude` | inferred (api/vertex/bedrock) | `ANTHROPIC_API_KEY` | no |
 | `anthropic-vertex` | `anthropic_vertex` | `claude` | Vertex AI | — | yes (ADC) |
 | `anthropic-bedrock` | `anthropic_bedrock` | `claude` | Amazon Bedrock | — | yes (AWS creds) |
-| `openai` | — | `openai` | — | `OPENAI_API_KEY` | no |
-| `ollama` | — | `ollama` | local OpenAI-compatible server | optional `AGENT_API_KEY` | yes |
+| `openai` | — | `openai` | OpenAI API, or any OpenAI-compatible server via `OPENAI_BASE_URL` | `OPENAI_API_KEY` | no |
 
 Default models: `gemini` → `gemini-3.1-pro-preview`; `claude` → backend-specific
-(`api` → `claude-sonnet-4-5`; Bedrock requires `AGENT_MODEL`); `ollama` →
-`gemma4:2b`.
+(`api` → `claude-sonnet-4-5`; Bedrock requires `AGENT_MODEL`); `openai` has no
+default and requires `AGENT_MODEL`.
 
 A few things worth calling out:
 
@@ -46,18 +45,16 @@ A few things worth calling out:
   `anthropic-bedrock` authenticate via ADC / AWS credentials; the contract never
   forces an API key onto them (their key-env list is empty). The bare
   `anthropic` provider still infers its backend from the environment.
-- **Ollama accepts an optional key.** It defaults to a dummy the local server
-  ignores, but uses `AGENT_API_KEY` when set (for remote/hosted endpoints).
+- **`openai` works without a key against a self-hosted server.** It sends a
+  placeholder when neither `AGENT_API_KEY` nor `OPENAI_API_KEY` is set.
 - **Install extras are named by PyPI package, not by provider key.** The extras
   are `anthropic` and `openai` — a different axis from the provider keys above.
-  The most surprising consequence: the `openai` extra is what backs the
-  `ollama` provider, because the Ollama adapter talks to its server through the
-  `openai` client. `google-genai` needs no extra; it is a base dependency, so
+  `google-genai` needs no extra; it is a base dependency, so
   `gemini` works out of the box. Install the SDK you need:
 
   ```bash
   pip install "devops-bench[anthropic]"   # claude
-  pip install "devops-bench[openai]"      # ollama
+  pip install "devops-bench[openai]"      # openai
   ```
 
 ## How a model is selected
@@ -86,7 +83,7 @@ These variables still influence backend/transport details:
 | `GCP_PROJECT_ID` + `GCP_VERTEX_LOCATION` | Vertex project/region (`GCP_VERTEX_LOCATION` defaults to `global`). |
 | `ANTHROPIC_BACKEND` | Forces the Claude backend (`api`/`vertex`/`bedrock`) for the bare `anthropic` provider. |
 | `AWS_REGION` / `AWS_DEFAULT_REGION` | Region for the Claude Bedrock backend. |
-| `OLLAMA_BASE_URL` | Endpoint for the Ollama server (defaults to `http://localhost:11434/v1`). |
+| `OPENAI_BASE_URL` | Endpoint for the `openai` provider; unset means the OpenAI API. |
 
 For the bare `anthropic` provider (no explicit `-vertex`/`-bedrock` key and no
 `ANTHROPIC_BACKEND`), the adapter still infers a backend: an API key
@@ -145,12 +142,12 @@ export GCP_VERTEX_LOCATION=global
 # The provider key selects Vertex; no AGENT_API_KEY is needed or used.
 ```
 
-**Ollama (local server):**
+**An OpenAI-compatible server (SGLang, vLLM, Ollama):**
 
 ```bash
-export AGENT_PROVIDER=ollama
-export AGENT_MODEL=gemma4:2b
-export OLLAMA_BASE_URL=http://localhost:11434/v1
+export AGENT_PROVIDER=openai
+export AGENT_MODEL=qwen3.8-27b-fp8          # the id the server advertises at /v1/models
+export OPENAI_BASE_URL=http://localhost:8000/v1
 ```
 
 ## Adding a provider

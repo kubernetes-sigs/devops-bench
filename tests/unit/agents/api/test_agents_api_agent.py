@@ -66,7 +66,7 @@ class _Turn:
         usage: Optional duck-typed usage object surfaced on the raw response.
         usage_attr: Which attribute name to attach ``usage`` under. Defaults to
             ``"usage_metadata"`` (Google shape); set ``"usage"`` to exercise
-            Anthropic / OpenAI / Ollama paths.
+            Anthropic / OpenAI paths.
     """
 
     text: str
@@ -411,12 +411,12 @@ def test_extract_tokens_reads_anthropic_input_output_shape() -> None:
     }
 
 
-def test_extract_tokens_reads_openai_ollama_shape() -> None:
-    """OpenAI / Ollama emit ``usage.prompt_tokens`` / ``completion_tokens`` /
+def test_extract_tokens_reads_openai_shape() -> None:
+    """OpenAI-compatible servers emit ``usage.prompt_tokens`` / ``completion_tokens`` /
     ``total_tokens``. The helper must map ``completion_tokens`` → the legacy
     ``candidates_tokens`` slot and pass ``total_tokens`` through verbatim.
 
-    Regression test for the same blocking bug — Ollama responses returned
+    Regression test for the same blocking bug — OpenAI-shaped responses returned
     all-zero tokens before the provider-shape detection landed.
     """
     usage = SimpleNamespace(prompt_tokens=10, completion_tokens=20, total_tokens=30)
@@ -536,7 +536,7 @@ def test_execute_records_anthropic_tokens_through_to_agentresult(
 def test_execute_records_openai_tokens_through_to_agentresult(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: an OpenAI/Ollama-shaped usage object surfaces under the
+    """End-to-end: an OpenAI-shaped usage object surfaces under the
     legacy key scheme."""
     fake = _FakeLLMClient(
         [

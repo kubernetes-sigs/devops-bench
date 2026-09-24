@@ -104,7 +104,7 @@ def get_model(
     Args:
         provider: Provider alias such as ``"gemini"``/``"google"``/
             ``"google-vertex"``, ``"claude"``/``"anthropic"``/
-            ``"anthropic-vertex"``, ``"openai"``, or ``"ollama"``.
+            ``"anthropic-vertex"``, or ``"openai"``.
             Case-insensitive.
         model_name: Optional model override passed to the adapter; when omitted
             the adapter reads ``AGENT_MODEL`` (or its own default).
