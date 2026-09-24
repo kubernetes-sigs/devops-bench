@@ -27,12 +27,15 @@ from subprocess import CompletedProcess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from devops_bench.chaos.base import ChaosResult
+from devops_bench.chaos.base import (
+    ENV_LOCAL_PORT,
+    ENV_SKIP_PORT_FORWARD,
+    ENV_TARGET_DEPLOYMENT,
+    ENV_TARGET_NAMESPACE,
+    ChaosResult,
+)
 from devops_bench.chaos.faults import generate_load as gl
 from devops_bench.chaos.faults.generate_load import (
-    _ENV_SKIP_PORT_FORWARD,
-    _ENV_TARGET_DEPLOYMENT,
-    _ENV_TARGET_NAMESPACE,
     GenerateLoadFault,
     LoadTarget,
     build_system_instruction,
@@ -44,6 +47,28 @@ from devops_bench.k8s import kubectl as k8s_kubectl
 
 def _make_ctx(env: dict[str, str] | None = None) -> RunContext:
     return RunContext(task_id="test", env=env or {})
+
+
+def _service_doc(
+    port: int = 8080,
+    target_port: int | str = 8080,
+    lb_host: str | None = None,
+    svc_type: str | None = None,
+):
+    """Build a Service document as ``get_resource`` would return it."""
+    if svc_type is None:
+        svc_type = "LoadBalancer" if lb_host is not None else "ClusterIP"
+    doc: dict[str, Any] = {
+        "spec": {"type": svc_type, "ports": [{"port": port, "targetPort": target_port}]}
+    }
+    if lb_host is not None:
+        doc["status"] = {"loadBalancer": {"ingress": [{"ip": lb_host}]}}
+    return doc
+
+
+def _patch_service(**kwargs: Any):
+    """Patch the Service lookup the fault uses to discover ports / LB host."""
+    return patch.object(gl, "get_resource", return_value=_service_doc(**kwargs))
 
 
 def _drive_load(
@@ -262,8 +287,11 @@ def test_inject_opens_port_forward_and_points_url_at_local_tunnel() -> None:
             _drive_load(self.kwargs)
             return "spike complete"
 
-    ctx = _make_ctx({_ENV_TARGET_DEPLOYMENT: "web-app", _ENV_TARGET_NAMESPACE: "prod"})
+    ctx = _make_ctx({ENV_TARGET_DEPLOYMENT: "web-app", ENV_TARGET_NAMESPACE: "prod"})
     with (
+        # The fault reads the target Service to discover its ports; a ClusterIP
+        # Service on 8080 keeps this test on the port-forward path.
+        _patch_service(port=8080, target_port=8080),
         patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc) as popen_mock,
         patch.object(k8s_kubectl.time, "sleep"),  # don't actually sleep the settle window
         # The fault waits for the target rollout before forwarding; stub it so
@@ -301,7 +329,6 @@ def test_inject_uses_custom_local_port_for_parallel_runs() -> None:
     Parallel runs pass a free local port so two concurrent forwards do not
     contend; the remote (workload) side stays 8080.
     """
-    from devops_bench.chaos.faults.generate_load import _ENV_LOCAL_PORT
 
     fault = GenerateLoadFault(
         target=LoadTarget(service_url="http://example.svc.cluster.local", qps=50)
@@ -317,7 +344,7 @@ def test_inject_uses_custom_local_port_for_parallel_runs() -> None:
             captured["url_during_run"] = fault.target.service_url
             return "spike complete"
 
-    ctx = _make_ctx({_ENV_TARGET_DEPLOYMENT: "web-app", _ENV_LOCAL_PORT: "34567"})
+    ctx = _make_ctx({ENV_TARGET_DEPLOYMENT: "web-app", ENV_LOCAL_PORT: "34567"})
     with (
         patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc) as popen_mock,
         patch.object(k8s_kubectl.time, "sleep"),
@@ -338,7 +365,7 @@ def test_inject_early_port_forward_exit_becomes_failed_result() -> None:
     dead.poll.return_value = 1  # exited during the settle window
     dead.returncode = 1
 
-    ctx = _make_ctx({_ENV_TARGET_DEPLOYMENT: "web-app"})
+    ctx = _make_ctx({ENV_TARGET_DEPLOYMENT: "web-app"})
     with (
         patch.object(k8s_kubectl.subprocess, "Popen", return_value=dead),
         patch.object(k8s_kubectl.time, "sleep"),
@@ -373,8 +400,8 @@ def test_inject_skips_port_forward_when_flagged() -> None:
 
     ctx = _make_ctx(
         {
-            _ENV_TARGET_DEPLOYMENT: "web-app",
-            _ENV_SKIP_PORT_FORWARD: "1",
+            ENV_TARGET_DEPLOYMENT: "web-app",
+            ENV_SKIP_PORT_FORWARD: "1",
         }
     )
     with (
@@ -432,7 +459,7 @@ def test_inject_invalid_local_port_becomes_failed_result() -> None:
     """A malformed CHAOS_LOCAL_PORT fails the fault instead of escaping inject."""
     fault = GenerateLoadFault(target=LoadTarget(service_url="http://svc", qps=1))
 
-    result = fault.inject(_make_ctx({gl._ENV_LOCAL_PORT: "not-a-port"}))
+    result = fault.inject(_make_ctx({gl.ENV_LOCAL_PORT: "not-a-port"}))
 
     assert result.success is False
     assert result.error is not None
@@ -442,7 +469,7 @@ def test_inject_invalid_local_port_becomes_failed_result() -> None:
 def test_inject_port_forward_setup_failure_becomes_failed_result() -> None:
     """A port-forward that raises at construction yields a failed ChaosResult."""
     fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
-    ctx = _make_ctx({_ENV_TARGET_DEPLOYMENT: "web-app"})
+    ctx = _make_ctx({ENV_TARGET_DEPLOYMENT: "web-app"})
     with (
         patch.object(gl, "rollout_status"),
         patch.object(gl, "port_forward", side_effect=RuntimeError("kubectl missing")),
@@ -456,3 +483,193 @@ def test_inject_port_forward_setup_failure_becomes_failed_result() -> None:
     assert result.success is False
     assert result.error is not None
     assert "kubectl missing" in result.error
+
+
+# --- transport resolution: the fault decides how to reach its target ---
+
+
+def _stub_agent(captured: dict[str, Any], fault: GenerateLoadFault):
+    """Build a stub ChaosAgent that records the URL in force during the run."""
+
+    class _StubAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["system_instruction"] = kwargs["system_instruction"]
+            self.kwargs = kwargs
+
+        def run(self, goal: str) -> str:
+            captured["goal"] = goal
+            captured["url_during_run"] = fault.target.service_url
+            _drive_load(self.kwargs, command="fortio load http://x")
+            return "spike complete"
+
+    return _StubAgent
+
+
+def _local_cluster_ctx(env: dict[str, str]) -> RunContext:
+    from devops_bench.core.context import ClusterInfo
+
+    ctx = _make_ctx(env)
+    ctx.cluster = ClusterInfo(name="kind", location="local")
+    return ctx
+
+
+def test_inject_targets_external_lb_without_a_port_forward() -> None:
+    """An assigned LoadBalancer is addressed directly, using the Service's port."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+    ctx = _make_ctx({ENV_TARGET_DEPLOYMENT: "web-app", ENV_TARGET_NAMESPACE: "prod"})
+
+    with (
+        _patch_service(port=8080, target_port=8080, lb_host="34.10.20.30") as svc,
+        patch.object(k8s_kubectl.subprocess, "Popen") as popen_mock,
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        result = fault.inject(ctx)
+
+    svc.assert_called_with("service", "web-app", namespace="prod")
+    # Reachable directly, so no tunnel is opened at all.
+    popen_mock.assert_not_called()
+    assert captured["url_during_run"] == "http://34.10.20.30:8080"
+    assert result.success is True
+    # The fault's own stored URL is restored once injection completes.
+    assert fault.target.service_url == "http://x.svc.cluster.local"
+
+
+def test_inject_lb_url_uses_the_service_port_not_a_hardcoded_one() -> None:
+    """The LB URL carries the Service's real port, not an assumed 8080."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+
+    with (
+        _patch_service(port=8000, target_port=80, lb_host="lb.example.com"),
+        patch.object(k8s_kubectl.subprocess, "Popen"),
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        fault.inject(_make_ctx({ENV_TARGET_DEPLOYMENT: "web-app"}))
+
+    assert captured["url_during_run"] == "http://lb.example.com:8000"
+
+
+def test_inject_port_forward_uses_the_service_target_port() -> None:
+    """Without an LB, the tunnel's remote side is the Service's targetPort.
+
+    Previously the remote side was hardcoded to 8080, which forced every
+    chaos-eligible workload to listen on that port.
+    """
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+    proc = _live_popen()
+
+    with (
+        _patch_service(port=8000, target_port=9090, lb_host=None),
+        patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc) as popen_mock,
+        patch.object(k8s_kubectl.time, "sleep"),
+        patch("devops_bench.chaos.faults.generate_load.rollout_status"),
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        fault.inject(_make_ctx({ENV_TARGET_DEPLOYMENT: "web-app", ENV_LOCAL_PORT: "34567"}))
+
+    assert popen_mock.call_args.args[0][3] == "34567:9090"
+    assert captured["url_during_run"] == "http://localhost:34567"
+
+
+def test_inject_falls_back_to_default_port_when_service_unreadable() -> None:
+    """An unreadable Service degrades to the default port rather than aborting."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+    proc = _live_popen()
+
+    with (
+        patch.object(gl, "get_resource", side_effect=RuntimeError("no such service")),
+        patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc) as popen_mock,
+        patch.object(k8s_kubectl.time, "sleep"),
+        patch("devops_bench.chaos.faults.generate_load.rollout_status"),
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        result = fault.inject(_make_ctx({ENV_TARGET_DEPLOYMENT: "web-app"}))
+
+    assert popen_mock.call_args.args[0][3] == "8080:8080"
+    assert result.success is True
+
+
+def test_inject_skips_lb_poll_on_a_local_cluster() -> None:
+    """A local cluster never gets an LB, so the fault must not burn the timeout."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+    proc = _live_popen()
+
+    with (
+        _patch_service(port=8080, target_port=8080, lb_host="10.0.0.1"),
+        patch.object(gl, "poll_until", side_effect=AssertionError("polled for an LB locally")),
+        patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc),
+        patch.object(k8s_kubectl.time, "sleep"),
+        patch("devops_bench.chaos.faults.generate_load.rollout_status"),
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        result = fault.inject(_local_cluster_ctx({ENV_TARGET_DEPLOYMENT: "web-app"}))
+
+    # Port-forward path taken despite the Service advertising an ingress IP.
+    assert captured["url_during_run"] == "http://localhost:8080"
+    assert result.success is True
+
+
+def test_inject_skips_service_lookup_entirely_when_port_forward_skipped() -> None:
+    """The smoke path touches no cluster: no Service read, no tunnel."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://existing", qps=1))
+    captured: dict[str, Any] = {}
+
+    with (
+        patch.object(gl, "get_resource", side_effect=AssertionError("read a Service in smoke")),
+        patch.object(k8s_kubectl.subprocess, "Popen") as popen_mock,
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        result = fault.inject(
+            _make_ctx({ENV_TARGET_DEPLOYMENT: "web-app", ENV_SKIP_PORT_FORWARD: "1"})
+        )
+
+    popen_mock.assert_not_called()
+    assert captured["url_during_run"] == "http://existing"
+    assert result.success is True
+
+
+def test_inject_falls_back_to_port_forward_when_lb_never_assigned() -> None:
+    """A LoadBalancer whose ingress never appears degrades to the tunnel."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+    proc = _live_popen()
+
+    with (
+        # Type LoadBalancer, but no ingress was ever assigned.
+        _patch_service(port=8080, target_port=8080, svc_type="LoadBalancer"),
+        # Bound the wait so the test does not sit through the real timeout.
+        patch.object(gl, "_LB_IP_TIMEOUT_SEC", 0.01),
+        patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc) as popen_mock,
+        patch.object(k8s_kubectl.time, "sleep"),
+        patch("devops_bench.chaos.faults.generate_load.rollout_status"),
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        result = fault.inject(_make_ctx({ENV_TARGET_DEPLOYMENT: "web-app"}))
+
+    popen_mock.assert_called_once()
+    assert captured["url_during_run"] == "http://localhost:8080"
+    assert result.success is True
+
+
+def test_inject_skips_lb_poll_for_a_non_loadbalancer_service() -> None:
+    """A ClusterIP Service is never polled for an ingress that cannot come."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x.svc.cluster.local", qps=1))
+    captured: dict[str, Any] = {}
+    proc = _live_popen()
+
+    with (
+        _patch_service(port=8080, target_port=8080, svc_type="ClusterIP"),
+        patch.object(gl, "poll_until", side_effect=AssertionError("polled a ClusterIP service")),
+        patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc),
+        patch.object(k8s_kubectl.time, "sleep"),
+        patch("devops_bench.chaos.faults.generate_load.rollout_status"),
+        patch("devops_bench.chaos.agent.ChaosAgent", _stub_agent(captured, fault)),
+    ):
+        result = fault.inject(_make_ctx({ENV_TARGET_DEPLOYMENT: "web-app"}))
+
+    assert captured["url_during_run"] == "http://localhost:8080"
+    assert result.success is True
