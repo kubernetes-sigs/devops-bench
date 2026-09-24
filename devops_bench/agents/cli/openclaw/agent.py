@@ -30,7 +30,8 @@ a per-run temp dir:
   ``<run>/openclaw.json`` so a run never depends on a global
   ``oc models``/``configure-oc.sh`` step. The entry is written for whichever
   Google backend ``config.provider`` selects — ``google`` (google-genai) or
-  ``google-vertex`` (Vertex AI).
+  ``google-vertex`` (Vertex AI). An ``openai`` model is registered against
+  ``OPENAI_BASE_URL`` when that is set, for self-hosted OpenAI-compatible servers.
 * **Model auth** — ``config.api_key`` is threaded into the provider env var
   (``GEMINI_API_KEY``/``GOOGLE_CLOUD_API_KEY``/``ANTHROPIC_API_KEY``/...) that
   ``oc agent --local`` reads.
@@ -75,6 +76,7 @@ from devops_bench.agents.shared.cli_capabilities import (
     materialize_skills,
 )
 from devops_bench.core import SubprocessError, get_logger
+from devops_bench.core.config import get_env
 from devops_bench.core.errors import ConfigError
 from devops_bench.core.model_providers import resolve_provider
 from devops_bench.core.subprocess import run
@@ -148,6 +150,9 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
         "api": "google-vertex",
         "baseUrl": "https://{location}-aiplatform.googleapis.com",
     },
+    "openai": {
+        "api": "openai-completions",
+    },
 }
 
 
@@ -209,6 +214,9 @@ def _build_model_override(config: AgentConfig) -> dict:
     marker → metadata-server credentials). So the override stands on its own for
     a keyless ADC run.
 
+    An ``openai`` model is always registered when ``OPENAI_BASE_URL`` is set, with
+    that ``baseUrl``: a self-hosted server's model ids are never in oc's catalog.
+
     Returns an empty dict when no model is configured or the model is already in
     oc's catalog (caller then writes no ``models``/``agents`` sections).
     """
@@ -216,7 +224,8 @@ def _build_model_override(config: AgentConfig) -> dict:
     if not model_id:
         return {}
     provider, _, bare = model_id.partition("/")
-    if bare not in _CATALOG_OVERRIDES:
+    base_url = get_env("OPENAI_BASE_URL") if provider == "openai" else None
+    if bare not in _CATALOG_OVERRIDES and not base_url:
         return {}
     # A per-run provider entry *replaces* oc's built-in one, so it must pin a
     # transport; without one oc falls back to the OpenAI transport and 401s. Fail
@@ -229,6 +238,8 @@ def _build_model_override(config: AgentConfig) -> dict:
             f"{', '.join(sorted(_PROVIDER_TRANSPORT))})"
         )
     provider_entry: dict = dict(_PROVIDER_TRANSPORT[provider])
+    if base_url:
+        provider_entry["baseUrl"] = base_url.rstrip("/")
     provider_entry["models"] = [{"id": bare, "name": bare}]
     return {
         "models": {"providers": {provider: provider_entry}},
