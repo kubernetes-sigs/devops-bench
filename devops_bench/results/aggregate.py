@@ -39,6 +39,7 @@ __all__ = [
     "build_manifests",
     "dedupe_latest",
     "discover_row_files",
+    "load_rows",
     "rebatch_rows",
 ]
 
@@ -68,7 +69,7 @@ def discover_row_files(root: str | os.PathLike[str], *, exclude: Iterable[Path] 
     return out
 
 
-def _load_rows(files: Iterable[Path]) -> list[dict]:
+def load_rows(files: Iterable[Path]) -> list[dict]:
     """Read and concatenate the ``ResultRow[]`` arrays from ``files``.
 
     Args:
@@ -186,7 +187,7 @@ def aggregate(files: Iterable[Path], *, run_id: str, t: str) -> tuple[list[dict]
         A ``(rows, manifests)`` pair of JSON-serializable dict lists, ready to
         write as ``rows.json`` / ``manifests.json``.
     """
-    deduped = dedupe_latest(_load_rows(files))
+    deduped = dedupe_latest(load_rows(files))
     rows = rebatch_rows(deduped, run_id=run_id, t=t)
     manifests = build_manifests(rows, run_id=run_id, t=t)
     return [row.to_dict() for row in rows], [m.to_dict() for m in manifests]
