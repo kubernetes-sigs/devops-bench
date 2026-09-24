@@ -505,3 +505,49 @@ def test_none_truth_table(checks: list[dict[str, Any]], expected: str) -> None:
     entry = _assert_entry({"type": "none", "checks": checks})
     result = VerifierAgent().run_entry(entry, timeout_sec=30)
     assert result.status == expected
+
+
+# --- an errored child must not short-circuit remaining children ------------
+#
+# `any` and `none` only ever stop a round early on a definitive success (any)
+# or a definitive pass (none) or a deadline; an errored child is neither, and
+# must not stop evaluation of its siblings. See runner.py's module docstring
+# and rollup.py: an entry that never even got a fair look at every child is
+# indistinguishable from one that genuinely failed every check.
+
+
+def test_any_round_evaluates_every_child_despite_an_earlier_error() -> None:
+    entry = _assert_entry({"type": "any", "checks": [_error_leaf("a"), _leaf(False, "b")]})
+    result = VerifierAgent().run_entry(entry, timeout_sec=30)
+    assert len(result.children) == 2
+    assert result.status == "error"
+
+
+def test_none_round_evaluates_every_child_despite_an_earlier_error() -> None:
+    entry = _assert_entry({"type": "none", "checks": [_error_leaf("a"), _leaf(False, "b")]})
+    result = VerifierAgent().run_entry(entry, timeout_sec=30)
+    assert len(result.children) == 2
+    assert result.status == "error"
+
+
+def test_any_round_reason_distinguishes_errored_from_failed_children() -> None:
+    entry = _assert_entry({"type": "any", "checks": [_leaf(False, "a"), _error_leaf("b")]})
+    result = VerifierAgent().run_entry(entry, timeout_sec=30)
+    assert "[0] failed:" in result.reason
+    assert "[1] errored:" in result.reason
+
+
+def test_none_round_reason_distinguishes_errored_from_failed_children() -> None:
+    entry = _assert_entry({"type": "none", "checks": [_leaf(False, "a"), _error_leaf("b")]})
+    result = VerifierAgent().run_entry(entry, timeout_sec=30)
+    assert "[0] did not hold, as required" in result.reason
+    assert "[1] errored:" in result.reason
+
+
+def test_parallel_reason_distinguishes_errored_from_failed_children() -> None:
+    agent = VerifierAgent()
+    result = agent.wait_for_condition(
+        {"type": "all", "checks": [_leaf(False, "a"), _error_leaf("b")]}, timeout_sec=5
+    )
+    assert "[0] failed:" in result.reason
+    assert "[1] errored:" in result.reason

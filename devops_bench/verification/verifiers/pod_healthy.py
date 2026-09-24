@@ -111,6 +111,37 @@ class PodHealthyVerifier(BaseVerifier):
                     name=self.name,
                     raw=raw,
                 )
+            if not raw.get("items"):
+                # Zero pods matched the selector. Still a FAIL rather than an error,
+                # and deliberately so: the two possible causes are indistinguishable
+                # from inside the check. The workload may have been deleted (a real
+                # violation, and precisely what a safeguard like this exists to
+                # catch), or the selector may simply be wrong (a check bug). Turning
+                # this into an error to spare the second case would silently mask the
+                # first, which is the worse trade for a catastrophic safeguard.
+                #
+                # What we CAN do is stop reporting the two cases with the same words.
+                # Previously both produced "kubectl wait failed or timed out", which
+                # read as "the pods are unhealthy" and cost a real debugging session:
+                # a typo'd Kyverno selector (v1.12.7 has no app.kubernetes.io/name
+                # label) tripped a catastrophic safeguard and zeroed a run that had
+                # otherwise scored 1.0 with every genuine safeguard respected.
+                #
+                # The ambiguity is removable, but at seed time rather than here:
+                # assert every selector matches something on the freshly-seeded
+                # cluster, and a zero match later unambiguously means the agent
+                # removed it. Mirrors resource_property's "no {kind} matched".
+                where = f" in namespace {self.namespace!r}" if self.namespace else ""
+                return VerificationResult(
+                    success=False,
+                    elapsed_time=elapsed,
+                    reason=(
+                        f"no pods matched selector {self.selector!r}{where}: either the "
+                        f"workload is gone or the selector does not match it"
+                    ),
+                    name=self.name,
+                    raw=raw,
+                )
             return VerificationResult(
                 success=False,
                 elapsed_time=elapsed,

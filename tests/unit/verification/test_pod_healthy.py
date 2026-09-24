@@ -80,8 +80,13 @@ def test_fallback_reports_failure_when_no_pods_match() -> None:
         result = PodHealthyVerifier(selector="app=ghost").verify(timeout_sec=5)
 
     assert result.success is False
+    # Still a FAIL, not an error: a deleted workload is a real violation and the
+    # check cannot tell it apart from a wrong selector, so it fails closed.
     assert result.status == "fail"
-    assert "no match" in result.reason
+    # The reason must name the selector and say which two cases are in play, so a
+    # zero-match is not reported in the same words as "pods exist but are unhealthy".
+    assert "no pods matched selector" in result.reason
+    assert "app=ghost" in result.reason
 
 
 def test_fallback_fetch_failure_is_an_error_not_a_fail() -> None:
