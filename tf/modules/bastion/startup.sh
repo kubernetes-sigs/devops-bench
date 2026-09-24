@@ -18,7 +18,7 @@
 #
 # Installs the system-wide toolchain the eval harness drives at runtime, plus the
 # openclaw `oc` binary. Mirrors the install steps in Dockerfile.harness (adapted
-# to Ubuntu apt + Node 22, which openclaw requires). Per-user setup (the repo,
+# to Ubuntu apt + Node 24, which openclaw requires). Per-user setup (the repo,
 # the venv, and the openclaw API key) is done separately by scripts/bastion/.
 #
 # Logs to /var/log/bench-bastion-startup.log; on success it touches
@@ -31,10 +31,14 @@ echo "==> bench-bastion startup begin: $(date -u +%FT%TZ)"
 export DEBIAN_FRONTEND=noninteractive
 
 TOFU_VERSION="1.8.8"
-NODE_MAJOR="22"
+NODE_MAJOR="24"
 # Pin openclaw so VM rebuilds are reproducible; bump deliberately when adopting a
 # new release rather than tracking @latest.
-OPENCLAW_VERSION="2026.6.10"
+#
+# Floor is 2026.8.1: the openclaw harness (PR #149) writes a `memory` section into
+# per-run openclaw.json, which older oc rejects outright. See known_issues.md.
+# 2026.9.3+ needs Node >=24.16, and 2026.9.x trajectories need the #239 parser.
+OPENCLAW_VERSION="2026.9.6"
 # Pin gke-mcp too. The upstream install.sh always resolves @latest, so we fetch
 # the tagged release tarball directly instead of running it.
 GKE_MCP_VERSION="0.14.0"
@@ -57,7 +61,7 @@ wget -q "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}
 unzip -o "$tmp_tofu" -d /usr/local/bin/
 rm -f "$tmp_tofu"
 
-echo "==> Node.js ${NODE_MAJOR} (openclaw requires >=22)"
+echo "==> Node.js ${NODE_MAJOR} (openclaw requires >=24.16)"
 # Download to a file first, then execute: a dropped `curl | bash` can run a
 # truncated script if the connection drops mid-transfer.
 tmp_node="$(mktemp)"
