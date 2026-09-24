@@ -38,7 +38,7 @@ from devops_bench.chaos.faults.generate_load import (
     _ENV_TARGET_NAMESPACE,
     _LOCAL_PORT,
 )
-from devops_bench.core import get_logger
+from devops_bench.core import ConfigError, get_int, get_logger
 from devops_bench.core.context import RunContext
 from devops_bench.k8s import get_resource, poll_until
 from devops_bench.verification import VerificationEntry, VerifierAgent
@@ -52,17 +52,58 @@ __all__ = [
 
 _log = get_logger("evalharness.scenario")
 
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Parse a positive integer override from the environment.
+
+    Args:
+        name: Variable to read.
+        default: Returned when the variable is unset or blank.
+
+    Returns:
+        The parsed integer.
+
+    Raises:
+        ConfigError: If the value is set but not a valid integer, or if it
+            is not strictly positive.
+    """
+    value = get_int(name, default)
+    if value is None:
+        # Unreachable: get_int only returns None when default is None, and
+        # this function always passes a non-None default.
+        return default
+    if value <= 0:
+        raise ConfigError(f"environment variable {name!r} must be a positive integer: {value!r}")
+    return value
+
+
 # Per-entry budget for a converging entry: how long a single entry's (possibly
 # nested) checks may poll before giving up. Assert-mode entries ignore this,
 # since single_shot always evaluates once with a zero budget regardless.
-VERIFICATION_TIMEOUT_SEC = 120
+#
+# WHAT THIS BUDGET IS ACTUALLY FOR. Verification only ever runs AFTER the agent
+# has exited, so the only thing still changing the cluster is Kubernetes' own
+# controllers finishing whatever the agent's last action started. That is usually
+# seconds: a rollout completing, endpoints populating, a pod going Ready. But not
+# always: image pulls, PVC binding, and rollouts that have to pull can legitimately
+# take much longer, so the default stays at 120.
+#
+# The total budget below matters more than this per-entry timeout. It bounds the
+# whole pass, and if early entries consume it the later ones are starved and
+# report "evaluation did not complete before the deadline" without having
+# meaningfully run, which reads as a failed check rather than as an unmeasured one.
+#
+# Both are overridable via BENCH_VERIFY_TIMEOUT_SEC and BENCH_VERIFY_TOTAL_BUDGET_SEC
+# for tuning without a code change. A malformed or non-positive override is
+# rejected at import with a ConfigError naming the variable.
+VERIFICATION_TIMEOUT_SEC = _positive_int_env("BENCH_VERIFY_TIMEOUT_SEC", 120)
 
 # Total wall-clock budget for the whole post-run verification pass, across
 # every entry. Without a cap, a task with many failing converge objectives
-# burns entries x VERIFICATION_TIMEOUT_SEC (12 entries x 120s is 22+ minutes);
-# this bounds the pass as a whole. Assert-mode entries still always run, since
-# a safeguard that goes unchecked defeats the point of having it.
-VERIFICATION_TOTAL_BUDGET_SEC = 600
+# burns entries x VERIFICATION_TIMEOUT_SEC; this bounds the pass as a whole.
+# Assert-mode entries still always run, since a safeguard that goes unchecked
+# defeats the point of having it.
+VERIFICATION_TOTAL_BUDGET_SEC = _positive_int_env("BENCH_VERIFY_TOTAL_BUDGET_SEC", 600)
 
 # Seconds to wait for the target Service's external LoadBalancer IP to be
 # assigned by the cloud provider's load balancer controller. LB provisioning
