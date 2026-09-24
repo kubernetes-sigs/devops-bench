@@ -104,6 +104,11 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
     agent's ``_fold_with_extraction_errors`` and the Gemini ``parse_stream_json``
     policy.
 
+    oc 2026.9.x logs each tool event twice (``source: transcript`` and
+    ``source: runtime``) under one ``toolCallId``; only the first copy counts.
+    Runtime-only events are code-mode nested calls (``args`` and
+    ``result.content`` rather than ``arguments`` and ``message.content``).
+
     Args:
         jsonl_text: Raw contents of ``events.jsonl`` inside the export bundle.
 
@@ -118,6 +123,8 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
     output = ""
     fallback_output: list[str] = []
     pending: dict[str, ToolCall] = {}
+    seen_calls: set[str] = set()
+    resolved: set[str] = set()
     trajectory: list[ToolCall] = []
 
     for lineno, raw in enumerate(jsonl_text.splitlines(), start=1):
@@ -138,8 +145,10 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
             data = {}
 
         if etype == "tool.call":
-            call_id = data.get("toolCallId") or data.get("id") or ""
-            args = data.get("arguments")
+            call_id = str(data.get("toolCallId") or data.get("id") or "")
+            if call_id in seen_calls:
+                continue
+            args = data.get("arguments", data.get("args"))
             call = ToolCall(
                 name=data.get("name", ""),
                 args=args if isinstance(args, dict) else {},
@@ -147,16 +156,22 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
             )
             trajectory.append(call)
             if call_id:
-                pending[str(call_id)] = call
+                seen_calls.add(call_id)
+                pending[call_id] = call
         elif etype == "tool.result":
             msg = data.get("message") if isinstance(data.get("message"), dict) else data
-            call_id = msg.get("toolCallId") or msg.get("id") or ""
-            text = _join_text(msg.get("content"))
-            details = msg.get("details") if isinstance(msg.get("details"), dict) else {}
-            is_error = bool(msg.get("isError")) or (
-                str(details.get("status", "")).lower() in ("error", "failed", "failure")
+            call_id = str(msg.get("toolCallId") or msg.get("id") or "")
+            if call_id in resolved:
+                continue
+            body = msg.get("result") if isinstance(msg.get("result"), dict) else msg
+            text = _join_text(body.get("content"))
+            details = body.get("details") if isinstance(body.get("details"), dict) else {}
+            is_error = (
+                bool(msg.get("isError"))
+                or msg.get("success") is False
+                or str(details.get("status", "")).lower() in ("error", "failed", "failure")
             )
-            target = pending.pop(str(call_id), None) if call_id else None
+            target = pending.pop(call_id, None) if call_id else None
             if target is None:
                 # Drop the orphan from the trajectory but surface it on errors.
                 # Synthesizing a free-floating result entry would break the
@@ -171,6 +186,7 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
                     f"(id={call_id!r}, content={preview!r})"
                 )
                 continue
+            resolved.add(call_id)
             target.result = text
             target.status = "error" if is_error else "completed"
         elif etype == "model.completed":

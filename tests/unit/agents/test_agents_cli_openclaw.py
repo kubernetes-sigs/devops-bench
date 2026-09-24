@@ -909,3 +909,50 @@ def test_execute_cleans_up_temp_working_dir_after_run(
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert captured["cwd"] is not None
     assert not os.path.exists(captured["cwd"])
+
+
+def test_parse_trajectory_export_dedupes_dual_source_events() -> None:
+    """oc 2026.9.x logs each tool event twice; nested runtime-only calls are kept."""
+
+    def _runtime_call(call_id: str, args: dict) -> dict:
+        return {
+            "type": "tool.call",
+            "source": "runtime",
+            "data": {"toolCallId": call_id, "name": "exec", "args": args},
+        }
+
+    def _runtime_result(call_id: str, text: str, *, success: bool = True) -> dict:
+        return {
+            "type": "tool.result",
+            "source": "runtime",
+            "data": {
+                "toolCallId": call_id,
+                "name": "exec",
+                "success": success,
+                "result": {"content": [{"type": "text", "text": text}]},
+            },
+        }
+
+    nested = "tool_search_code:call_1:exec:1"
+    blob = _events(
+        {**_tool_call("call_1", "exec", {"code": "run()"}), "source": "transcript"},
+        _runtime_call("call_1", {"code": "***"}),
+        _runtime_call(nested, {"command": "kubectl get pods"}),
+        _runtime_result(nested, "pod-a Running"),
+        _runtime_result("call_1", "done"),
+        {**_tool_result("call_1", "done"), "source": "transcript"},
+        _runtime_call("call_2", {"code": "fail()"}),
+        _runtime_result("call_2", "boom", success=False),
+    )
+    trajectory, _tokens, _output, errors = parse_trajectory_export(blob)
+    assert errors == []
+    assert trajectory == [
+        {"name": "exec", "args": {"code": "run()"}, "result": "done", "status": "completed"},
+        {
+            "name": "exec",
+            "args": {"command": "kubectl get pods"},
+            "result": "pod-a Running",
+            "status": "completed",
+        },
+        {"name": "exec", "args": {"code": "fail()"}, "result": "boom", "status": "error"},
+    ]
