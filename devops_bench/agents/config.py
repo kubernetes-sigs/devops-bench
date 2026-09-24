@@ -83,7 +83,7 @@ class AgentConfig:
 
     Attributes:
         model: Optional model id; flows from ``AGENT_MODEL``.
-        provider: Optional provider key (``gemini``/``anthropic``/``ollama``/...);
+        provider: Optional provider key (``gemini``/``anthropic``/``openai``/...);
             flows from ``AGENT_PROVIDER``.
         api_key: Optional API key delivered to provider-specific env vars by the
             concrete agent; flows from ``AGENT_API_KEY``.

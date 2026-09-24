@@ -118,7 +118,7 @@ def test_get_judge_model_passes_through(mocker):
     get_model = mocker.patch.object(geval, "get_model")
     get_model.return_value = _fake_client(model_name="gm")
 
-    judge = geval.get_judge_model(provider="ollama", model_name="gemma")
+    judge = geval.get_judge_model(provider="openai", model_name="gemma")
 
-    get_model.assert_called_once_with(provider="ollama", model_name="gemma")
+    get_model.assert_called_once_with(provider="openai", model_name="gemma")
     assert judge.get_model_name() == "gemma"
