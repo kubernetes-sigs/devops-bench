@@ -97,8 +97,15 @@ def test_get_model_unknown_provider_raises():
         get_model(provider="does-not-exist")
 
 
-def test_get_model_openai_resolves_but_has_no_adapter():
-    # ``openai`` is a known provider in the contract but ships no adapter module,
-    # so resolution succeeds and the registry lookup raises NotRegisteredError.
+def test_get_model_unregistered_family_raises(monkeypatch):
+    spec = ProviderSpec(
+        canonical="x",
+        adapter_family="no_such_family",
+        oc_provider="x",
+        api_key_envs=(),
+        keyless_ok=True,
+    )
+    monkeypatch.setattr(base, "resolve_provider", lambda provider: spec)
+
     with pytest.raises(NotRegisteredError):
-        get_model(provider="openai")
+        get_model(provider="x")
