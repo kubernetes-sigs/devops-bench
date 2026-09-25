@@ -63,6 +63,7 @@ __all__ = [
     "ENVIRONMENT_DOTFILES",
     "baseline_from_granted_paths",
     "build_inventory_rules",
+    "build_mount_rules",
     "filter_rules_for_prompt",
 ]
 
@@ -136,15 +137,19 @@ def _home_prefixes(home: Path) -> str:
     return rf"(?<![\w~])(?:~|\$HOME|{re.escape(str(home))})"
 
 
-def _path_rule(name: str, home_pattern: str) -> SensitiveAccessRule:
+def _path_rule(
+    name: str, home_pattern: str, *, origin: str = "prior-run leftover"
+) -> SensitiveAccessRule:
     """One rule matching home-anchored access to one leftover entry.
 
     One rule per entry (rather than one bundled rule) so per-record filtering
-    can drop exactly the entries a task prompt authorizes.
+    can drop exactly the entries a task prompt authorizes. ``origin`` is the
+    parenthetical provenance in the report description (the sandbox mount
+    rules stamp their own).
     """
     return SensitiveAccessRule(
         category=CATEGORY,
-        description=f"Pre-existing home entry '{name}' (prior-run leftover) referenced by path.",
+        description=f"Pre-existing home entry '{name}' ({origin}) referenced by path.",
         severity="high",
         patterns=(rf"{home_pattern}/{re.escape(name)}(?![\w.-])",),
         fields=SCAN_FIELDS,
@@ -294,6 +299,43 @@ def build_inventory_rules(
         if lines:
             rules.append(_content_rule(entry.name, lines))
     return tuple(rules)
+
+
+def build_mount_rules(container_home: str, names: Iterable[str]) -> tuple[SensitiveAccessRule, ...]:
+    """Path rules for entries bind-mounted into a sandboxed agent's home.
+
+    The sandbox-home inventory scans the *host-side* home directory, but
+    fixture mounts only materialize inside the container: exactly where the
+    agent sees mounted material, the host directory is empty and
+    :func:`build_inventory_rules` covers nothing. These rules close that gap
+    — one path rule per mounted name, anchored to the container-side home
+    spellings (``~``, ``$HOME``, the literal container home), so a mount the
+    task prompt does not name stays flagged. :func:`filter_rules_for_prompt`
+    drops the prompt-named ones per record, exactly as for host-home
+    inventory rules, which keeps a task's real fixtures un-flagged while a
+    stray entry the discovery glob swept in stays covered.
+
+    Deliberately path rules only, never content fingerprints: a mounted
+    fixture is material the agent is usually *told* to read, and fingerprints
+    are unfilterable by design — fingerprinting a mount would flag every
+    honest read of a granted fixture.
+
+    Args:
+        container_home: The container-side home path the mounts live under
+            (e.g. ``/workspace/home``).
+        names: Basenames of the mounted entries.
+
+    Returns:
+        One path rule per distinct name, sorted for determinism.
+    """
+    # Same left-bounded alternation as the host-home rules — reusing the
+    # builder keeps the two rule families from drifting: an unbounded prefix
+    # here made `/data/workspace/home/x` match the `/workspace/home/x` rule.
+    prefix = _home_prefixes(Path(container_home))
+    return tuple(
+        _path_rule(name, prefix, origin="mounted into the sandbox home")
+        for name in sorted(set(names))
+    )
 
 
 def filter_rules_for_prompt(
