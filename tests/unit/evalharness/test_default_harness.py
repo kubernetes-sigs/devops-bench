@@ -34,12 +34,18 @@ import pytest
 
 from devops_bench.agents import AGENTS, AgentHarness
 from devops_bench.agents.result import AgentResult, ToolCall
+from devops_bench.chaos import ChaosResult, ChaosSpec
+from devops_bench.chaos.faults import generate_load as gl
+from devops_bench.chaos.faults.generate_load import GenerateLoadFault
+from devops_bench.chaos.triggers.time_delay import TimeTrigger
 from devops_bench.core import ConfigError, MissingDependencyError
 from devops_bench.core.score_keys import INTEGRITY_CATASTROPHIC_KEY, OUTCOME_SCORE_KEY
 from devops_bench.evalharness import default as harness_default
-from devops_bench.evalharness.default import DefaultEvalHarness
+from devops_bench.evalharness.default import DefaultEvalHarness, chaos_invalidated_entries
 from devops_bench.tasks import Task
 from devops_bench.verification.base import VerificationResult
+from devops_bench.verification.rollup import rollup
+from devops_bench.verification.spec import parse_entries
 
 
 @pytest.fixture
@@ -1240,3 +1246,445 @@ def test_same_task_repeat_is_not_fingerprinted(
 
     assert results[0]["cheating_report"]["status"] == "clean"
     assert results[1]["cheating_report"]["status"] == "clean"
+
+
+# -- chaos-invalidated verification entries ---------------------------------
+#
+# A ``verify:`` entry only means anything while the planned disruption is live.
+# The post-run pass evaluates every entry unconditionally, so an injection that
+# never landed used to have its entry re-checked against an undisturbed
+# cluster — which passes, scoring a satisfied objective for a fault that never
+# happened. These tests pin the entry to "never observed" instead.
+
+
+def _spike_spec() -> Any:
+    """A chaos spec shaped like the optimize-scale load spike."""
+    return ChaosSpec.model_validate(
+        {
+            "name": "Planned Load Spike",
+            "trigger": {"type": "time", "delay_seconds": 0},
+            "action": {
+                "type": "generate_load",
+                "target": {"service_url": "http://svc", "qps": 300},
+            },
+            "verify": "Planned Load Spike Verification",
+        }
+    )
+
+
+def test_chaos_invalidated_entries_empty_when_injection_succeeded() -> None:
+    """A landed disruption leaves its verification entry scored as normal."""
+    assert chaos_invalidated_entries([_spike_spec()], {"status": "success"}) == {}
+
+
+@pytest.mark.parametrize(
+    ("chaos_report", "expected_detail"),
+    [
+        ({"status": "failed", "error": "fortio not found"}, "fortio not found"),
+        ({"status": "timed_out"}, "chaos status 'timed_out'"),
+        ({"status": "initiated"}, "chaos status 'initiated'"),
+    ],
+)
+def test_chaos_invalidated_entries_names_the_entry_and_the_cause(
+    chaos_report: dict[str, Any], expected_detail: str
+) -> None:
+    """Any non-success chaos outcome invalidates the referenced entry, with the cause."""
+    invalidated = chaos_invalidated_entries([_spike_spec()], chaos_report)
+    assert set(invalidated) == {"Planned Load Spike Verification"}
+    reason = invalidated["Planned Load Spike Verification"]
+    assert expected_detail in reason
+    assert "never injected" in reason
+
+
+@pytest.mark.parametrize(
+    ("chaos_specs", "chaos_report"),
+    [
+        ([], {"status": "failed"}),
+        ([_spike_spec()], {}),
+    ],
+    ids=["no-chaos-declared", "no-scenario-ran"],
+)
+def test_chaos_invalidated_entries_empty_without_a_scheduled_disruption(
+    chaos_specs: list[Any], chaos_report: dict[str, Any]
+) -> None:
+    """No chaos, or no scenario report, invalidates nothing — the legacy path."""
+    assert chaos_invalidated_entries(chaos_specs, chaos_report) == {}
+
+
+def test_chaos_invalidated_entries_empty_when_spec_opts_out_of_verification() -> None:
+    """A spec with no ``verify:`` reference has no entry to invalidate."""
+    spec = ChaosSpec.model_validate(
+        {
+            "name": "Planned Load Spike",
+            "trigger": {"type": "time", "delay_seconds": 0},
+            "action": {
+                "type": "generate_load",
+                "target": {"service_url": "http://svc", "qps": 300},
+            },
+            "verify": None,
+        }
+    )
+    assert chaos_invalidated_entries([spec], {"status": "failed"}) == {}
+
+
+def _spike_entries() -> list[Any]:
+    """The load-spike objective plus an unrelated objective, both converge-mode."""
+    entries, errors = parse_entries(
+        [
+            {
+                "name": "Planned Load Spike Verification",
+                "role": "objective",
+                "check": {"type": "pod_healthy", "selector": "app=web"},
+            },
+            {
+                "name": "unrelated-objective",
+                "role": "objective",
+                "check": {"type": "pod_healthy", "selector": "app=api"},
+            },
+        ]
+    )
+    assert errors == []
+    return entries
+
+
+def test_run_verification_records_invalidated_entry_without_evaluating_it(
+    isolated_env: None,
+) -> None:
+    """The invalidated entry is never handed to the verifier; its sibling still runs."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    entries = _spike_entries()
+    reason = "planned disruption 'Planned Load Spike' was never injected (fortio not found)"
+
+    with patch.object(
+        harness_default.VerifierAgent,
+        "run_entry",
+        return_value=VerificationResult(success=True, elapsed_time=0.1, reason="ok"),
+    ) as mock_run_entry:
+        report = harness._run_verification(  # noqa: SLF001
+            entries, invalidated={"Planned Load Spike Verification": reason}
+        )
+
+    # Only the sibling was evaluated — the spike entry short-circuited.
+    assert mock_run_entry.call_count == 1
+    assert mock_run_entry.call_args.args[0].name == "unrelated-objective"
+
+    spike = next(e for e in report if e["name"] == "Planned Load Spike Verification")
+    # "error", not "fail": never observed is not the same as observed false, and
+    # the agent is not the reason the disruption did not land.
+    assert spike["status"] == "error"
+    assert spike["success"] is False
+    assert spike["reason"] == reason
+    assert spike["role"] == "objective"
+    assert report[1]["name"] == "unrelated-objective" and report[1]["success"] is True
+
+
+def test_invalidated_entry_leaves_the_correctness_denominator(isolated_env: None) -> None:
+    """The recorded shape rolls up as unobserved: no credit, and coverage drops."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    entries = _spike_entries()
+
+    with patch.object(
+        harness_default.VerifierAgent,
+        "run_entry",
+        return_value=VerificationResult(success=True, elapsed_time=0.1, reason="ok"),
+    ):
+        report = harness._run_verification(  # noqa: SLF001
+            entries, invalidated={"Planned Load Spike Verification": "never injected"}
+        )
+
+    scores = rollup(report)
+    assert scores.declared == 2
+    assert scores.errored == 1
+    # One of two objectives was observed, and it passed, so correctness is over
+    # the observed entry alone — the un-injected one contributes to neither the
+    # numerator nor the denominator.
+    assert scores.correctness == 1.0
+    # It shows up in coverage instead, which is what disqualifies the run.
+    assert 1 - (scores.errored / scores.declared) == 0.5
+
+
+def test_invalidated_entry_carries_the_same_display_metadata_as_every_other_row(
+    isolated_env: None,
+) -> None:
+    """An unevaluated row is still renderable: it keeps its title and hint.
+
+    Regression guard for the port of this rule onto a tree that had since
+    added :func:`_entry_display_fields` to every other row-producing path. An
+    invalidated row missing those fields renders blank in the results table —
+    for precisely the entry an operator most needs to see — and nothing else
+    in the suite would catch it, because the shape is only ever asserted on
+    rows that *were* evaluated.
+    """
+    entries, errors = parse_entries(
+        [
+            {
+                "name": "Planned Load Spike Verification",
+                "role": "objective",
+                "title": "Load spike absorbed",
+                "description": "The HPA scales out under the planned surge.",
+                "group": "scaling",
+                "failure_hint": "Check the HPA's target utilization.",
+                "check": {"type": "pod_healthy", "selector": "app=web"},
+            }
+        ]
+    )
+    assert errors == []
+
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    report = harness._run_verification(  # noqa: SLF001
+        entries, invalidated={"Planned Load Spike Verification": "never injected"}
+    )
+
+    assert report[0]["title"] == "Load spike absorbed"
+    assert report[0]["description"] == "The HPA scales out under the planned surge."
+    assert report[0]["group"] == "scaling"
+    assert report[0]["failure_hint"] == "Check the HPA's target utilization."
+
+
+class TestScenarioJoinBudget:
+    """The drain must outlast a spike the task deliberately keeps running."""
+
+    @staticmethod
+    def _spec_with_duration(duration: Any) -> Any:
+        return ChaosSpec.model_validate(
+            {
+                "name": "Planned Load Spike",
+                "trigger": {"type": "time", "delay_seconds": 5},
+                "action": {
+                    "type": "generate_load",
+                    "target": {"service_url": "http://svc", "qps": 300, "duration": duration},
+                },
+                "verify": "Planned Load Spike Verification",
+            }
+        )
+
+    def test_no_chaos_keeps_the_flat_budget(self) -> None:
+        assert harness_default._scenario_join_budget(()) == harness_default._SCENARIO_JOIN_SEC  # noqa: SLF001
+
+    def test_an_undeclared_duration_budgets_for_the_fault_ceiling(self) -> None:
+        # The model picks the spike length, so the drain must cover the longest
+        # spike the fault's own timeout allows or a valid run reads "timed_out".
+        assert harness_default._scenario_join_budget([_spike_spec()]) == (  # noqa: SLF001
+            harness_default._SCENARIO_JOIN_SEC + gl._LOAD_TIMEOUT_CEILING_SEC  # noqa: SLF001
+        )
+
+    def test_a_target_without_a_duration_field_keeps_the_flat_budget(self) -> None:
+        spec = _spike_spec()
+        object.__setattr__(spec.action, "target", object())
+        assert harness_default._scenario_join_budget([spec]) == (  # noqa: SLF001
+            harness_default._SCENARIO_JOIN_SEC  # noqa: SLF001
+        )
+
+    def test_the_budget_covers_the_declared_spike(self) -> None:
+        """The optimize-scale case: 300s of spike must not be cut off at 180s."""
+        budget = harness_default._scenario_join_budget(  # noqa: SLF001
+            [self._spec_with_duration("300s")]
+        )
+
+        assert budget == harness_default._SCENARIO_JOIN_SEC + 300  # noqa: SLF001
+        assert budget > 5 + 300
+
+    def test_the_budget_is_bounded_like_the_fault_s_own_timeout(self) -> None:
+        budget = harness_default._scenario_join_budget(  # noqa: SLF001
+            [self._spec_with_duration("24h")]
+        )
+        assert budget == harness_default._SCENARIO_JOIN_SEC + gl._LOAD_TIMEOUT_CEILING_SEC  # noqa: SLF001
+
+    def test_an_unparsable_duration_falls_back_rather_than_guessing(self) -> None:
+        assert (
+            harness_default._scenario_join_budget(  # noqa: SLF001
+                [self._spec_with_duration("banana")]
+            )
+            == harness_default._SCENARIO_JOIN_SEC
+        )  # noqa: SLF001
+
+
+# --- the chaos chain, driven through run() (no cluster) ---------------------
+#
+# Everything above tests chaos_invalidated_entries and _run_verification in
+# isolation. Nothing exercised the wiring that connects them: run() parses the
+# spec, starts the scenario, waits on chaos_active_event, drains the report and
+# feeds it to the invalidation gate. A break anywhere along that path would
+# leave every unit test above green while the harness went back to grading
+# spikes that never fired.
+#
+# A `noop` deployer gives a real run() with no provisioning; the fault and the
+# verifier are stubbed at the same seams the scenario tests use.
+
+
+class _QuietAgent(AgentHarness):
+    """Stand-in operator agent that does nothing and succeeds."""
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        return AgentResult(output="did the thing", trajectory=[])
+
+
+class _ExplodingAgent(AgentHarness):
+    """Stand-in operator agent that dies mid-turn."""
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        raise RuntimeError("agent died mid-turn")
+
+
+_CHAOS_TASK = {
+    "task_id": "t",
+    "name": "spike-demo",
+    "prompt": "p",
+    "infrastructure": {"deployer": "noop"},
+    "chaos_spec": [
+        {
+            "name": "Planned Load Spike",
+            "trigger": {"type": "time", "delay_seconds": 0},
+            "action": {
+                "type": "generate_load",
+                "target": {"service_url": "http://svc", "qps": 300, "duration": "1s"},
+            },
+            "verify": "Planned Load Spike Verification",
+        }
+    ],
+    "verification_spec": [
+        {
+            "name": "Planned Load Spike Verification",
+            "role": "objective",
+            "check": {"type": "pod_healthy", "selector": "app=web"},
+        },
+        {
+            "name": "unrelated-objective",
+            "role": "objective",
+            "check": {"type": "pod_healthy", "selector": "app=api"},
+        },
+    ],
+}
+
+
+def _run_chaos_task(
+    tmp_path: Path,
+    *,
+    injection_succeeds: bool,
+    agent_cls: type[AgentHarness] = _QuietAgent,
+    signal_active: bool = True,
+) -> dict[str, Any]:
+    """Drive run() over a chaos task with the fault and verifier stubbed out."""
+    # Registry keys must be lowercase.
+    agent_key = f"chain-{injection_succeeds}-{agent_cls.__name__}-{signal_active}".lower().replace(
+        "_", "-"
+    )
+    AGENTS.register(agent_key)(agent_cls)
+
+    def fake_inject(self: Any, ctx: Any, event: threading.Event | None) -> Any:
+        if event is not None and signal_active:
+            event.set()
+        return ChaosResult(
+            success=injection_succeeds,
+            injected_fault=self.type,
+            elapsed_time=0.0,
+            error=None if injection_succeeds else "fortio: command not found",
+        )
+
+    passing = VerificationResult(success=True, elapsed_time=0.1, reason="ok")
+    try:
+        with (
+            patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+            patch.object(GenerateLoadFault, "inject", fake_inject),
+            patch.object(harness_default.VerifierAgent, "run_entry", return_value=passing),
+        ):
+            harness = DefaultEvalHarness(
+                project_id="p",
+                cluster_name="c",
+                agent_type=agent_key,
+                no_infra=False,
+                results_root=str(tmp_path),
+            )
+            results = harness.run([Task.from_dict(_CHAOS_TASK)])
+        assert len(results) == 1
+        return results[0]
+    finally:
+        AGENTS._items.pop(agent_key, None)  # noqa: SLF001
+
+
+def test_run_grades_the_spike_entry_when_the_fault_lands(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """The control case: a fault that fired is scored exactly as before."""
+    record = _run_chaos_task(tmp_path, injection_succeeds=True)
+
+    assert record["chaos_report"]["status"] == "success"
+    assert record["verification_status"] == "evaluated"
+
+    report = record["verification_report"]
+    assert {row["name"] for row in report} == {
+        "Planned Load Spike Verification",
+        "unrelated-objective",
+    }
+    # Both entries observed, both passed, full coverage.
+    assert all(row["success"] is True for row in report)
+    scores = rollup(report)
+    assert scores.errored == 0
+    assert scores.correctness == 1.0
+
+
+def test_run_never_grades_the_spike_entry_when_the_fault_did_not_fire(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """The definition of done, asserted through run() rather than a helper.
+
+    This is the regression that published eight scored runs for a spike that
+    never fired. The verifier is stubbed to *pass* everything, which is the
+    whole point: an undisturbed cluster does satisfy the check. The harness
+    must refuse to ask the question, not rely on the answer being no.
+    """
+    record = _run_chaos_task(tmp_path, injection_succeeds=False)
+
+    assert record["chaos_report"]["status"] == "failed"
+
+    report = record["verification_report"]
+    spike = next(r for r in report if r["name"] == "Planned Load Spike Verification")
+    sibling = next(r for r in report if r["name"] == "unrelated-objective")
+
+    # Never observed, not observed-false: the agent is not why the fault missed.
+    assert spike["status"] == "error"
+    assert spike["success"] is False
+    assert "was never injected" in spike["reason"]
+    # The entry that had nothing to do with chaos is still scored normally.
+    assert sibling["success"] is True
+
+    scores = rollup(report)
+    assert scores.errored == 1
+    # Coverage below 1.0 is what disqualifies the run.
+    assert 1 - (scores.errored / scores.declared) < 1.0
+
+
+def test_run_invalidates_the_spike_entry_even_when_the_agent_crashes(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """The exception path applies the same rule as the success path.
+
+    It reaches verification without having drained the scenario, so it has to
+    snapshot the chaos report itself. If it skipped that, a crashed run would
+    quietly grade the spike entry that the success path refuses to.
+    """
+    record = _run_chaos_task(tmp_path, injection_succeeds=False, agent_cls=_ExplodingAgent)
+
+    report = record["verification_report"]
+    spike = next(r for r in report if r["name"] == "Planned Load Spike Verification")
+    assert spike["status"] == "error"
+    assert "was never injected" in spike["reason"]
+
+
+def test_run_proceeds_and_still_scores_when_chaos_never_signals_active(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 45s wait expiring is a real path and had no test at all.
+
+    ``chaos_active_event`` is also set when injection *fails*, so a False here
+    means it never signalled within the budget. The run continues by design —
+    but it must still reach a scored record rather than hanging or losing the
+    chaos report.
+    """
+    monkeypatch.setattr(harness_default, "_CHAOS_ACTIVE_WAIT_SEC", 0.1)
+
+    record = _run_chaos_task(tmp_path, injection_succeeds=True, signal_active=False)
+
+    # The wait timed out, the agent ran anyway, and the fault still landed.
+    assert record["chaos_report"]["status"] == "success"
+    assert record["verification_status"] == "evaluated"

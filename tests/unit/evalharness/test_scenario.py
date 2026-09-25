@@ -643,3 +643,128 @@ def _no_real_kubectl(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("test attempted to spawn a real kubectl process")
 
     monkeypatch.setattr("devops_bench.k8s.kubectl.subprocess.Popen", _boom)
+
+
+def test_failed_injection_skips_verification_and_leaves_perf_empty() -> None:
+    """A disruption that never landed verifies nothing and reports no perf numbers.
+
+    The manager used to run the referenced check anyway. With no load actually
+    applied, the check observes a quiescent cluster and passes — recording a
+    satisfied objective, plus a derived 100% uptime and 1.0 efficiency, for a
+    spike that never fired. Nothing to disrupt means nothing to verify.
+    """
+    spec = _build_spec(verify_key="planned-verify")
+
+    def failing_inject(self, ctx, event):
+        return ChaosResult(
+            success=False,
+            injected_fault=self.type,
+            elapsed_time=0.0,
+            error="fortio not found",
+        )
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(GenerateLoadFault, "inject", failing_inject),
+        patch.object(VerifierAgent, "run_entry") as mock_run_entry,
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            verification_mapping={"planned-verify": SimpleNamespace()},
+            skip_port_forward=True,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    mock_run_entry.assert_not_called()
+
+    chaos_report, perf_report = manager.get_reports()
+    assert chaos_report["status"] == "failed"
+    verification = chaos_report["verification"]
+    assert verification["success"] is False
+    # "error", not "fail": the check was never observed, and the agent is not
+    # the reason the disruption did not land.
+    assert verification["status"] == "error"
+    assert verification["injection_failed"] is True
+    assert verification["name"] == "planned-verify"
+    assert "fortio not found" in verification["reason"]
+    # No vacuous 100% uptime / 1.0 efficiency for a spike that never fired.
+    assert perf_report == {}
+
+
+def test_scenario_skips_verification_when_aborted_mid_injection() -> None:
+    """A stop() during injection stops the run before it verifies.
+
+    The harness calls stop() from its exception path and from teardown while
+    the fault may still be running. Without this check the manager would go on
+    to verify against a cluster that is already being torn down, recording a
+    result nobody asked for — and blocking the join that teardown is waiting
+    on. The injection itself still lands on the report, so the operator can
+    see how far the run got.
+    """
+    spec = _build_spec(verify_key="planned-verify")
+    holder: dict[str, Any] = {}
+
+    def fake_inject(self: GenerateLoadFault, ctx: RunContext, event):
+        # The abort arrives while the fault is mid-flight, which is exactly
+        # when the harness's finally-block stop() fires.
+        holder["manager"].stop()
+        return ChaosResult(success=True, injected_fault=self.type, elapsed_time=0.0)
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(GenerateLoadFault, "inject", fake_inject),
+        patch.object(VerifierAgent, "run_entry") as mock_run_entry,
+    ):
+        holder["manager"] = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            verification_mapping={"planned-verify": SimpleNamespace(check=object())},
+            skip_port_forward=True,
+        )
+        holder["manager"].run_chaos_and_verification(spec, _build_ctx())
+
+    mock_run_entry.assert_not_called()
+
+    chaos_report, perf_report = holder["manager"].get_reports()
+    # The injection is still reported — aborting the verification must not
+    # erase the fact that the fault fired.
+    assert chaos_report["status"] == "success"
+    assert "verification" not in chaos_report
+    assert perf_report == {}
+
+
+def test_scenario_records_a_verifier_crash_rather_than_losing_it() -> None:
+    """A verifier that raises lands on the report as a failed verification.
+
+    Left unhandled this would escape into the scenario thread and die there
+    silently — the thread is a daemon, so the harness would join a dead thread
+    and read a report with no ``verification`` key at all, indistinguishable
+    from a spec that never scheduled one.
+    """
+    spec = _build_spec(verify_key="planned-verify")
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(
+            GenerateLoadFault,
+            "inject",
+            lambda self, ctx, event: ChaosResult(
+                success=True, injected_fault=self.type, elapsed_time=0.0
+            ),
+        ),
+        patch.object(VerifierAgent, "run_entry", side_effect=RuntimeError("kubectl exploded")),
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            verification_mapping={"planned-verify": SimpleNamespace(check=object())},
+            skip_port_forward=True,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    chaos_report, perf_report = manager.get_reports()
+    assert chaos_report["verification"]["success"] is False
+    assert "kubectl exploded" in chaos_report["verification"]["reason"]
+    # No perf numbers derived from a verification that never produced any.
+    assert perf_report == {}

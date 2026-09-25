@@ -167,6 +167,11 @@ class ScenarioManager:
     ) -> None:
         """Inject the planned fault, then gather verification metrics.
 
+        Verification runs only when the fault actually landed. A failed
+        injection records why in ``chaos_report["verification"]`` and leaves
+        ``perf_report`` empty, so neither the check nor the derived performance
+        numbers claim an outcome for a disruption that never happened.
+
         Args:
             spec: A typed :class:`ChaosSpec` carrying the trigger, action, and
                 opaque ``verify:`` key to resolve.
@@ -199,6 +204,11 @@ class ScenarioManager:
             # it via the fault, so without this it stalls for the full
             # ``_CHAOS_ACTIVE_WAIT_SEC`` timeout before proceeding.
             self.chaos_active_event.set()
+            return
+
+        if not chaos_result.success:
+            # Nothing landed: verifying now would measure an undisturbed cluster.
+            self._record_injection_failure(spec, chaos_result)
             return
 
         if self._aborted.is_set():
@@ -236,6 +246,27 @@ class ScenarioManager:
                     "success": False,
                     "reason": f"Verification exception: {exc}",
                 }
+
+    def _record_injection_failure(self, spec: ChaosSpec, result: ChaosResult) -> None:
+        """Stamp an un-injected disruption into the report's verification slot.
+
+        Mirrors the resolved-entry dump shape but with ``status: "error"``:
+        never observed, which is not the same as observed false.
+        """
+        detail = result.error or result.output or "no detail reported"
+        reason = (
+            f"planned disruption {spec.name!r} was never injected ({detail}); "
+            "the referenced verification was not run"
+        )
+        _log.error("%s", reason)
+        with self._report_lock:
+            self.result_holder["chaos_report"]["verification"] = {
+                "success": False,
+                "status": "error",
+                "reason": reason,
+                "name": spec.verify or spec.name,
+                "injection_failed": True,
+            }
 
     def _inject_chaos(self, spec: ChaosSpec, ctx: RunContext) -> ChaosResult:
         """Wait on the trigger, then drive ``action.inject`` with the target env.
