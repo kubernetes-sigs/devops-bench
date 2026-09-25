@@ -375,6 +375,7 @@ class ResourcePropertyVerifier(BaseVerifier):
                 selector=self.selector,
                 namespace=self.namespace,
                 kubeconfig=self.kubeconfig,
+                context=self.context,
                 timeout=single_call_timeout(timeout_sec),
             )
         except Exception as exc:  # noqa: BLE001 - a kubectl failure is a check error

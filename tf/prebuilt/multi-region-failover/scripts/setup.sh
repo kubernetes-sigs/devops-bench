@@ -61,9 +61,9 @@ kubectl config rename-context "gke_${PROJECT_ID}_${EAST_ZONE}_${EAST_CLUSTER}" e
 kubectl config rename-context "gke_${PROJECT_ID}_${WEST_ZONE}_${WEST_CLUSTER}" west
 
 # The harness credentials only east and re-runs get-credentials after this
-# script, and verifiers have a kubeconfig: field but no context: field, so the
-# standby is only reachable through a file of its own. --minify --flatten
-# resolves the exec plugin and leaves west as the single, current context.
+# script, so the standby is only reachable through a file of its own (the
+# task's verifiers pin it via kubeconfig:). --minify --flatten resolves the
+# exec plugin and leaves west as the single, current context.
 echo "==> Writing west-only kubeconfig for verification to $WEST_KUBECONFIG"
 mkdir -p "$(dirname "$WEST_KUBECONFIG")"
 rm -f "$WEST_KUBECONFIG"

@@ -217,9 +217,14 @@ resource "google_compute_global_forwarding_rule" "lb" {
 }
 
 resource "null_resource" "setup" {
+  # project/namespace/zones are triggers only for the destroy provisioner's self.triggers.
   triggers = {
+    project_id      = var.project_id
+    namespace       = var.namespace
     east_cluster    = module.east.cluster_name
+    east_zone       = var.zone_primary
     west_cluster    = module.west.cluster_name
+    west_zone       = var.zone_standby
     east_ip         = google_compute_address.east_ip.address
     west_ip         = google_compute_address.west_ip.address
     west_kubeconfig = local.west_kubeconfig
@@ -250,7 +255,28 @@ resource "null_resource" "setup" {
     }
   }
 
-  # Destroy-time provisioners may only reference self, hence the trigger above.
+  # Destroy-time provisioners may only reference self, hence the triggers
+  # above. Runs while both clusters still exist: deletes the frontend Services
+  # so the GKE controller tears down its out-of-state NLB resources before the
+  # google_compute_address destroys, which are otherwise rejected as in-use.
+  provisioner "local-exec" {
+    when        = destroy
+    on_failure  = continue
+    interpreter = ["/bin/bash", "-c"]
+    command     = "${path.module}/scripts/teardown.sh"
+
+    environment = {
+      PROJECT_ID   = self.triggers.project_id
+      NAMESPACE    = self.triggers.namespace
+      EAST_CLUSTER = self.triggers.east_cluster
+      EAST_ZONE    = self.triggers.east_zone
+      WEST_CLUSTER = self.triggers.west_cluster
+      WEST_ZONE    = self.triggers.west_zone
+      EAST_IP      = self.triggers.east_ip
+      WEST_IP      = self.triggers.west_ip
+    }
+  }
+
   provisioner "local-exec" {
     when       = destroy
     on_failure = continue

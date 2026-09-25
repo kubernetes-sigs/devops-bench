@@ -111,8 +111,10 @@ verification_spec:
       value: "frontend"
       across_matches: every
 
-  # Reads the primary through the ambient kubeconfig. A pathless exists with a
-  # selector fails, rather than errors, when nothing carries the label.
+  # Pinned to the east context the harness's get-credentials writes; without
+  # it the check reads the agent's current-context (west after failover) and
+  # passes vacuously. The zone segment must match variables.tf's zone_primary
+  # default. A pathless exists with a selector fails, not errors, on no match.
   - name: "Primary Region's Workloads Still Declared"
     title: "Primary Deployments still declared"
     description: "The primary cluster still has at least one Deployment labelled app=frontend and one labelled app=backend in the storefront namespace."
@@ -129,10 +131,12 @@ verification_spec:
           kind: Deployment
           selector: "app=frontend"
           namespace: "{{NAMESPACE}}"
+          context: "gke_{{PROJECT_ID}}_us-east1-b_{{CLUSTER_NAME}}"
           op: exists
         - type: resource_property
           name: primary_backend_still_declared
           kind: Deployment
           selector: "app=backend"
           namespace: "{{NAMESPACE}}"
+          context: "gke_{{PROJECT_ID}}_us-east1-b_{{CLUSTER_NAME}}"
           op: exists
