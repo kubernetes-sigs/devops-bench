@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from devops_bench.core import ClusterInfo, Registry
+from devops_bench.core import ClusterInfo, NetworkPlan, Registry
 
 __all__ = ["PROVIDERS", "Provider", "ResolveContext"]
 
@@ -102,6 +102,18 @@ class Provider(ABC):
         Returns:
             A new mapping with provider defaults filled in where not already set.
         """
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Describe how a sandboxed agent container reaches this cluster.
+
+        The default suits any endpoint reachable from a bridge-networked
+        container; the sandbox also rewrites a loopback server to
+        ``host.docker.internal`` on top of whatever is returned. Override
+        only when that generic step cannot infer what is needed: a Docker
+        network to join, an in-network hostname, or a context pin.
+        """
+        del cluster_info
+        return NetworkPlan()
 
     def cleanup(
         self,

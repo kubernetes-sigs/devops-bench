@@ -21,7 +21,7 @@ import json
 import re
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, Protocol
 
 from devops_bench.core import get_logger
@@ -29,9 +29,12 @@ from devops_bench.core.subprocess import CompletedProcess, _build_env, run
 
 __all__ = [
     "apply",
+    "config_value",
+    "create_token",
     "exec_pod",
     "get_resource",
     "is_not_found",
+    "label",
     "port_forward",
     "rollout_status",
     "run_pod",
@@ -217,7 +220,9 @@ def get_resource(
     *,
     selector: str | None = None,
     namespace: str | None = None,
+    all_namespaces: bool = False,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
     timeout: float | None = None,
 ) -> dict[str, Any]:
     """Fetch a resource (or list) as parsed JSON via ``kubectl get -o json``.
@@ -227,7 +232,12 @@ def get_resource(
         name: Optional specific resource name.
         selector: Optional label selector (``-l``).
         namespace: Optional namespace (``-n``).
+        all_namespaces: List across every namespace (``-A``); ignored when
+            ``namespace`` is given.
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to
+            (``--context``); unpinned reads answer for the ambient
+            current-context.
         timeout: Optional seconds before the subprocess is killed. ``None``
             (the default) blocks indefinitely, so pass one whenever the API
             server might accept a connection and never respond.
@@ -247,9 +257,9 @@ def get_resource(
         *_selector_args(selector),
         "-o",
         "json",
-        *_namespace_args(namespace),
+        *(_namespace_args(namespace) if namespace or not all_namespaces else ["-A"]),
     ]
-    completed = _run_kubectl(argv, kubeconfig, timeout=timeout)
+    completed = _run_kubectl(argv, kubeconfig, context=context, timeout=timeout)
     return json.loads(completed.stdout)
 
 
@@ -305,6 +315,7 @@ def apply(
     *,
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
 ) -> CompletedProcess:
     """Apply a manifest file or directory via ``kubectl apply -f``.
 
@@ -312,6 +323,7 @@ def apply(
         path: Manifest file, directory, or URL passed to ``-f``.
         namespace: Optional namespace (``-n``).
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to (``--context``).
 
     Returns:
         The completed process.
@@ -320,7 +332,87 @@ def apply(
         SubprocessError: If kubectl exits non-zero or times out.
     """
     argv = ["kubectl", "apply", "-f", path, *_namespace_args(namespace)]
-    return _run_kubectl(argv, kubeconfig)
+    return _run_kubectl(argv, kubeconfig, context=context)
+
+
+def label(
+    resource: str,
+    name: str,
+    labels: Mapping[str, str],
+    *,
+    overwrite: bool = False,
+    namespace: str | None = None,
+    kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
+) -> CompletedProcess:
+    """Set labels on one resource via ``kubectl label``.
+
+    Without ``overwrite`` kubectl refuses to change a label that already has
+    a different value.
+
+    Raises:
+        SubprocessError: If kubectl exits non-zero or times out.
+    """
+    argv = [
+        "kubectl",
+        "label",
+        resource,
+        name,
+        *(f"{key}={value}" for key, value in labels.items()),
+        *(["--overwrite"] if overwrite else []),
+        *_namespace_args(namespace),
+    ]
+    return _run_kubectl(argv, kubeconfig, context=context)
+
+
+def config_value(
+    jsonpath: str,
+    *,
+    kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
+) -> str:
+    """Read one value out of the effective kubeconfig via jsonpath.
+
+    ``--minify`` narrows the view to the selected context first, so
+    ``{.clusters[0]...}`` means that context's own cluster.
+
+    Returns:
+        The stripped value, or ``""`` when the key is absent or kubectl
+        fails; callers decide whether that is fatal.
+    """
+    argv = ["kubectl", "config", "view", "--raw", "--minify", "-o", f"jsonpath={jsonpath}"]
+    completed = _run_kubectl(argv, kubeconfig, context=context, check=False)
+    return (completed.stdout or "").strip()
+
+
+def create_token(
+    service_account: str,
+    *,
+    namespace: str,
+    duration_sec: float,
+    kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
+) -> str:
+    """Mint a short-lived ServiceAccount token via ``kubectl create token``.
+
+    The apiserver may grant a shorter lifetime than requested; the token is
+    returned rather than failing.
+
+    Returns:
+        The bearer token.
+
+    Raises:
+        SubprocessError: If kubectl exits non-zero or times out.
+    """
+    argv = [
+        "kubectl",
+        "create",
+        "token",
+        service_account,
+        f"--duration={int(duration_sec)}s",
+        *_namespace_args(namespace),
+    ]
+    return (_run_kubectl(argv, kubeconfig, context=context).stdout or "").strip()
 
 
 def rollout_status(

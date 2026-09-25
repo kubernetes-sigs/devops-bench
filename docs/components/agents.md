@@ -256,6 +256,252 @@ supply an operator brief. Setting `BENCH_USE_MCP=false` drops the MCP binding
 entirely, so the agent sees no tools and the scorer agrees that none ran — skills
 and rules are unaffected.
 
+## Sandboxing
+
+Opt-in, off by default. With `BENCH_AGENT_SANDBOX=docker` the agent runs inside
+a container (`BENCH_SANDBOX_IMAGE`) that sees the run workspace, the task's
+seeded fixtures, a generated kubeconfig, and an explicit env overlay — and not
+the repo checkout, `results/`, your `$HOME`, gcloud config, Terraform state, or
+the Docker socket. With the switch unset the harness behaves exactly as it did
+before the sandbox existed. The design was shaped by two observed incidents:
+an agent that used the admin kubeconfig to run a privileged pod and read the
+bench checkout through the node's disk, and an agent that mined the harness
+VM's cloud identity from the metadata endpoint when its model credential was
+missing.
+
+### The cluster credential
+
+The agent does **not** get your kubeconfig. Before it starts, the harness
+creates a `bench-agent` ServiceAccount in the `bench-system` namespace, binds it
+to the built-in `edit` role cluster-wide plus a small cluster-scoped supplement
+(namespaces CRUD; nodes, PVs, storage classes, CRDs read-only), mints a
+short-lived token for it, and renders a single-cluster kubeconfig containing
+that token and nothing else. The RBAC deliberately grants no write on
+`rbac.authorization.k8s.io` or `admissionregistration.k8s.io`, so the agent
+cannot grant itself permissions through RBAC objects or remove the admission
+policy below. That closes the direct route, not every route: `edit` itself
+carries permissions that can reach a stronger identity — see [Known gaps in
+the RBAC scope](#known-gaps-in-the-rbac-scope).
+
+Two consequences worth knowing:
+
+- **GKE works in-container because of this.** A normal GKE kubeconfig
+  authenticates through `gke-gcloud-auth-plugin`, which needs a `gcloud` binary
+  and Application Default Credentials — neither of which the container has, by
+  design. A bearer token needs no plugin.
+- **Under vcluster the ServiceAccount lives in the virtual cluster**, because
+  every call is pinned to the run's own kubectl context. Its token is
+  cryptographically useless against the host cluster.
+
+The token's lifetime is the agent's `timeout_sec` plus 15 minutes of slack,
+capped at two hours. If a scoped credential cannot be minted — or if pod
+security below cannot be applied — the run **fails**; it never falls back to
+your admin credential silently. For local development against a cluster where
+you cannot create cluster-scoped objects, set
+`BENCH_SANDBOX_ALLOW_ADMIN_CREDS=1` to allow the old behaviour explicitly. Never
+use it for a scored run.
+
+**On GKE this is an IAM question, not a Kubernetes RBAC one.** GKE gates the
+admission-policy resources behind the `container.thirdPartyObjects.*`
+permissions, which `roles/container.developer` does not carry, so an operator
+who can otherwise deploy freely still cannot apply the policy below — and the
+run refuses. Grant `roles/container.admin`, or a custom role including those
+permissions, to whatever identity runs the harness. A vcluster run is
+unaffected: the policy is applied inside the virtual cluster, where the
+generated kubeconfig is already admin.
+
+Provisioning also refuses a cluster that no provider vouched for. With the no-op
+deployer (`BENCH_NO_INFRA`) there is no context to pin to, so "the cluster"
+would be whatever your kubeconfig last pointed at — and this step writes a
+cluster-wide admission policy and `ClusterRoleBindings`. Set
+`BENCH_SANDBOX_ALLOW_AMBIENT_CLUSTER=1` if that is genuinely what you want.
+
+### Pod security
+
+Overlapping controls, applied at the same point:
+
+1. **PSA `baseline` labels** on every namespace that exists when the agent
+   starts. Namespaces that already declare an `enforce` level are left alone, so
+   a task asserting its own level keeps it.
+2. **A `ValidatingAdmissionPolicy`** denying `hostNetwork` / `hostPID` /
+   `hostIPC`, privileged containers (including init and ephemeral ones), and
+   `hostPath` volumes — cluster-wide, in `Deny` mode, failing closed, with the
+   cluster's own system namespaces exempted. It matches
+   `pods/ephemeralcontainers` as well as `pods`, so `kubectl debug` cannot
+   attach a privileged container to an already-admitted pod.
+3. **A second policy guarding the exemption list**, denying the agent the
+   creation of a namespace named after one of the exempt namespaces, or the
+   labelling of any namespace as the cluster's own. The exemptions are by name
+   and several do not exist on every provider (`gmp-system` on kind,
+   `local-path-storage` on GKE), so without this the agent could simply claim
+   an unused one and deploy there. It covers `UPDATE` as well as `CREATE`,
+   because a name is immutable but a label is not.
+4. **A third policy denying the agent workloads inside the exempt namespaces.**
+   Guarding the names only protects the ones that do not exist yet. `edit` is
+   bound cluster-wide, so the agent can write to `kube-system` on every
+   provider, and policy 2 deliberately skips it — which made
+   `kubectl run --privileged -n kube-system` an admitted request on a cluster
+   carrying the full set. A boundary probe caught this; it is not hypothetical.
+   The policy matches every kind that can produce a pod, not `pods` alone, since
+   a `Deployment` reaches the same place with its pod created by the ReplicaSet
+   controller. It matches `pods/exec`, `pods/attach` and `pods/portforward` too,
+   because `edit` grants exec and these are precisely the namespaces whose pods
+   are legitimately privileged. It does not touch config: a ConfigMap in
+   `kube-system` is a blast-radius question rather than an escape.
+5. **A fourth policy denying the agent a shell into pods that predate all of
+   the above.** Admission only sees requests, so nothing here retracts a pod
+   that already exists — and the deployer runs *before* credentials are
+   provisioned. Some fixtures deploy privileged workloads on purpose:
+   `opa-remediation` ships two, because remediating them is the task. Those pods
+   stay, and `edit` grants `pods/exec` cluster-wide, so a shell into one is node
+   root by a route policy 2 never sees. Before the agent starts, the harness
+   scans every namespace for pods policy 2 would have rejected — skipping the
+   ones policy 4 already covers — and renders their `namespace/name` into a
+   policy denying the agent `exec`, `attach` and `port-forward` into exactly
+   those. They are named individually rather than matched on a property because
+   admission cannot see the target pod's spec on a `CONNECT`: the object on an
+   exec request is a `PodExecOptions`, so a name list is the only thing there is
+   to test. The list stays correct for the run — policy 2 denies these pods on
+   `CREATE`, so a name that leaves it cannot come back. It is applied even when
+   the list is empty, since nothing here is torn down and a reused cluster would
+   otherwise keep the previous run's list.
+
+Policies 3, 4 and 5 are scoped to the agent's own username, so the cluster's own
+components keep running — the exemption exists for kube-proxy and the CNI, not
+for whoever asks. That scoping is sound for these three and would not be for
+policy 2: a namespace or a `Deployment` is always created by whoever asked,
+whereas a pod is often created on the agent's behalf by a controller running
+under an identity of its own.
+
+The exemption has two halves: the names above, and any namespace carrying
+`addonmanager.kubernetes.io/mode`. A name list alone goes stale — a plain GKE
+run turned up four managed namespaces it had never heard of
+(`gke-managed-cim`, `gke-managed-networking-dra-driver`,
+`gke-managed-volumepopulator`, `gmp-public`), all created by the same addon
+manager as the two that were listed. Nothing broke there, since three were
+empty and the fourth runs an unprivileged metrics scraper, but a cluster using
+DRA or TPUs runs a privileged `hostPath` DaemonSet in one of them and a
+fail-closed policy would have denied it. The label is the cluster declaring
+which namespaces are its own to run, so it covers managed namespaces that do
+not exist yet. The names are still needed: nothing carries that label on kind
+or vcluster, and on GKE `kube-system` itself does not.
+
+The first policy exists because labels cannot cover a namespace the agent
+creates *after* provisioning, and at least one task asks it to create one.
+`bench-system` is skipped by the labeller — it holds only a ServiceAccount — but
+is deliberately **not** exempt from the policy, since the agent can create pods
+there. Together these deny the privileged-pod-plus-`hostPath` escape that was
+used to read the benchmark's own answer key off a node's disk.
+
+**The cluster must be Kubernetes 1.30 or newer.** Four of the five controls are
+`ValidatingAdmissionPolicy` objects, and `admissionregistration.k8s.io/v1` only
+reached GA in 1.30 — 1.29 serves `v1beta1`, behind a feature gate. The harness
+checks for the `v1` resource before it applies anything and refuses by name if
+it is missing, rather than letting the apply fail with kubectl's `no matches for
+kind`, which reads like a typo in our own manifest. This is deliberately *not*
+routed through `BENCH_SANDBOX_ALLOW_ADMIN_CREDS`: that hatch is for an operator
+whose credential cannot write cluster-scoped objects, and no credential makes a
+1.29 apiserver serve a v1 policy. For kind, the floor is why `node_image`
+defaults to a digest-pinned `v1.30.0`; lowering it breaks every sandboxed run.
+
+A task whose subject matter genuinely is privileged workloads opts out with
+`agent_pod_security: privileged` in its `task.yaml` (see
+[Add a task](../how-to/add-a-task.md)). The default is `baseline`, and any other
+value is a load-time validation error rather than a silent fall-back.
+
+**None of this is torn down.** `bench-system`, the ClusterRoleBindings, the
+admission policies and the PSA labels outlive the run. On a disposable cluster that is
+irrelevant; on a reused one it means a second run finds most namespaces already
+labelled and skips them, which is correct but makes the labeller look inert.
+Read the labels as the state of the cluster, not as the output of the run that
+is in front of you.
+
+### Known gaps in the RBAC scope
+
+Three are open, all in how the agent's RBAC is scoped rather than in the
+pod-security controls above. None is reachable without a working agent
+credential, and all are fixed by replacing the built-in role with a derived one
+and narrowing the supplement:
+
+- **`edit` bound cluster-wide reaches the system namespaces.** The built-in role
+  carries `impersonate` on `serviceaccounts` and `create` on
+  `serviceaccounts/token`, so a cluster-wide binding lets the agent mint a token
+  for, or impersonate, any ServiceAccount in `kube-system` — including ones bound
+  to `cluster-admin`. That is a path to cluster-admin, and it defeats the
+  deliberate omission of write on `rbac.authorization.k8s.io`. RBAC has no deny
+  rule, so nothing in the supplement can subtract this; only replacing `edit`
+  with a derived role closes it. The neighbouring exec route is closed —
+  policy 4 above denies `pods/exec` in exactly those namespaces — but that is a
+  patch over one exit, not a fix for the scope.
+- **`edit` carries read and write on `secrets`.** The built-in role includes
+  them, unlike `view`, which excludes them deliberately; bound cluster-wide that
+  reaches every namespace. Nothing in the supplement adds this — it is inherited,
+  and it is not narrowed anywhere. What the exposure is worth depends on the run:
+  the cluster is disposable and its workloads are synthetic, so ordinarily this
+  leaks fixture data. It matters for a task that seeds a real credential into a
+  Secret, and for the controller and syncer Secrets a task did not author. Under
+  vcluster it stops at the virtual cluster; the host cluster's Secrets are not
+  reachable with this token.
+- **The supplement grants `update`/`patch` on namespaces**, so the agent can
+  strip the `pod-security.kubernetes.io/*` labels the harness just applied. The
+  admission policies are unaffected — the agent has no write on
+  `admissionregistration.k8s.io` — so this removes the PSA half of the
+  enforcement, not the load-bearing half. It is a capability the agent holds
+  rather than one it has been seen to use: on a GKE run the namespace labels
+  were byte-identical before and after.
+
+Until these are closed, treat the pod-security controls as the boundary and the
+RBAC scope as best-effort. Narrowing the role is not a blind edit: the tasks were
+authored against admin, so a scope that is too tight fails them in ways that read
+as agent error. An A/B soak of sandboxed against ambient runs is what shows which
+tasks need which verbs.
+
+### The scope is already too tight for custom resources
+
+`edit` covers Kubernetes' own API groups. It does not cover the CRDs an operator
+installs, and the supplement grants only `get`/`list`/`watch` on
+`customresourcedefinitions` — the definitions, not the objects. What the agent
+gets on a given CRD is therefore whatever that operator chose to aggregate into
+`edit`, which is usually nothing.
+
+`opa-remediation` is the measured instance. Kyverno v1.12.7 ships
+`kyverno:rbac:view:policies` labelled `aggregate-to-view` and
+`kyverno:rbac:admin:policies` labelled `aggregate-to-admin`, with no
+`aggregate-to-edit` on either. Aggregation flows view into edit and edit into
+admin, so the agent can read `ClusterPolicy` objects and cannot write them. Two
+of that task's objectives ask it to flip both policies from `Audit` to
+`Enforce`, so **the task cannot be fully passed under the default scope** — one
+of its three deterministic objective groups is unreachable. Sandboxed and
+ambient scores are not comparable for it.
+
+Nothing in a trajectory says so. Neither agent that ran the task attempted the
+flip, so the run logs carry no `forbidden` — the objective simply goes
+unattempted and reads as an agent miss. Anything that grades sandboxed runs
+against ambient ones has to account for this class of gap explicitly rather
+than infer it from failures.
+
+### Model credentials
+
+The sandbox strips `CLOUDSDK_CONFIG` and `GOOGLE_APPLICATION_CREDENTIALS`, and
+on the bastion the link-local metadata endpoint is blocked for containers (see
+[infrastructure](infra.md)). Vertex authenticates through Application Default
+Credentials, which is precisely that chain — so **a sandboxed Vertex run cannot
+authenticate and will fail loudly** rather than degrading to an unsandboxed one.
+Use an API-key provider for sandboxed runs: `AGENT_PROVIDER=google`, with the key
+in `AGENT_API_KEY`. Ambient, unsandboxed runs are unaffected and Vertex keeps
+working for them.
+
+> [!IMPORTANT]
+> **`AGENT_API_KEY` is the only variable the host reads the key from**
+> (`agents/config.py`). The provider's own names — `GEMINI_API_KEY`,
+> `GOOGLE_API_KEY` — are where the key is *written to* inside the container, not
+> where it is read from outside. Unsandboxed the distinction never shows: the
+> agent subprocess inherits the whole host environment and finds
+> `GEMINI_API_KEY` by itself. Sandboxed, only the explicit overlay crosses, so a
+> host-side `GEMINI_API_KEY` is simply absent and the CLI exits reporting that no
+> auth method is set — naming the very variable you exported. Export
+> `AGENT_API_KEY` and the sandboxed run routes it onward for you.
+
 ## Adding your own harness
 
 Want to wrap a different agent? See

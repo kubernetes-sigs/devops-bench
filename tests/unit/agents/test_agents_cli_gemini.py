@@ -185,13 +185,73 @@ def test_build_env_vertex_key_routes_to_cloud_api_key() -> None:
     # transport var), not the google-genai vars.
     env = _build_env(AgentConfig(model="gemini-2.5-pro", api_key="abc", provider="google-vertex"))
     assert env["GOOGLE_CLOUD_API_KEY"] == "abc"
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
     assert "GEMINI_API_KEY" not in env and "GOOGLE_API_KEY" not in env
 
 
 def test_build_env_keyless_writes_no_key_var() -> None:
     # No api_key (Vertex/ADC): no key env var is written regardless of provider.
     env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
     assert not {"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_API_KEY"} & env.keys()
+
+
+def test_build_env_vertex_accepts_the_gcp_project_and_location_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GCP_PROJECT_ID is what the bastion exports; GCP_VERTEX_LOCATION matches
+    # the claude_code harness (the bastion's GCP_LOCATION is a zone, not a region).
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-a")
+    monkeypatch.setenv("GCP_VERTEX_LOCATION", "europe-west4")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-a"
+    assert env["GOOGLE_CLOUD_LOCATION"] == "europe-west4"
+
+
+def test_build_env_vertex_prefers_google_cloud_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-google")
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-gcp")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
+    monkeypatch.setenv("GCP_VERTEX_LOCATION", "europe-west4")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-google"
+    assert env["GOOGLE_CLOUD_LOCATION"] == "asia-northeast1"
+
+
+def test_build_env_vertex_defaults_the_location_and_omits_an_unset_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No project anywhere: write nothing rather than an empty string, and let
+    # the SDK's own ADC-derived default apply. Location always gets a value.
+    for var in (
+        "GOOGLE_CLOUD_PROJECT",
+        "GCP_PROJECT_ID",
+        "GOOGLE_CLOUD_LOCATION",
+        "GCP_VERTEX_LOCATION",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert "GOOGLE_CLOUD_PROJECT" not in env
+    assert env["GOOGLE_CLOUD_LOCATION"] == "us-central1"
+
+
+def test_build_env_non_vertex_writes_no_vertex_routing_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An ambient GOOGLE_CLOUD_* on the operator's shell must not leak into a
+    # Gemini-API run and silently reroute it at Vertex.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-a")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", api_key="abc"))
+    assert (
+        not {
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+        }
+        & env.keys()
+    )
 
 
 def test_build_env_unknown_provider_raises_even_when_keyless() -> None:
@@ -566,6 +626,60 @@ def test_execute_cleans_up_temp_working_dir_after_run(monkeypatch: pytest.Monkey
 # ---------------------------------------------------------------------------
 # MCP server wiring: settings.json mcpServers reach the binary's cwd.
 # ---------------------------------------------------------------------------
+
+
+def test_execute_seeds_container_home_folder_trust_when_sandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The container HOME is fresh, so the user-level folder-trust disable the
+    bastion relies on does not exist there — without seeding it a sandboxed
+    MCP arm silently runs without MCP while still recording MCP as granted."""
+    import json as _json
+
+    from devops_bench.agents.capabilities import AllCapabilities, McpBinding
+    from devops_bench.agents.sandbox import SandboxSpec
+
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="k8s", command=("/bin/mcp",)),))
+    agent = GeminiCliAgent(
+        AgentConfig(target="gemini", capabilities=caps, sandbox=SandboxSpec(image="img"))
+    )
+    monkeypatch.setattr(
+        GeminiCliAgent,
+        "run_agent_cmd",
+        lambda self, argv, **kwargs: SimpleNamespace(stdout="", stderr="", returncode=0),
+    )
+    agent._execute("p", workspace_path=tmp_path)  # noqa: SLF001
+
+    seeded = tmp_path / "home" / ".gemini" / "settings.json"
+    assert seeded.exists()
+    assert _json.loads(seeded.read_text()) == {"security": {"folderTrust": {"enabled": False}}}
+
+
+def test_execute_does_not_seed_folder_trust_when_unsandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from devops_bench.agents.capabilities import AllCapabilities, McpBinding
+
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="k8s", command=("/bin/mcp",)),))
+    agent = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps))
+    monkeypatch.setattr(
+        GeminiCliAgent,
+        "run_agent_cmd",
+        lambda self, argv, **kwargs: SimpleNamespace(stdout="", stderr="", returncode=0),
+    )
+    agent._execute("p", workspace_path=tmp_path)  # noqa: SLF001
+    assert not (tmp_path / "home" / ".gemini").exists()
+
+
+def test_execute_refuses_a_host_home_target_when_sandboxed(tmp_path: Path) -> None:
+    """expanduser resolves ~ against the HOST home; the resulting path cannot
+    exist in the image, so refuse loudly instead of a confusing exec failure."""
+    from devops_bench.agents.sandbox import SandboxSpec
+    from devops_bench.core import SandboxError
+
+    agent = GeminiCliAgent(AgentConfig(target="~/bin/gemini", sandbox=SandboxSpec(image="img")))
+    with pytest.raises(SandboxError, match="host home"):
+        agent._execute("p", workspace_path=tmp_path)  # noqa: SLF001
 
 
 def test_build_settings_combines_mcp_servers_and_skills_flag() -> None:
