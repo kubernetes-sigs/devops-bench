@@ -56,7 +56,6 @@ import json
 import os
 import shlex
 import shutil
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -487,7 +486,7 @@ class OpenClawAgent(AgentHarness):
                 metadata["returncode"] = completed.returncode
 
             trajectory, tokens, bundle_output, export_errors = self._extract_trajectory(
-                oc_bin, env_overlay
+                oc_bin, env_overlay, workdir
             )
             errors.extend(export_errors)
 
@@ -503,13 +502,18 @@ class OpenClawAgent(AgentHarness):
         )
 
     def _extract_trajectory(
-        self, oc_bin: str, env_overlay: dict[str, str]
+        self, oc_bin: str, env_overlay: dict[str, str], export_workspace: Path
     ) -> tuple[list[dict], dict, str, list[str]]:
         """Run ``oc sessions`` + ``export-trajectory`` and parse the bundle.
 
         ``env_overlay`` carries ``OPENCLAW_STATE_DIR`` (and ``OPENCLAW_CONFIG_PATH``
         when MCP is configured) so the session commands read from the same
         isolated state the agent turn wrote to.
+
+        The bundle lands under ``<export_workspace>/.openclaw/trajectory-exports/``
+        rather than a temp dir, so the raw ``events.jsonl`` outlives the run and
+        the workspace diff carries it into ``generated_files/`` — keeping oc-side
+        redaction or parse surprises auditable after the fact.
 
         Returns:
             A ``(trajectory, tokens, output_text, errors)`` tuple. ``output_text``
@@ -547,43 +551,41 @@ class OpenClawAgent(AgentHarness):
             errors.append("oc sessions returned no session key")
             return [], {}, "", errors
 
-        with tempfile.TemporaryDirectory(prefix="oc-export-") as tmpdir:
-            workspace = Path(tmpdir)
-            try:
-                export = run(
-                    [
-                        oc_bin,
-                        "sessions",
-                        "export-trajectory",
-                        "--session-key",
-                        key,
-                        "--workspace",
-                        str(workspace),
-                        "--json",
-                    ],
-                    check=False,
-                    timeout=self.config.timeout_sec,
-                    extra_env=env_overlay,
-                )
-            except SubprocessError as exc:
-                errors.append(f"oc export-trajectory failed: {exc}")
-                return [], {}, "", errors
-            except OSError as exc:
-                errors.append(f"oc export-trajectory: binary unavailable: {exc}")
-                return [], {}, "", errors
+        try:
+            export = run(
+                [
+                    oc_bin,
+                    "sessions",
+                    "export-trajectory",
+                    "--session-key",
+                    key,
+                    "--workspace",
+                    str(export_workspace),
+                    "--json",
+                ],
+                check=False,
+                timeout=self.config.timeout_sec,
+                extra_env=env_overlay,
+            )
+        except SubprocessError as exc:
+            errors.append(f"oc export-trajectory failed: {exc}")
+            return [], {}, "", errors
+        except OSError as exc:
+            errors.append(f"oc export-trajectory: binary unavailable: {exc}")
+            return [], {}, "", errors
 
-            if export.returncode != 0:
-                stderr = (export.stderr or "").strip()
-                errors.append(
-                    f"oc export-trajectory exited {export.returncode}: {stderr or '<no stderr>'}"
-                )
-                return [], {}, "", errors
+        if export.returncode != 0:
+            stderr = (export.stderr or "").strip()
+            errors.append(
+                f"oc export-trajectory exited {export.returncode}: {stderr or '<no stderr>'}"
+            )
+            return [], {}, "", errors
 
-            events_text, read_errors = _read_export_bundle(workspace)
-            errors.extend(read_errors)
-            if not events_text:
-                return [], {}, "", errors
+        events_text, read_errors = _read_export_bundle(export_workspace)
+        errors.extend(read_errors)
+        if not events_text:
+            return [], {}, "", errors
 
-            trajectory, tokens, output_text, parse_errors = parse_trajectory_export(events_text)
-            errors.extend(parse_errors)
-            return trajectory, tokens, output_text, errors
+        trajectory, tokens, output_text, parse_errors = parse_trajectory_export(events_text)
+        errors.extend(parse_errors)
+        return trajectory, tokens, output_text, errors
