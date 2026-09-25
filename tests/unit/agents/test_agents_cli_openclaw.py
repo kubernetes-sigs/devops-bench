@@ -909,3 +909,58 @@ def test_execute_cleans_up_temp_working_dir_after_run(
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert captured["cwd"] is not None
     assert not os.path.exists(captured["cwd"])
+
+
+def test_native_openai_key_crosses_explicit_overlay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    assert _build_env(AgentConfig(provider="openai"))["OPENAI_API_KEY"] == "test-key"
+
+
+@pytest.mark.parametrize(
+    "model,provider",
+    [("gemini-3.7-flash", "google-vertex"), ("claude-sonnet-5", "anthropic-vertex")],
+)
+def test_fleet_models_registered(model: str, provider: str) -> None:
+    assert (
+        _build_model_override(AgentConfig(model=model, provider=provider))["models"]["providers"][
+            provider
+        ]["models"][0]["id"]
+        == model
+    )
+
+
+def test_vertex_auth_profile_seeded_for_headless_run() -> None:
+    command = oc_mod._build_local_command(
+        AgentConfig(provider="anthropic-vertex"), "hi", "operator", "oc"
+    )
+    assert "models auth paste-api-key" in command
+
+
+def test_sandbox_vertex_overlay_uses_metadata_without_host_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/private/host.json")
+    overlay = oc_mod._sandbox_provider_env(AgentConfig(provider="anthropic-vertex"), tmp_path)
+    assert overlay["GOOGLE_CLOUD_PROJECT"] == "test-project"
+    assert overlay["ANTHROPIC_VERTEX_USE_GCP_METADATA"] == "1"
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in overlay
+    assert (tmp_path / "node-fetch-shim" / "register.mjs").is_file()
+
+
+@pytest.mark.parametrize(
+    "model,provider,transport",
+    [
+        ("gemini-3.8-flash", "google", "google-generative-ai"),
+        ("gemini-3.8-flash", "google-vertex", "google-vertex"),
+        ("claude-fable-5-1", "anthropic-vertex", "anthropic-messages"),
+    ],
+)
+def test_latest_models_have_per_run_catalog_and_transport(
+    model: str, provider: str, transport: str
+) -> None:
+    override = _build_model_override(AgentConfig(model=model, provider=provider))
+    entry = override["models"]["providers"][provider]
+    assert entry["models"] == [{"id": model, "name": model}]
+    assert entry["api"] == transport
+    assert override["agents"]["defaults"]["models"] == {f"{provider}/{model}": {}}

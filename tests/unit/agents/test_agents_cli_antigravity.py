@@ -401,6 +401,48 @@ def test_agy_cli_agent_execute_flow(mock_run, mock_home, tmp_path):
     assert any(a.startswith("--gemini_dir=") for a in args)
 
 
+@mock.patch.object(pathlib.Path, "home")
+def test_agy_cli_agent_sandboxed_argv_uses_container_spellings(mock_home, tmp_path, monkeypatch):
+    """Sandboxed, argv[0] must be the image's agy, never a host path.
+
+    _resolve_binary answers with a host spelling (config.target, or the
+    ~/.local/bin fallback when the operator has agy installed), and argv
+    crosses the boundary verbatim — so without the _CONTAINER_AGY_BIN swap
+    the container execs a path that only exists on the host. Same idiom as
+    openclaw's oc swap; --gemini_dir gets the same treatment.
+    """
+    from devops_bench.agents import sandbox as sandbox_mod
+
+    mock_home.return_value = tmp_path
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=capabilities.AllCapabilities(),
+        sandbox=sandbox_mod.SandboxSpec(image="img", workspace=str(workspace)),
+    )
+    agent = agy_mod.AgyCliAgent(config)
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run_agent_cmd(cmd, **kwargs):
+        captured["argv"] = [str(a) for a in cmd]
+        _write_sample_transcript(pathlib.Path(kwargs["cwd"]))
+        return SimpleNamespace(args=list(cmd), returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(agent, "run_agent_cmd", fake_run_agent_cmd)
+
+    result = agent._execute("run task", workspace_path=workspace)
+
+    argv = captured["argv"]
+    assert argv[0] == "agy"
+    assert "/bin/agy" not in argv
+    assert f"--gemini_dir={sandbox_mod.CONTAINER_WORKSPACE}/.gemini" in argv
+    assert result.errors == []
+
+
 def _write_sample_transcript(
     cwd: pathlib.Path, *, db_turns: list[bytes] | None = None, transcript: str | None = None
 ) -> None:
