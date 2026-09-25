@@ -71,7 +71,7 @@ resource "null_resource" "calico" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml"
+      kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/v3.32.2/manifests/calico.yaml"
       kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
       kubectl wait --for=condition=Ready nodes --all --timeout=300s
     EOT

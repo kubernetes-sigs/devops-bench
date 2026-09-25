@@ -25,10 +25,11 @@ variable "kubeconfig_path" {
 
 variable "node_image" {
   type        = string
-  description = "The kind node image (v1.30 or newer)"
+  description = "The kind node image (v1.30 through v1.35)"
   # 1.30 is the floor: ValidatingAdmissionPolicy is GA from 1.30 and the
-  # pod-security backstop applies one. Same digest as tf/prebuilt/opa-remediation.
-  default = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
+  # pod-security backstop applies one. 1.35 is the ceiling: tehcyx/kind 0.11.0
+  # embeds kind v0.31.0, whose kubeadm config can't bootstrap 1.36+.
+  default = "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
 }
 
 variable "project_id" {

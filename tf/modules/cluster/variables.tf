@@ -100,8 +100,8 @@ variable "enable_iap_ssh" {
 
 variable "node_image" {
   type        = string
-  description = "The kind node image (kind only; v1.30 or newer)"
-  default     = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
+  description = "The kind node image (kind only; v1.30 through v1.35)"
+  default     = "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
 }
 
 
