@@ -47,8 +47,13 @@ from devops_bench.agents.shared.cli_capabilities import (
     build_mcp_servers,
     materialize_skills,
 )
-from devops_bench.core import SubprocessError, get_logger
-from devops_bench.core.model_providers import resolve_provider
+from devops_bench.agents.shared.vertex_env import (
+    VERTEX_PROJECT_ENVS,
+    vertex_location,
+    vertex_project,
+)
+from devops_bench.core import ConfigError, SubprocessError, get_logger
+from devops_bench.core.model_providers import resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -151,7 +156,24 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
     ``config.model`` onto ``GEMINI_MODEL``. OTLP telemetry exporters are disabled
     so they don't hang on broken endpoints. The model is never hardcoded; it
     flows from ``config.model``. A keyless backend (e.g. Vertex/ADC) writes no
-    key.
+    key. A Vertex backend additionally writes the google-genai routing vars
+    (``GOOGLE_GENAI_USE_VERTEXAI`` plus project/location), since the SDK
+    otherwise talks to the Gemini API regardless of the configured provider. The
+    location comes from the shared
+    :func:`~devops_bench.agents.shared.vertex_env.vertex_location` chain, which
+    defaults to ``global`` — the only endpoint the ``-preview`` model ids are
+    published on. The project comes from
+    :func:`~devops_bench.agents.shared.vertex_env.vertex_project`; gemini-cli
+    rejects a Vertex run without one, so a missing project fails here instead.
+
+    Vertex is also keyless: it authenticates through Application Default
+    Credentials, which exist for a host process and deliberately do not exist
+    inside the sandbox. A sandboxed Vertex run therefore additionally gets the
+    backend's mint-and-inject credential recipe
+    (:func:`~devops_bench.core.model_providers.sandbox_credential_env`) — the
+    metadata-emulator vars pointing at a host-side server serving a narrowly
+    scoped, short-lived token. An unsandboxed run does not call it at all, so
+    the flag-off path stays byte-for-byte unchanged.
 
     Args:
         config: Resolved :class:`AgentConfig` for this run.
@@ -160,7 +182,9 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
         A mapping suitable for ``core.subprocess.run``'s ``extra_env``.
 
     Raises:
-        ConfigError: If ``config.provider`` is not a known provider.
+        ConfigError: If ``config.provider`` is not a known provider, a Vertex
+            run has no project and no ``GOOGLE_API_KEY``, or a sandboxed keyless
+            run cannot be given a model credential.
     """
     # Resolve unconditionally so an unknown provider fails loud even on a keyless
     # (Vertex/ADC) run, not only when a key happens to be set.
@@ -173,6 +197,28 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
         "OTEL_LOGS_EXPORTER": "none",
         "OTEL_SDK_DISABLED": "true",
     }
+    if spec.backend == "vertex":
+        # Without these the embedded google-genai SDK defaults to the Gemini
+        # API and ignores the Vertex routing. GCP_* fallbacks match what the
+        # bastion exports (GCP_LOCATION is a zone, not a Vertex region).
+        overlay["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+        project = vertex_project()
+        if project:
+            overlay["GOOGLE_CLOUD_PROJECT"] = project
+        elif not os.environ.get("GOOGLE_API_KEY"):
+            # gemini-cli refuses a Vertex run with neither a project nor an
+            # express-mode GOOGLE_API_KEY; fail here with the variables we read.
+            raise ConfigError(
+                "a Vertex run of the Gemini CLI needs a project: set one of "
+                f"{', '.join(VERTEX_PROJECT_ENVS)} (or GOOGLE_API_KEY for Vertex "
+                "express mode)"
+            )
+        overlay["GOOGLE_CLOUD_LOCATION"] = vertex_location()
+        if config.sandbox is not None:
+            overlay.update(sandbox_credential_env(spec, project=project))
+    else:
+        # Pin off explicitly so an ambient GOOGLE_GENAI_USE_VERTEXAI=true can't reroute the run.
+        overlay["GOOGLE_GENAI_USE_VERTEXAI"] = "false"
     if config.api_key:
         for var in spec.api_key_envs:
             overlay[var] = config.api_key
@@ -204,6 +250,8 @@ class GeminiCliAgent(AgentHarness):
     ``--output-format stream-json`` event stream; no session files are read
     from disk.
     """
+
+    supports_sandbox = True
 
     def __init__(self, config: AgentConfig | None = None) -> None:
         AgentHarness.__init__(self, config)
@@ -249,12 +297,13 @@ class GeminiCliAgent(AgentHarness):
                     json.dumps(settings, indent=2), encoding="utf-8"
                 )
             try:
-                completed = run(
+                completed = self.run_agent_cmd(
                     argv,
                     extra_env=env_overlay,
                     cwd=workdir,
                     check=False,
                     timeout=self.config.timeout_sec,
+                    host_run=run,
                 )
             except SubprocessError as exc:
                 return AgentResult.errored(f"gemini subprocess error: {exc}")

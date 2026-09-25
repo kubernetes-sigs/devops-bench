@@ -41,7 +41,24 @@ from devops_bench.agents.cli.gemini_cli.agent import (
     _build_env,
     _build_settings,
 )
+from devops_bench.agents.sandbox import SandboxSpec
+from devops_bench.agents.shared.vertex_env import VERTEX_LOCATION_ENVS, VERTEX_PROJECT_ENVS
 from devops_bench.core.errors import ConfigError, SubprocessError
+from devops_bench.core.model_providers import ProviderSpec
+
+
+@pytest.fixture(autouse=True)
+def _clear_vertex_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An operator's ambient Vertex env must not decide these assertions — in
+    # particular a shell project would mask the missing-project error.
+    for name in (
+        *VERTEX_PROJECT_ENVS,
+        *VERTEX_LOCATION_ENVS,
+        "GCP_LOCATION",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _stream(*events: dict) -> str:
@@ -180,24 +197,175 @@ def test_build_env_threads_api_key_and_model_into_gemini_vars() -> None:
     assert env["X"] == "y"
 
 
-def test_build_env_vertex_key_routes_to_cloud_api_key() -> None:
+def test_build_env_vertex_key_routes_to_cloud_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     # google-vertex routes a provided key to GOOGLE_CLOUD_API_KEY (the vertex
     # transport var), not the google-genai vars.
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-a")
     env = _build_env(AgentConfig(model="gemini-2.5-pro", api_key="abc", provider="google-vertex"))
     assert env["GOOGLE_CLOUD_API_KEY"] == "abc"
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
     assert "GEMINI_API_KEY" not in env and "GOOGLE_API_KEY" not in env
 
 
-def test_build_env_keyless_writes_no_key_var() -> None:
+def test_build_env_keyless_writes_no_key_var(monkeypatch: pytest.MonkeyPatch) -> None:
     # No api_key (Vertex/ADC): no key env var is written regardless of provider.
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-a")
     env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
     assert not {"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_API_KEY"} & env.keys()
+
+
+def test_build_env_vertex_accepts_the_gcp_project_and_location_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The GCP_* spellings are what the antigravity harness and the bastion
+    # matrix export, so a host configured for one agent works for the other.
+    monkeypatch.setenv("GCP_PROJECT", "proj-a")
+    monkeypatch.setenv("GCP_VERTEX_LOCATION", "europe-west4")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-a"
+    assert env["GOOGLE_CLOUD_LOCATION"] == "europe-west4"
+
+
+def test_build_env_vertex_ignores_the_deployers_cluster_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GCP_LOCATION belongs to the deployers and holds a cluster *zone*;
+    # scripts/bastion/vm-setup.sh exports us-central1-a into the bastion
+    # profile. Routing model traffic there would hit an endpoint that does not
+    # exist, so it must not be read at all — fall through to the default.
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-a")
+    monkeypatch.setenv("GCP_LOCATION", "us-central1-a")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_LOCATION"] == "global"
+
+
+def test_build_env_vertex_prefers_google_cloud_spellings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-google")
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-gcp")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
+    monkeypatch.setenv("GCP_VERTEX_LOCATION", "europe-west1")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-google"
+    assert env["GOOGLE_CLOUD_LOCATION"] == "asia-northeast1"
+
+
+def test_build_env_vertex_reads_the_repo_wide_project_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GCP_PROJECT_ID is the project variable models/, providers/gcp.py and the
+    # claude_code harness read; it outranks the legacy GCP_PROJECT.
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-repo")
+    monkeypatch.setenv("GCP_PROJECT", "proj-legacy")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-repo"
+
+
+def test_build_env_vertex_defaults_the_location_to_global(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No location anywhere: "global", not a region — the -preview model ids
+    # this benchmark runs are only published on the global endpoint and 404
+    # from a regional one (docs/appendix/known_issues.md).
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-a")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert env["GOOGLE_CLOUD_LOCATION"] == "global"
+
+
+def test_build_env_vertex_without_a_project_fails_early() -> None:
+    # gemini-cli rejects GOOGLE_GENAI_USE_VERTEXAI=true without
+    # GOOGLE_CLOUD_PROJECT (or an express-mode GOOGLE_API_KEY), so the run
+    # could never start; fail at config time naming the variables we read.
+    with pytest.raises(ConfigError, match="GCP_PROJECT_ID"):
+        _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+
+
+def test_build_env_vertex_express_mode_needs_no_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An ambient GOOGLE_API_KEY is gemini-cli's Vertex express mode, which it
+    # accepts without a project — so must we.
+    monkeypatch.setenv("GOOGLE_API_KEY", "express-key")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert "GOOGLE_CLOUD_PROJECT" not in env
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
+
+
+def test_build_env_non_vertex_pins_the_vertex_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The overlay rides on the inherited environment, so merely omitting the
+    # routing vars cannot shield a Gemini-API run from an operator shell that
+    # exports GOOGLE_GENAI_USE_VERTEXAI=true. The switch must be pinned "false"
+    # (an overlay value beats the ambient one); project/location stay out of
+    # the overlay — without the switch the SDK does not read them for routing.
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-a")
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", api_key="abc"))
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "false"
+    assert not {"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"} & env.keys()
 
 
 def test_build_env_unknown_provider_raises_even_when_keyless() -> None:
     # Validation is unconditional — a typoed provider fails loud on a keyless run.
     with pytest.raises(ConfigError):
         _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertyx"))
+
+
+def test_build_env_unsandboxed_vertex_asks_for_no_model_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Flag off must stay byte-for-byte the old behaviour: the host process has
+    # ADC of its own, so the recipe is not consulted and no emulator is started.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-a")
+    monkeypatch.setattr(
+        gemini_mod,
+        "sandbox_credential_env",
+        lambda *a, **k: pytest.fail("sandbox_credential_env called on an unsandboxed run"),
+    )
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert not {"GCE_METADATA_HOST", "GCE_METADATA_IP", "METADATA_SERVER_DETECTION"} & env.keys()
+
+
+def test_build_env_sandboxed_vertex_injects_the_metadata_emulator_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inside the sandbox there is no ADC and the real metadata endpoint is
+    # blocked, so the backend's mint-and-inject recipe supplies the credential.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-a")
+    seen: dict[str, str | None] = {}
+
+    def fake_recipe(
+        spec: ProviderSpec, *, project: str | None = None, **kwargs: object
+    ) -> dict[str, str]:
+        seen["backend"] = spec.backend
+        seen["project"] = project
+        return {"GCE_METADATA_HOST": "host.docker.internal:41235"}
+
+    monkeypatch.setattr(gemini_mod, "sandbox_credential_env", fake_recipe)
+    cfg = AgentConfig(
+        model="gemini-2.5-pro", provider="google-vertex", sandbox=SandboxSpec(image="img")
+    )
+    env = _build_env(cfg)
+
+    assert seen == {"backend": "vertex", "project": "proj-a"}
+    assert env["GCE_METADATA_HOST"] == "host.docker.internal:41235"
+    # The recipe rides alongside the routing vars, it does not replace them.
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-a"
+
+
+def test_build_env_sandboxed_non_vertex_asks_for_no_model_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A key-based provider carries its own credential across the boundary.
+    monkeypatch.setattr(
+        gemini_mod,
+        "sandbox_credential_env",
+        lambda *a, **k: pytest.fail("sandbox_credential_env called for a key-based provider"),
+    )
+    cfg = AgentConfig(model="gemini-2.5-pro", api_key="abc", sandbox=SandboxSpec(image="img"))
+    assert _build_env(cfg)["GEMINI_API_KEY"] == "abc"
 
 
 def test_gemini_agent_registered_under_canonical_key() -> None:

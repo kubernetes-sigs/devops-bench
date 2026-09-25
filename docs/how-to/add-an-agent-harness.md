@@ -16,6 +16,8 @@ For the concepts (harness vs model, capabilities, configuration), read
 | Implement `_execute(self, prompt, workspace_path=None) -> AgentResult` | your new module |
 | Register with `@AGENTS.register("<key>")` | your new module |
 | Add the module to `_BUILTIN_AGENT_MODULES` | `devops_bench/evalharness/default.py` |
+| Route agent-owned subprocesses through `run_agent_cmd`, then set `supports_sandbox = True` | your new module |
+| Ship a sandbox image for your CLI | `docker/Dockerfile.<name>` |
 
 ## Steps
 
@@ -106,7 +108,30 @@ For a CLI agent, don't re-implement capability plumbing. Reuse the helpers in
 > and the openclaw agent exports its skills dir). Wire the path/env through in
 > your harness, or the staged MCP servers and skills won't be picked up.
 
-### 7. Select it
+### 7. Put it behind the sandbox seam
+
+A harness that shells out must also work inside the agent sandbox (see
+[Sandboxing](../components/agents.md#sandboxing)).
+
+- Run every **agent-owned** subprocess (the agent binary and anything it runs
+  during its turn) through `self.run_agent_cmd(argv, ..., host_run=run)`.
+  Unsandboxed, this is the same `run(...)` call; sandboxed, the argv runs in the
+  run's container. Host-side plumbing (`--version` probes, config lookups,
+  reading artifacts back from the workspace) stays on `run(...)`.
+- Set `supports_sandbox = True` once every agent-owned call goes through the
+  seam. Until then, `run()` refuses to start the harness while
+  `BENCH_AGENT_SANDBOX` is set.
+- Translate host paths that cross the boundary, in argv or env, with
+  `sandbox.container_path(self.config.sandbox.workspace, path)`. Keep the host
+  path for reading results back; the workspace is a bind mount. See
+  antigravity's `--gemini_dir` and openclaw's `OPENCLAW_STATE_DIR`.
+- Pass the environment explicitly as `extra_env`; the container does not
+  inherit `os.environ`, and `HOME`, `KUBECONFIG` and `PATH` never cross.
+- Ship `docker/Dockerfile.<name>` with kubectl, helm, jq, git and ripgrep, and
+  your CLI pinned and installed under the binary name the harness invokes (the
+  image resolves `argv[0]`: npm installs `openclaw`, the harness invokes `oc`).
+
+### 8. Select it
 
 Pick your harness with `BENCH_AGENT_TYPE=<key>` (or `--agent-type <key>`). No
 other code changes are required — the registry resolves it at run time.

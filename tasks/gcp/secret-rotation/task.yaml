@@ -19,6 +19,9 @@ check_groups:
   shared-config-intact:
     title: "Secret store intact"
     description: "The cluster-scoped gcp-store ClusterSecretStore still exists."
+# Runs outside the agent sandbox: the task rotates a Secret Manager version
+# through Application Default Credentials, which the sandbox withholds.
+requires_unsandboxed: true
 # namespace is pinned here because {{NAMESPACE}} resolves from env NAMESPACE
 # before this map, while the tofu variable only ever comes from this map.
 # Leave NAMESPACE unset, or set it to "secret-rotation".

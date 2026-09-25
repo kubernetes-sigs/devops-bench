@@ -60,6 +60,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from devops_bench.agents import sandbox
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.cli.openclaw.parsing import (
     _pick_session_key,
@@ -74,9 +75,10 @@ from devops_bench.agents.shared.cli_capabilities import (
     build_mcp_servers,
     materialize_skills,
 )
+from devops_bench.agents.shared.vertex_env import vertex_location
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.errors import ConfigError
-from devops_bench.core.model_providers import resolve_provider
+from devops_bench.core.model_providers import resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -127,6 +129,9 @@ _log = get_logger("agents.cli.openclaw.agent")
 # Per-run layout under the temp working dir. ``state`` is openclaw's state root
 # (sessions + the managed skills tree); ``openclaw.json`` is the isolated config
 # carrying ``mcp.servers``.
+# The image ships its own oc on PATH; the host binary path is meaningless
+# inside the container.
+_CONTAINER_OC_BIN = "oc"
 _OPENCLAW_STATE_DIRNAME = "state"
 _OPENCLAW_SKILLS_DIRNAME = "skills"
 _OPENCLAW_CONFIG_FILE = "openclaw.json"
@@ -134,7 +139,23 @@ _OPENCLAW_CONFIG_FILE = "openclaw.json"
 # Bare model ids (the part after ``provider/``) absent from openclaw's built-in
 # catalog; the harness registers these per-run (see :func:`_build_model_override`).
 # TODO(deferred): supported-model-name maintenance is tracked separately (#147).
-_CATALOG_OVERRIDES: frozenset[str] = frozenset({"gemini-3.5-flash"})
+_CATALOG_OVERRIDES: frozenset[str] = frozenset(
+    {
+        "gemini-3.5-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "claude-fable-5-1",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-opus-5",
+    }
+)
+
+# Placeholder pasted where oc wants an API key on a keyless Vertex run. It is
+# never sent as a credential: the transport resolves the real one through ADC
+# (the metadata emulator, sandboxed). Its only job is to satisfy oc's auth
+# gate -- see :func:`_vertex_auth_profile_provider`.
+_VERTEX_CREDENTIALS_MARKER = "gcp-vertex-credentials"
 
 # Transport each per-run provider entry must pin: such an entry *replaces* oc's
 # built-in provider rather than merging, so without ``api`` oc falls back to the
@@ -148,7 +169,67 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
         "api": "google-vertex",
         "baseUrl": "https://{location}-aiplatform.googleapis.com",
     },
+    "anthropic-vertex": {
+        "api": "anthropic-messages",
+        "baseUrl": "https://aiplatform.googleapis.com",
+        "apiKey": _VERTEX_CREDENTIALS_MARKER,
+    },
 }
+# Per-run layout of the node-fetch->native-fetch ESM loader shim (see
+# :func:`_write_node_fetch_shim`), written under the run's own workdir so it
+# is visible inside the sandboxed container at ``/workspace/node-fetch-shim``.
+_NODE_FETCH_SHIM_DIRNAME = "node-fetch-shim"
+
+_NODE_FETCH_REGISTER_MJS = (
+    "import { register } from 'node:module';\nregister('./hooks.mjs', import.meta.url);\n"
+)
+
+_NODE_FETCH_HOOKS_MJS = (
+    "export async function resolve(specifier, context, next) {\n"
+    "  if (specifier === 'node-fetch') {\n"
+    "    return { url: new URL('./fetch.mjs', import.meta.url).href, shortCircuit: true };\n"
+    "  }\n"
+    "  return next(specifier, context);\n"
+    "}\n"
+)
+
+_NODE_FETCH_FETCH_MJS = (
+    "const f = (...a) => globalThis.fetch(...a);\n"
+    "export default f;\n"
+    "export const Headers = globalThis.Headers;\n"
+    "export const Request = globalThis.Request;\n"
+    "export const Response = globalThis.Response;\n"
+)
+
+
+def _write_node_fetch_shim(workdir: Path) -> None:
+    """Write the node-fetch->native-fetch ESM loader shim into ``workdir``.
+
+    Works around a gaxios (7.3.1, google-auth-library's HTTP layer) bug inside
+    the agent-sandbox image: with no ``window`` global, gaxios does
+    ``(await import('node-fetch')).default`` to reach the compute-SA metadata
+    server, and that dynamic import throws ("Cannot convert undefined or null
+    to object") because node-fetch is not installed in the image. A Node
+    module-customization hook (registered via ``NODE_OPTIONS``, see the
+    sandboxed branch of :meth:`OpenClawAgent._execute`) intercepts only the
+    bare ``node-fetch`` specifier and resolves it to a tiny shim built on
+    Node's native ``fetch``; every other import passes through unchanged.
+
+    Files are written world-readable (0o644, dir 0o755): the container's own
+    ``--user`` may not match whichever uid this (possibly privileged) process
+    runs as, so permission bits do the work instead of a chown.
+    """
+    shim_dir = workdir / _NODE_FETCH_SHIM_DIRNAME
+    shim_dir.mkdir(exist_ok=True)
+    shim_dir.chmod(0o755)
+    for name, content in (
+        ("register.mjs", _NODE_FETCH_REGISTER_MJS),
+        ("hooks.mjs", _NODE_FETCH_HOOKS_MJS),
+        ("fetch.mjs", _NODE_FETCH_FETCH_MJS),
+    ):
+        path = shim_dir / name
+        path.write_text(content)
+        path.chmod(0o644)
 
 
 def _oc_model_id(config: AgentConfig) -> str:
@@ -302,12 +383,63 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
     # Resolve unconditionally so an unknown provider fails loud even on a keyless
     # (Vertex/ADC) run, not only when a key happens to be set.
     spec = resolve_provider(config.provider)
-    overlay: dict[str, str] = {}
+    overlay: dict[str, str] = {
+        var: os.environ[var] for var in spec.api_key_envs if os.environ.get(var)
+    }
     if config.api_key:
         for var in spec.api_key_envs:
             overlay[var] = config.api_key
     if config.extra_env:
         overlay.update(config.extra_env)
+    return overlay
+
+
+def _sandbox_provider_env(config: AgentConfig, workdir: Path) -> dict[str, str]:
+    """Forward explicit provider routing and enable metadata auth in the image.
+
+    Only the sandboxed branch of :meth:`OpenClawAgent._execute` calls this, so
+    there is no ``config.sandbox`` guard around the credential recipe below —
+    being called at all already means the run is sandboxed. (The gemini
+    harness needs that guard because its ``_build_env`` serves both paths.)
+    """
+    overlay = {
+        name: os.environ[name]
+        for name in (
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GCP_PROJECT_ID",
+            "GCP_VERTEX_LOCATION",
+            "GOOGLE_CLOUD_API_KEY",
+        )
+        if name in os.environ
+    }
+    _write_node_fetch_shim(workdir)
+    overlay["NODE_OPTIONS"] = "--import=/workspace/node-fetch-shim/register.mjs"
+    if _oc_provider_or_none(config) == "anthropic-vertex":
+        overlay["ANTHROPIC_VERTEX_USE_GCP_METADATA"] = "1"
+        overlay.setdefault("GOOGLE_CLOUD_API_KEY", _VERTEX_CREDENTIALS_MARKER)
+    spec = resolve_provider(config.provider)
+    if spec.backend == "vertex":
+        # oc aborts with "Vertex AI requires a location" when this is unset, and
+        # forwarding alone does not cover the common case where the operator set
+        # neither spelling. Resolve it through the shared chain the other Vertex
+        # harnesses use, which ends at "global" -- the only endpoint several of
+        # the published model ids answer on. Assigning unconditionally is not a
+        # clobber: the chain reads GOOGLE_CLOUD_LOCATION first, so a forwarded
+        # value resolves back to itself.
+        overlay["GOOGLE_CLOUD_LOCATION"] = vertex_location()
+        if not config.api_key:
+            # The metadata auth prepared above still needs a server to answer
+            # it: the sandbox blocks the real metadata endpoint, so a keyless
+            # Vertex run points the SDKs at the host-side emulator credential
+            # instead. A run that *did* provide a key already carries its
+            # credential across the boundary (a google-vertex key rides
+            # GOOGLE_CLOUD_API_KEY via _build_env) and must keep working
+            # without BENCH_VERTEX_SANDBOX_SA. Same project spellings as the
+            # forwarding block above.
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT_ID")
+            overlay.update(sandbox_credential_env(spec, project=project))
     return overlay
 
 
@@ -325,6 +457,58 @@ def _oc_model_flag(config: AgentConfig) -> str:
     if not model_id:
         return ""
     return f"--model {shlex.quote(model_id)} "
+
+
+def _oc_provider_or_none(config: AgentConfig) -> str | None:
+    """Resolve ``config.provider`` to its ``oc`` provider id, or ``None`` if unknown.
+
+    Used by the sandboxed anthropic-vertex env passthrough in
+    :func:`_sandbox_provider_env`, which keys off the plugin-specific id rather
+    than the ``vertex`` backend the whole family shares.
+    """
+    try:
+        return resolve_provider(config.provider).oc_provider
+    except ConfigError:
+        return None
+
+
+def _vertex_auth_profile_provider(config: AgentConfig) -> str | None:
+    """Return the oc provider id needing a headless auth profile, else ``None``.
+
+    Confirmed live against openclaw 2026.9.1-beta.1 + anthropic-vertex-provider
+    2026.9.1-beta.1 (the first pairing where the plugin is correctly discovered
+    as a stock plugin -- see the Dockerfile comment): even with valid ADC
+    credentials on disk and the ``gcp-vertex-credentials`` marker pinned on
+    ``models.providers.anthropic-vertex.apiKey`` (see :data:`_PROVIDER_TRANSPORT`),
+    a bare run still aborts with ``ProviderAuthError: No API key found for
+    provider "anthropic-vertex"``. This version introduced a per-agent SQLite
+    auth-profile store that gates model auth *before* the plugin's own
+    ADC-detecting ``resolveSyntheticAuth`` hook is consulted, so the marker in
+    config is no longer sufficient on its own -- an explicit profile entry must
+    exist in that store too.
+
+    That gate is **not plugin-specific**: a keyless ``google-vertex`` run aborts
+    the same way (``No API key found for provider "google-vertex"``, confirmed
+    live on 2026-09-10 against the same version), because the store is consulted
+    for every provider before any ADC resolution happens. So the profile is
+    seeded for any Vertex-backend provider on a keyless run, not just the
+    Anthropic one. Seeding it does not make the run keyed: the pasted value is
+    :data:`_VERTEX_CREDENTIALS_MARKER`, and the turn only succeeds because the
+    transport then authenticates through ADC -- a real (wrong) key would 401.
+
+    ``oc models auth paste-api-key --provider <id>`` registers that entry
+    non-interactively (it reads the key from stdin, no TTY required), so it is
+    safe to run unattended before every keyless Vertex turn (see
+    :func:`_build_local_command`). A run carrying an explicit API key needs no
+    profile and gets none.
+    """
+    try:
+        spec = resolve_provider(config.provider)
+    except ConfigError:
+        return None
+    if spec.backend != "vertex" or config.api_key:
+        return None
+    return spec.oc_provider
 
 
 def _prepend_rules(rules_text: str, prompt: str) -> str:
@@ -367,6 +551,14 @@ def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_b
         ``core.subprocess.run``.
     """
     quoted_oc = shlex.quote(oc_bin)
+    auth_setup = ""
+    auth_provider = _vertex_auth_profile_provider(config)
+    if auth_provider:
+        auth_setup = (
+            f"printf '%s\\n' {shlex.quote(_VERTEX_CREDENTIALS_MARKER)} | "
+            f"{quoted_oc} models auth paste-api-key "
+            f"--provider {shlex.quote(auth_provider)} --agent {shlex.quote(agent_name)}; "
+        )
     extra_flags_str = (
         " ".join(shlex.quote(f) for f in config.extra_flags) + " " if config.extra_flags else ""
     )
@@ -375,7 +567,7 @@ def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_b
         # inherited NVM_DIR (custom install path) wins over the default.
         'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; '
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
-        f"{quoted_oc} --log-level debug agent --local "
+        f"{auth_setup}{quoted_oc} --log-level debug agent --local "
         f"--agent {shlex.quote(agent_name)} {_oc_model_flag(config)}"
         f"{extra_flags_str}-m {shlex.quote(prompt)}"
     )
@@ -404,6 +596,14 @@ class OpenClawAgent(AgentHarness):
             built-in default agent, which exists in every config — including the
             per-run isolated one written for MCP).
     """
+
+    # The agent turn goes through run_agent_cmd, so it is contained. The
+    # post-run ``oc sessions`` / ``export-trajectory`` calls stay on the host
+    # by design: session state lives in ``<workspace>/state``, which is the
+    # bind mount itself, so the host reads exactly the bytes the container
+    # wrote — with the host spelling of the path, and without keeping a
+    # container alive past the agent's turn just to read a directory.
+    supports_sandbox = True
 
     def __init__(self, config: AgentConfig | None = None, *, agent_name: str = "main") -> None:
         AgentHarness.__init__(self, config)
@@ -454,7 +654,29 @@ class OpenClawAgent(AgentHarness):
                 config_path.write_text(json.dumps(config_payload, indent=2))
                 env_overlay["OPENCLAW_CONFIG_PATH"] = str(config_path)
 
-            command = _build_local_command(self.config, final_prompt, self.agent_name, oc_bin)
+            # Two overlays, because the agent turn and the post-run extraction
+            # run on opposite sides of the boundary. The agent needs the
+            # container spelling of every path that crosses in its env; the
+            # extraction runs on the host afterwards and needs the host
+            # spelling. They read the same bytes either way: the state dir
+            # lives under the workspace, which IS the bind mount, so whatever
+            # the agent writes inside the container is on the host when it
+            # exits. Unsandboxed the two overlays are identical.
+            agent_env = dict(env_overlay)
+            agent_oc_bin = oc_bin
+            spec = self.config.sandbox
+            if spec is not None and spec.workspace is not None:
+                agent_env = {**_sandbox_provider_env(self.config, workdir), **agent_env}
+                agent_env["OPENCLAW_STATE_DIR"] = sandbox.container_path(spec.workspace, state_dir)
+                if "OPENCLAW_CONFIG_PATH" in agent_env:
+                    agent_env["OPENCLAW_CONFIG_PATH"] = sandbox.container_path(
+                        spec.workspace, agent_env["OPENCLAW_CONFIG_PATH"]
+                    )
+                # The host binary path means nothing inside the image, which
+                # ships its own oc on PATH.
+                agent_oc_bin = _CONTAINER_OC_BIN
+
+            command = _build_local_command(self.config, final_prompt, self.agent_name, agent_oc_bin)
 
             # TODO(follow-up): on timeout this SIGKILLs only the bash child,
             # orphaning the oc/gcloud/kubectl/MCP process tree (which keeps
@@ -464,12 +686,13 @@ class OpenClawAgent(AgentHarness):
             try:
                 # bash -c (as argv, never shell=True) so nvm.sh can be sourced;
                 # every value interpolated into `command` is shlex.quoted.
-                completed = run(
+                completed = self.run_agent_cmd(
                     ["/bin/bash", "-c", command],
                     cwd=str(workdir),
-                    extra_env=env_overlay,
+                    extra_env=agent_env,
                     check=False,
                     timeout=self.config.timeout_sec,
+                    host_run=run,
                 )
             except SubprocessError:
                 # With check=False the only SubprocessError here is a timeout.
