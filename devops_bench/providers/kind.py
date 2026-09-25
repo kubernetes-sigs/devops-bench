@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from devops_bench.core import ClusterInfo, get_env
+from devops_bench.core import ClusterInfo, NetworkPlan, get_env
 from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
 
 __all__ = ["KindProvider"]
@@ -62,6 +62,19 @@ class KindProvider(Provider):
                 "project": project,
                 "kubeconfig_path": variables.get("kubeconfig_path"),
             }
+        )
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Join KinD's ``kind`` Docker network and target the control-plane node.
+
+        KinD's kubeconfig server is loopback, meaningless inside a container.
+        The apiserver certificate already covers the control-plane node name,
+        so TLS verifies without a ``tls-server-name`` override.
+        """
+        return NetworkPlan(
+            docker_network="kind",
+            rewrite_server=f"https://{cluster_info.name}-control-plane:6443",
+            kubectl_context=f"kind-{cluster_info.name}",
         )
 
     def cleanup(

@@ -1,0 +1,77 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sandbox image for the Gemini CLI agent harness (BENCH_SANDBOX_IMAGE).
+#
+# One image per harness: a CLI version bump here must not invalidate the A/B
+# baselines of the other agents under test, so the images are deliberately not
+# a shared multi-stage build with per-agent targets.
+#
+# Contents are the tools a task may legitimately need inside the boundary. The
+# agent's cluster credential, workspace, and fixtures are mounted at run time
+# by devops_bench/agents/sandbox.py — never baked in here.
+
+# Digest-pinned (multi-arch manifest list, amd64 + arm64) so the floating tag
+# cannot move the base under a rebuild.
+FROM node:24-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+
+# The base digest and these ARGs pin what a Dockerfile can pin; APT contents
+# may still drift between rebuilds (Debian archives move), so the digest of
+# the *built* image — not this file — is the identity of what an A/B arm was
+# scored with. Bump the pins deliberately and re-baseline.
+ARG KUBECTL_VERSION=v1.35.9
+ARG HELM_VERSION=v3.22.0
+ARG GEMINI_CLI_VERSION=0.61.0
+
+# Checksums for the raw-download binaries nothing else (apt/npm) vouches for.
+# Pinned here, not fetched at build time — a checksum from the artifact's own
+# channel verifies nothing. Bumping a version without repinning fails the build.
+ARG KUBECTL_SHA256_AMD64=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
+ARG KUBECTL_SHA256_ARM64=39c98bca82875d9a9ddfb6f3c5ab17c3f78ea0801230683e538a67d5c053308d
+ARG HELM_SHA256_AMD64=1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
+ARG HELM_SHA256_ARM64=f14e804dfee240f55525b667488fe9adca349e63e00c9af634c0beb1421ac310
+
+# Modern Git comes from backports for reftable support; ripgrep and jq are
+# what the agent's own search and JSON handling reach for.
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        jq \
+        ripgrep \
+    && apt-get install -y -t bookworm-backports --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# kubectl and helm: resolve the arch from the build platform rather than
+# hardcoding amd64, so the image builds on an arm64 laptop as well as the
+# x86 bastion. Checksum-verified per arch; an arch with no pin fails the build.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) kubectl_sha="${KUBECTL_SHA256_AMD64}"; helm_sha="${HELM_SHA256_AMD64}" ;; \
+        arm64) kubectl_sha="${KUBECTL_SHA256_ARM64}"; helm_sha="${HELM_SHA256_ARM64}" ;; \
+        *) echo "no checksum pinned for ${arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+    && echo "${kubectl_sha}  kubectl" | sha256sum -c - \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl \
+    && curl -fsSLo helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" \
+    && echo "${helm_sha}  helm.tar.gz" | sha256sum -c - \
+    && tar -xzf helm.tar.gz -C /tmp \
+    && install -o root -g root -m 0755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm \
+    && rm -rf helm.tar.gz "/tmp/linux-${arch}"
+
+RUN npm install -g "@google/gemini-cli@${GEMINI_CLI_VERSION}"
+
+WORKDIR /workspace
