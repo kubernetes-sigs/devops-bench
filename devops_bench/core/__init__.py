@@ -31,6 +31,7 @@ from devops_bench.core.errors import (
     MissingDependencyError,
     NotRegisteredError,
     RegistryError,
+    SandboxError,
     SubprocessError,
 )
 from devops_bench.core.logging import configure_logging, get_logger
@@ -60,5 +61,6 @@ __all__ = [
     "InvalidKeyError",
     "NotRegisteredError",
     "MissingDependencyError",
+    "SandboxError",
     "SubprocessError",
 ]
