@@ -45,6 +45,7 @@ from devops_bench.agents.cli.openclaw.agent import (
     _oc_model_id,
 )
 from devops_bench.agents.cli.openclaw.parsing import _pick_session_key, _strip_ansi
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError
 from devops_bench.core.errors import ConfigError, SubprocessError
 
 
@@ -909,3 +910,54 @@ def test_execute_cleans_up_temp_working_dir_after_run(
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert captured["cwd"] is not None
     assert not os.path.exists(captured["cwd"])
+
+
+def test_execute_fails_the_run_when_a_granted_mcp_server_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unreachable MCP server aborts the run before ``oc`` is invoked."""
+    invoked: list[Any] = []
+
+    def fake_bash(command: str, **kwargs: Any) -> SimpleNamespace:
+        invoked.append(command)
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    def fake_preflight(*_args: Any, **_kwargs: Any) -> dict:
+        raise McpUnreachableError("MCP server 'gke' is unreachable: could not launch server")
+
+    _install_oc_run(monkeypatch, fake_bash)
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
+
+    assert invoked == [], "oc must not run once preflight has failed"
+    assert result.errors == [
+        "MCP preflight failed: MCP server 'gke' is unreachable: could not launch server"
+    ]
+
+
+def test_execute_prepends_nvm_node_to_path_for_mcp_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``preflight_mcp`` receives ``PATH`` with the nvm node bin dir prepended."""
+    nvm_bin = tmp_path / ".nvm" / "versions" / "node" / "v22.1.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    monkeypatch.setenv("NVM_DIR", str(tmp_path / ".nvm"))
+    monkeypatch.setattr(oc_mod.shutil, "which", lambda _cmd: None)
+    captured: dict = {}
+
+    def fake_preflight(_bindings: Any, *, base_env: Any = None, **_kw: Any) -> dict:
+        captured["base_env"] = dict(base_env or {})
+        return {}
+
+    def fake_bash(_command: str, **_kwargs: Any) -> SimpleNamespace:
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    _install_oc_run(monkeypatch, fake_bash, _empty_sessions_run)
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gh", command=("npx", "srv")),))
+
+    OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
+
+    assert captured["base_env"]["PATH"].split(os.pathsep)[0] == str(nvm_bin)

@@ -37,6 +37,12 @@ class McpBinding:
         command: argv-style command launching the MCP server, or ``()`` when
             the agent runs MCP in-process. The API agent feeds this to
             :class:`~devops_bench.agents.api.mcp.MCPClient`.
+        env: Environment ``(name, value)`` pairs for the server. Values may
+            carry ``${VAR}`` references resolved from the runner environment
+            (in-memory for the probe and API agent, or by the CLI at launch so
+            credentials are never written into workspace artifacts).
+        cwd: Working directory the server is launched in (``""`` inherits the
+            agent's workspace).
         tools: Tool names this server exposes to the agent. The Gemini CLI
             passes these via ``--allowed-tools``; the API agent advertises
             whatever the live MCP server lists (this field acts as
@@ -45,6 +51,8 @@ class McpBinding:
 
     name: str = ""
     command: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    cwd: str = ""
     tools: tuple[str, ...] = ()
 
 

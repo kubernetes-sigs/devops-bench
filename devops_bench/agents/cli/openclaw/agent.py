@@ -74,6 +74,7 @@ from devops_bench.agents.shared.cli_capabilities import (
     build_mcp_servers,
     materialize_skills,
 )
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError, preflight_mcp
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.errors import ConfigError
 from devops_bench.core.model_providers import resolve_provider
@@ -99,13 +100,13 @@ def _node_version_key(bin_path: str) -> tuple[int, ...]:
 def _ensure_node_on_path(env_overlay: dict[str, str]) -> dict[str, str]:
     """Return ``env_overlay`` with the nvm Node bin dir prepended to ``PATH``.
 
-    The agent *turn* runs ``oc`` through a bash command that sources nvm, but the
-    ``oc sessions`` / ``export-trajectory`` extraction calls run ``oc`` as a direct
-    argv subprocess (``run()`` never uses a shell). On an nvm-managed host Node is
-    not on the inherited ``PATH``, so those calls fail with
-    ``exit 127: /usr/bin/env: 'node': No such file or directory`` and the
-    trajectory comes back **silently empty** (deflating every tool/trajectory
-    score). Prepend the nvm Node bin dir so the direct subprocess finds Node too.
+    The agent *turn* runs ``oc`` through a bash command that sources nvm, but
+    direct subprocesses — the MCP reachability probe (``preflight_mcp``) and the
+    ``oc sessions`` / ``export-trajectory`` extraction calls — spawn without a
+    shell. On an nvm-managed host Node/npx are not on the inherited ``PATH``, so
+    those calls fail with ``FileNotFoundError`` or ``exit 127: /usr/bin/env:
+    'node': No such file or directory``. Prepend the nvm Node bin dir so every
+    direct subprocess finds Node too.
 
     No-op when Node is already discoverable on ``PATH`` or nvm is absent.
     """
@@ -442,10 +443,19 @@ class OpenClawAgent(AgentHarness):
         with agent_workdir(workspace_path, prefix="oc-run-") as workdir:
             state_dir = workdir / _OPENCLAW_STATE_DIRNAME
             state_dir.mkdir(parents=True, exist_ok=True)
+            env_overlay = _build_env(self.config)
+
+            try:
+                preflight_mcp(
+                    caps.mcp_servers,
+                    base_env={**os.environ, **_ensure_node_on_path(env_overlay)},
+                    cwd=workdir,
+                )
+            except McpUnreachableError as exc:
+                return AgentResult.errored(f"MCP preflight failed: {exc}")
 
             materialize_skills(state_dir / _OPENCLAW_SKILLS_DIRNAME, caps.skills.paths)
 
-            env_overlay = _build_env(self.config)
             env_overlay["OPENCLAW_STATE_DIR"] = str(state_dir)
 
             config_payload = _build_openclaw_config(self.config, caps.mcp_servers)

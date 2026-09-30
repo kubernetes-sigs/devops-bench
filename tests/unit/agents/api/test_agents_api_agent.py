@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -582,7 +583,7 @@ def test_execute_folds_assistant_tool_pairs_into_canonical_trajectory(
     mcp_advertised = [SimpleNamespace(name="do_thing", description="d", inputSchema=None)]
     mcp = _FakeMCPClient(tools=mcp_advertised)
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path, **_kw: mcp)
 
     result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("ping")
 
@@ -632,7 +633,7 @@ def test_execute_dispatch_error_lands_in_errors_and_continues(
     )
     mcp = _ExplodingMCP(tools=[SimpleNamespace(name="boom", description="d", inputSchema=None)])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path, **_kw: mcp)
 
     result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("ping")
 
@@ -660,7 +661,7 @@ def test_execute_marks_mcp_iserror_result_as_error(monkeypatch: pytest.MonkeyPat
     fake = _FakeLLMClient([_Turn(text="trying", calls=fc), _Turn(text="giving up")])
     mcp = _IsErrorMCP(tools=[SimpleNamespace(name="get_pod", description="d", inputSchema=None)])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path, **_kw: mcp)
 
     result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("ping")
 
@@ -776,7 +777,7 @@ def test_execute_lets_value_error_reach_base_safety_net(monkeypatch: pytest.Monk
     """
 
     class _BoomMCP:
-        def __init__(self, _path: str) -> None: ...
+        def __init__(self, _path: str, **_kw: Any) -> None: ...
 
         async def __aenter__(self) -> _BoomMCP:
             raise ValueError("bad provider argument")
@@ -842,24 +843,189 @@ def test_execute_honors_max_turns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.output == ""
 
 
-def test_execute_warns_when_extra_mcp_servers_dropped(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def _per_command_mcp(
+    by_command: dict[str, _FakeMCPClient],
+) -> Callable[..., _FakeMCPClient]:
+    """Build an ``MCPClient`` replacement handing each command its own client."""
+
+    def _factory(command: str, **_kw: Any) -> _FakeMCPClient:
+        assert command in by_command, f"unexpected server launch: {command!r}"
+        return by_command[command]
+
+    return _factory
+
+
+def test_execute_merges_tools_from_every_granted_server(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the first MCP binding is honored (documented aggregate behavior);
-    dropping servers 2..N must at least be visible in the logs."""
+    """Every launchable binding is opened and its tools advertised together."""
     fake = _FakeLLMClient([_Turn(text="ok")])
-    mcp = _FakeMCPClient(tools=[])
+    first = _FakeMCPClient(tools=[SimpleNamespace(name="alpha")])
+    second = _FakeMCPClient(tools=[SimpleNamespace(name="beta")])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+    monkeypatch.setattr(
+        agent_mod,
+        "MCPClient",
+        _per_command_mcp({"server-a": first, "server-b": second}),
+    )
     caps = AllCapabilities(
         mcp_servers=(
             McpBinding(name="one", command=("server-a",)),
             McpBinding(name="two", command=("server-b",)),
         ),
     )
-    with caplog.at_level("WARNING", logger="devops_bench.agents.api.agent"):
-        ApiAgent(AgentConfig(capabilities=caps)).run("p")
-    assert any("only the first MCP binding" in r.message for r in caplog.records)
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert not result.has_errors()
+    assert first.entered and second.entered
+    assert first.exited and second.exited
+    assert [getattr(t, "name", "") for t in fake.format_tools_calls[0]] == ["alpha", "beta"]
+
+
+def test_execute_routes_each_call_to_the_server_that_advertised_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool call reaches the session that listed the name, not the first one."""
+    fake = _FakeLLMClient(
+        [
+            _Turn(text="", calls=[{"name": "beta", "args": {}, "id": "c1"}]),
+            _Turn(text="done"),
+        ]
+    )
+    first = _FakeMCPClient(tools=[SimpleNamespace(name="alpha")])
+    second = _FakeMCPClient(tools=[SimpleNamespace(name="beta")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(
+        agent_mod,
+        "MCPClient",
+        _per_command_mcp({"server-a": first, "server-b": second}),
+    )
+    caps = AllCapabilities(
+        mcp_servers=(
+            McpBinding(name="one", command=("server-a",)),
+            McpBinding(name="two", command=("server-b",)),
+        ),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert not result.has_errors()
+    assert first.calls == []
+    assert second.calls == [("beta", {})]
+
+
+def test_execute_fails_when_two_servers_advertise_the_same_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate tool name across distinct servers fails the run."""
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    first = _FakeMCPClient(tools=[SimpleNamespace(name="shared")])
+    second = _FakeMCPClient(tools=[SimpleNamespace(name="shared")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(
+        agent_mod,
+        "MCPClient",
+        _per_command_mcp({"server-a": first, "server-b": second}),
+    )
+    caps = AllCapabilities(
+        mcp_servers=(
+            McpBinding(name="one", command=("server-a",)),
+            McpBinding(name="two", command=("server-b",)),
+        ),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert result.has_errors()
+    assert "MCP tool name conflict" in result.errors[0]
+    assert "'one' and 'two'" in result.errors[0]
+    assert "'shared'" in result.errors[0]
+    assert first.exited and second.exited
+    assert fake.calls == []
+
+
+def test_execute_deduplicates_repeated_tool_from_same_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single server listing the same tool name twice is deduplicated without error."""
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    mcp = _FakeMCPClient(tools=[SimpleNamespace(name="dup"), SimpleNamespace(name="dup")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _per_command_mcp({"server-a": mcp}))
+    caps = AllCapabilities(
+        mcp_servers=(McpBinding(name="one", command=("server-a",)),),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert not result.has_errors()
+    assert [getattr(t, "name", "") for t in fake.format_tools_calls[0]] == ["dup"]
+
+
+def test_execute_fails_when_a_skill_and_a_server_share_a_tool_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A skill name colliding with a granted server's tool fails the run."""
+    skill_dir = tmp_path / "skills"
+    (skill_dir / "demo").mkdir(parents=True)
+    (skill_dir / "demo" / "SKILL.md").write_text('---\nname: "demo"\ndescription: x\n---\nbody\n')
+
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    mcp = _FakeMCPClient(tools=[SimpleNamespace(name="skill_demo")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path, **_kw: mcp)
+
+    caps = AllCapabilities(
+        mcp_servers=(McpBinding(name="one", command=("server-a",)),),
+        skills=SkillBinding(paths=(str(skill_dir),)),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+
+    assert result.has_errors()
+    assert "MCP tool name conflict" in result.errors[0]
+    assert "skill_demo" in result.errors[0]
+    assert mcp.exited
+    assert fake.calls == []
+
+
+def test_execute_tears_down_open_sessions_when_a_later_server_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server N failing to start must not orphan the N-1 already running."""
+
+    class _FailingMCP(_FakeMCPClient):
+        async def __aenter__(self) -> _FakeMCPClient:
+            raise RuntimeError("connect refused")
+
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    first = _FakeMCPClient(tools=[])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(
+        agent_mod,
+        "MCPClient",
+        _per_command_mcp({"server-a": first, "server-b": _FailingMCP()}),
+    )
+    caps = AllCapabilities(
+        mcp_servers=(
+            McpBinding(name="one", command=("server-a",)),
+            McpBinding(name="two", command=("server-b",)),
+        ),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert result.has_errors()
+    assert first.exited
+
+
+def test_execute_allows_hosted_bindings_beside_launchable_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Command-less bindings are skipped while launchable bindings are opened."""
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    mcp = _FakeMCPClient(tools=[])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _per_command_mcp({"server-b": mcp}))
+    caps = AllCapabilities(
+        mcp_servers=(
+            McpBinding(name="hosted", command=()),
+            McpBinding(name="spawned", command=("server-b",)),
+        ),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert not result.has_errors()
+    assert result.output == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -1045,7 +1211,7 @@ def test_execute_runs_with_mcp_only_no_skills(monkeypatch: pytest.MonkeyPatch) -
     mcp_tools = [SimpleNamespace(name="do_thing", description="d", inputSchema=None)]
     mcp = _FakeMCPClient(tools=mcp_tools)
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path, **_kw: mcp)
 
     result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("p")
     assert result.errors == []
@@ -1067,7 +1233,7 @@ def test_execute_runs_with_both_mcp_and_skills(
         tools=[SimpleNamespace(name="do_thing", description="d", inputSchema=None)]
     )
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path, **_kw: mcp)
 
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="t", command=("server",)),),
@@ -1085,7 +1251,7 @@ def test_execute_runs_with_neither_mcp_nor_skills(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
     # If MCPClient is ever entered the test would import mcp; replace with a sentinel.
     monkeypatch.setattr(
-        agent_mod, "MCPClient", lambda _path: pytest.fail("MCPClient must not be used")
+        agent_mod, "MCPClient", lambda _path, **_kw: pytest.fail("MCPClient must not be used")
     )
     result = ApiAgent(AgentConfig()).run("p")
     assert result.output == "bare"
@@ -1130,7 +1296,7 @@ def test_execute_skips_mcp_when_binding_has_no_command(monkeypatch: pytest.Monke
     fake = _FakeLLMClient([_Turn(text="ok")])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
     monkeypatch.setattr(
-        agent_mod, "MCPClient", lambda _path: pytest.fail("MCPClient must not be used")
+        agent_mod, "MCPClient", lambda _path, **_kw: pytest.fail("MCPClient must not be used")
     )
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="cli-shape", command=(), tools=("x",)),),
@@ -1155,7 +1321,7 @@ def test_execute_preserves_spaced_command_token_through_shlex_roundtrip(
     captured: dict = {}
 
     class _RecordingMCP(_FakeMCPClient):
-        def __init__(self, path: str) -> None:
+        def __init__(self, path: str, **_kw: Any) -> None:
             super().__init__(tools=[])
             captured["path"] = path
 
@@ -1173,3 +1339,59 @@ def test_execute_preserves_spaced_command_token_through_shlex_roundtrip(
     # path the agent handed it must recover the original tuple element-for-
     # element, including the spaced first token.
     assert tuple(shlex.split(captured["path"])) == original
+
+
+def _recording_mcp(captured: dict) -> type:
+    """Return an ``MCPClient`` stand-in recording the kwargs it was built with."""
+
+    class _Recorder(_FakeMCPClient):
+        def __init__(self, path: str, **kw: Any) -> None:
+            super().__init__(tools=[])
+            captured.update(path=path, **kw)
+
+    return _Recorder
+
+
+def test_execute_threads_declared_env_and_cwd_to_the_mcp_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declared ``binding.env`` and ``binding.cwd`` reach ``MCPClient`` without leaking runner env."""
+    monkeypatch.setenv("REAL_TOKEN", "s3cret")
+    monkeypatch.setenv("AGENT_API_KEY", "do-not-leak")
+    captured: dict = {}
+    fake = _FakeLLMClient([_Turn(text="done")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _recording_mcp(captured))
+
+    caps = AllCapabilities(
+        mcp_servers=(
+            McpBinding(
+                name="gh",
+                command=("gh-mcp",),
+                env=(("GH_TOKEN", "${REAL_TOKEN}"), ("MODE", "read-only")),
+                cwd="/srv/work",
+            ),
+        ),
+    )
+    ApiAgent(AgentConfig(capabilities=caps)).run("p")
+
+    assert captured["cwd"] == "/srv/work"
+    assert captured["env"] == {"GH_TOKEN": "s3cret", "MODE": "read-only"}
+    assert "AGENT_API_KEY" not in captured["env"]
+    assert "REAL_TOKEN" not in captured["env"]
+
+
+def test_execute_leaves_mcp_child_env_unset_when_binding_declares_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binding with no ``env`` passes ``env=None`` to ``MCPClient``."""
+    captured: dict = {}
+    fake = _FakeLLMClient([_Turn(text="done")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _recording_mcp(captured))
+
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="plain", command=("srv",)),))
+    ApiAgent(AgentConfig(capabilities=caps)).run("p")
+
+    assert captured["env"] is None
+    assert captured["cwd"] is None
