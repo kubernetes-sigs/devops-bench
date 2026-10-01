@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,25 @@ import pytest
 from devops_bench.cli import args_to_config, build_parser, main
 from devops_bench.core import ConfigError
 from devops_bench.run import BenchmarkResult
+
+
+@pytest.fixture(autouse=True)
+def _restore_devops_bench_logger() -> Iterator[None]:
+    """Undo ``main``'s ``configure_logging`` side effects after each test.
+
+    ``main`` attaches a real handler and sets ``propagate = False`` on the
+    package logger — correct in production, but ``caplog`` in later tests
+    relies on propagation to the root logger, so leak-through here fails
+    unrelated tests depending on execution order.
+    """
+    import logging
+
+    root = logging.getLogger("devops_bench")
+    saved_handlers = list(root.handlers)
+    saved_propagate = root.propagate
+    yield
+    root.handlers = saved_handlers
+    root.propagate = saved_propagate
 
 
 def test_build_parser_parses_flags() -> None:
@@ -151,3 +171,26 @@ def test_main_exit_two_on_malformed_env(
     err = capsys.readouterr().err
     assert "error:" in err
     assert "EVAL_LIMIT" in err
+
+
+def test_main_attaches_a_real_log_handler(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``main`` must configure logging, or every library warning is silent.
+
+    The package root logger carries a ``NullHandler`` (library etiquette),
+    which also suppresses logging's last-resort stderr fallback — so without
+    ``configure_logging()`` in the entry point, operator-facing warnings
+    (e.g. the ``requires_unsandboxed`` exemption notice) never appear in a
+    real run's output.
+    """
+    import logging
+
+    monkeypatch.setattr(
+        "devops_bench.run.run_benchmark",
+        lambda config: _result([{"status": "success"}], tmp_path),
+    )
+    main(["src", "--no-infra"])
+    root = logging.getLogger("devops_bench")
+    assert any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.NullHandler)
+        for h in root.handlers
+    )

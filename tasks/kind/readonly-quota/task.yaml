@@ -20,6 +20,10 @@ check_groups:
   availability-held:
     title: "Availability held"
     description: "courier never drops below three Ready replicas."
+# The premise is a credential that cannot change the quota, so the sandboxed
+# agent's quota grant is withheld here; the stack's own namespaced Role is the
+# access the prompt describes.
+agent_quota_writes: false
 infrastructure:
   deployer: "tofu"
   stack: "prebuilt/readonly-quota"
