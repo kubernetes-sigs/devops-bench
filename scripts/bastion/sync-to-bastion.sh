@@ -56,7 +56,7 @@ PATHS=(
   tasks
   tf
   scripts
-  Dockerfile.harness
+  docker
 )
 PRESENT=()
 for p in "${PATHS[@]}"; do

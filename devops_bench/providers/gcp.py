@@ -18,13 +18,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from devops_bench.core import ClusterInfo, ConfigError, get_bool, get_env, get_logger
+from devops_bench.core import (
+    ClusterInfo,
+    ConfigError,
+    NetworkPlan,
+    SandboxError,
+    get_bool,
+    get_env,
+    get_logger,
+)
 from devops_bench.core.subprocess import run
 from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
 
 __all__ = ["GcpProvider"]
 
 _log = get_logger("providers.gcp")
+
+
+def _context_name(project: str, location: str, cluster_name: str) -> str:
+    """Reconstruct the kubectl context name ``gcloud get-credentials`` writes."""
+    return f"gke_{project}_{location}_{cluster_name}"
 
 
 @PROVIDERS.register("gcp")
@@ -81,7 +94,7 @@ class GcpProvider(Provider):
             capture=False,
         )
 
-        context_name = f"gke_{project}_{location}_{cluster_name}"
+        context_name = _context_name(project, location, cluster_name)
         if get_bool("GCP_USE_ADC", False):
             _log.info(
                 "Enabling application default credentials for auth plugin in context %s",
@@ -105,6 +118,27 @@ class GcpProvider(Provider):
 
         return ClusterInfo.from_dict(
             {"name": cluster_name, "location": location, "project": project}
+        )
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Pin to this cluster's GKE context; the endpoint routes as-is.
+
+        Raises:
+            SandboxError: If project or location is unknown — an unpinned
+                plan would mint the agent's credential on the ambient
+                current-context, not necessarily this cluster.
+        """
+        if not (cluster_info.project and cluster_info.location):
+            raise SandboxError(
+                f"GKE cluster {cluster_info.name!r} reported no project/location, so the "
+                "sandbox cannot pin to its kubectl context; refusing rather than "
+                "provisioning the agent's credential against the ambient context, "
+                "which may be a different cluster entirely"
+            )
+        return NetworkPlan(
+            kubectl_context=_context_name(
+                cluster_info.project, cluster_info.location, cluster_info.name
+            )
         )
 
     def cleanup(
