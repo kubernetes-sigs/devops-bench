@@ -25,7 +25,10 @@ from devops_bench.cheat_detection.inventory import (
     ENVIRONMENT_DOTFILES,
     baseline_from_granted_paths,
     build_inventory_rules,
+    build_mount_rules,
+    drop_fingerprints_matching_inputs,
     filter_rules_for_prompt,
+    narrow_home_listing_rules,
 )
 from devops_bench.cheat_detection.rules import (
     DEFAULT_RULES,
@@ -43,7 +46,10 @@ __all__ = [
     "annotate_records",
     "baseline_from_granted_paths",
     "build_inventory_rules",
+    "drop_fingerprints_matching_inputs",
+    "build_mount_rules",
     "filter_rules_for_prompt",
+    "narrow_home_listing_rules",
     "load_ruleset",
     "scan_record",
 ]

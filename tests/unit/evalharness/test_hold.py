@@ -262,7 +262,7 @@ def test_run_one_stops_and_joins_the_safeguard_monitor_when_the_agent_raises(
     """Regression: an agent exception must not leak the monitor's background thread."""
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
 
-    def _boom(prompt: str, ctx: Any) -> Any:
+    def _boom(prompt: str, ctx: Any, sandbox_spec: Any = None) -> Any:
         raise RuntimeError("agent crashed")
 
     monkeypatch.setattr(harness, "execute_agent", _boom)
@@ -285,7 +285,7 @@ def test_run_one_stops_and_joins_the_safeguard_monitor_when_the_agent_raises(
         }
     )
 
-    record = harness._run_one(task, tmp_path)  # noqa: SLF001
+    record, _ = harness._run_one(task, tmp_path)  # noqa: SLF001
 
     assert record["status"] == "failed"
     assert not any(t.name == "safeguard-monitor" for t in threading.enumerate())
@@ -628,7 +628,9 @@ def test_objective_hold_entry_is_routed_to_run_hold_window_not_the_live_monitor(
 
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
     monkeypatch.setattr(
-        harness, "execute_agent", lambda prompt, ctx: AgentResult(output="ok", trajectory=[])
+        harness,
+        "execute_agent",
+        lambda prompt, ctx, sandbox_spec=None: AgentResult(output="ok", trajectory=[]),
     )
     task = Task.from_dict(
         {
@@ -649,7 +651,7 @@ def test_objective_hold_entry_is_routed_to_run_hold_window_not_the_live_monitor(
         }
     )
 
-    record = harness._run_one(task, tmp_path)  # noqa: SLF001
+    record, _ = harness._run_one(task, tmp_path)  # noqa: SLF001
 
     assert len(monitor_entries) == 1
     assert monitor_entries[0] == []  # the objective entry never reached the live monitor

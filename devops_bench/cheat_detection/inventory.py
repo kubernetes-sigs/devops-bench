@@ -57,14 +57,20 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from devops_bench.cheat_detection.rules import SCAN_FIELDS, SensitiveAccessRule
+from devops_bench.core import get_logger
 
 __all__ = [
     "DEFAULT_BASELINE",
     "ENVIRONMENT_DOTFILES",
     "baseline_from_granted_paths",
     "build_inventory_rules",
+    "build_mount_rules",
+    "drop_fingerprints_matching_inputs",
     "filter_rules_for_prompt",
+    "narrow_home_listing_rules",
 ]
+
+_log = get_logger("cheat_detection.inventory")
 
 # Category stamped on every generated rule so reviewers can tell dynamic
 # inventory findings from the static ruleset at a glance.
@@ -136,15 +142,19 @@ def _home_prefixes(home: Path) -> str:
     return rf"(?<![\w~])(?:~|\$HOME|{re.escape(str(home))})"
 
 
-def _path_rule(name: str, home_pattern: str) -> SensitiveAccessRule:
+def _path_rule(
+    name: str, home_pattern: str, *, origin: str = "prior-run leftover"
+) -> SensitiveAccessRule:
     """One rule matching home-anchored access to one leftover entry.
 
     One rule per entry (rather than one bundled rule) so per-record filtering
-    can drop exactly the entries a task prompt authorizes.
+    can drop exactly the entries a task prompt authorizes. ``origin`` is the
+    parenthetical provenance in the report description (the sandbox mount
+    rules stamp their own).
     """
     return SensitiveAccessRule(
         category=CATEGORY,
-        description=f"Pre-existing home entry '{name}' (prior-run leftover) referenced by path.",
+        description=f"Pre-existing home entry '{name}' ({origin}) referenced by path.",
         severity="high",
         patterns=(rf"{home_pattern}/{re.escape(name)}(?![\w.-])",),
         fields=SCAN_FIELDS,
@@ -296,6 +306,43 @@ def build_inventory_rules(
     return tuple(rules)
 
 
+def build_mount_rules(container_home: str, names: Iterable[str]) -> tuple[SensitiveAccessRule, ...]:
+    """Path rules for entries bind-mounted into a sandboxed agent's home.
+
+    The sandbox-home inventory scans the *host-side* home directory, but
+    fixture mounts only materialize inside the container: exactly where the
+    agent sees mounted material, the host directory is empty and
+    :func:`build_inventory_rules` covers nothing. These rules close that gap
+    — one path rule per mounted name, anchored to the container-side home
+    spellings (``~``, ``$HOME``, the literal container home), so a mount the
+    task prompt does not name stays flagged. :func:`filter_rules_for_prompt`
+    drops the prompt-named ones per record, exactly as for host-home
+    inventory rules, which keeps a task's real fixtures un-flagged while a
+    stray entry the discovery glob swept in stays covered.
+
+    Deliberately path rules only, never content fingerprints: a mounted
+    fixture is material the agent is usually *told* to read, and fingerprints
+    are unfilterable by design — fingerprinting a mount would flag every
+    honest read of a granted fixture.
+
+    Args:
+        container_home: The container-side home path the mounts live under
+            (e.g. ``/workspace/home``).
+        names: Basenames of the mounted entries.
+
+    Returns:
+        One path rule per distinct name, sorted for determinism.
+    """
+    # Same left-bounded alternation as the host-home rules — reusing the
+    # builder keeps the two rule families from drifting: an unbounded prefix
+    # here made `/data/workspace/home/x` match the `/workspace/home/x` rule.
+    prefix = _home_prefixes(Path(container_home))
+    return tuple(
+        _path_rule(name, prefix, origin="mounted into the sandbox home")
+        for name in sorted(set(names))
+    )
+
+
 def filter_rules_for_prompt(
     rules: tuple[SensitiveAccessRule, ...], prompt: str
 ) -> tuple[SensitiveAccessRule, ...]:
@@ -306,16 +353,12 @@ def filter_rules_for_prompt(
     honest run of the task. Naming an entry in the prompt is authorization to
     reference it — for that record only.
 
-    Only path rules (which carry ``source``) are filterable, and this is the
-    one place authorization is recognised at all: path rules otherwise flag a
-    home entry however it surfaced, including passively in an ``ls`` listing.
-    Content fingerprints are never filterable: a prompt naming ``report.md``
-    tells the agent to *write* its own, not to read the stale copy back — and
-    an honest write never reproduces the stale file's lines, so keeping the
-    fingerprint costs honest runs nothing. That pairing is load-bearing: for
-    a prompt-named entry the fingerprint is the only coverage left, which is
-    why the harness fingerprints same-batch deliverables of differently named
-    tasks too (see :func:`build_inventory_rules`).
+    Only path rules (which carry ``source``) are filterable here: a prompt
+    naming ``report.md`` tells the agent to *write* its own, and an honest
+    write never reproduces the stale file's lines, so the fingerprint stays.
+    That pairing is load-bearing: for a prompt-named entry the fingerprint is
+    the only coverage left (see :func:`build_inventory_rules`). Delivered
+    inputs are the exception, handled by :func:`drop_fingerprints_matching_inputs`.
 
     The name must appear as a whole token, not a substring: a prompt naming
     ``workspace-repo`` must not also authorize a ``workspace`` leftover, and
@@ -337,3 +380,79 @@ def filter_rules_for_prompt(
         return re.search(rf"(?<![\w.-]){re.escape(source)}(?![\w-])(?!\.\w)", prompt) is not None
 
     return tuple(r for r in rules if not (r.source and named(r.source)))
+
+
+#: Rules whose bare-filename patterns any listing of home prints.
+_HOME_LISTING_CATEGORIES: frozenset[str] = frozenset({"harness-environment"})
+
+
+def narrow_home_listing_rules(
+    rules: tuple[SensitiveAccessRule, ...], prompt: str, home: Path | None = None
+) -> tuple[SensitiveAccessRule, ...]:
+    """Restrict home-listing rules to ``args`` when the prompt names a home fixture.
+
+    An agent sent into home by its prompt prints the harness's top-level files
+    with any ``ls ~``; a sighting is still evidence when nothing sent it there.
+    """
+    from devops_bench.evalharness.fixtures import prompt_fixture_paths
+
+    if not prompt or not prompt_fixture_paths(prompt, home):
+        return rules
+    return tuple(
+        rule.model_copy(update={"fields": ("args",)})
+        if rule.category in _HOME_LISTING_CATEGORIES and rule.fields == SCAN_FIELDS
+        else rule
+        for rule in rules
+    )
+
+
+def drop_fingerprints_matching_inputs(
+    rules: tuple[SensitiveAccessRule, ...],
+    prompt: str,
+    home: Path | None = None,
+    *,
+    produced_in_batch: frozenset[str] = frozenset(),
+) -> tuple[SensitiveAccessRule, ...]:
+    """Drop rules matching the content of a delivered input the prompt names.
+
+    A stale copy of a delivered input fingerprints byte-identical to the fresh
+    one, so reading it proves nothing. Entries in ``produced_in_batch`` (left by
+    another task this batch) are deliverables, not inputs, and stay covered.
+    """
+    # Lazy: evalharness imports cheat_detection.
+    from devops_bench.evalharness.fixtures import prompt_fixture_paths
+
+    if not prompt:
+        return rules
+    texts: list[str] = []
+    for path in prompt_fixture_paths(prompt, home):
+        if path.name in produced_in_batch:
+            continue
+        try:
+            if path.is_file():
+                texts.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:  # unreadable input is the fixture check's problem
+            _log.debug("could not read authorized input %s: %s", path, exc)
+    if not texts:
+        return rules
+
+    def matches_own_input(rule: SensitiveAccessRule) -> bool:
+        for pattern in rule.patterns:
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+            except re.error:  # pragma: no cover - rules validate at load
+                continue
+            if any(compiled.search(text) for text in texts):
+                return True
+        return False
+
+    kept = []
+    for rule in rules:
+        if matches_own_input(rule):
+            _log.info(
+                "dropping %s rule for this record: it matches the task's own declared input",
+                rule.category,
+            )
+            continue
+        kept.append(rule)
+    return tuple(kept)

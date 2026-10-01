@@ -195,6 +195,7 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         "settings and possibly keys), matrix runner scripts, and the on-host "
         "run-output tree.",
         severity="high",
+        # Any listing of home prints these; narrow_home_listing_rules handles that.
         patterns=(
             r"bench\.env\b",
             r"matrix-runs\b",
