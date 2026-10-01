@@ -395,7 +395,7 @@ def test_batch_invokes_grounding_and_chaos(mocker: MockerFixture) -> None:
         _base_result(
             documentation=[{"doc_name": "g", "url": "u", "constraints": []}],
             chaos_spec=[{"fault": "kill"}],
-            chaos_report={"injected_fault": "kill"},
+            chaos_report={"injected_fault": "kill", "injected": True, "status": "success"},
             perf_report={"uptime_percentage": 99.9},
         )
     ]
@@ -406,6 +406,27 @@ def test_batch_invokes_grounding_and_chaos(mocker: MockerFixture) -> None:
     retrieval.assert_called_once()
     chaos.assert_called_once()
     assert results[0]["scores"]["DocRetrievalRate"] == 0.5
+
+
+def test_batch_skips_chaos_scoring_when_the_fault_never_landed(mocker: MockerFixture) -> None:
+    _patch_judges(mocker)
+    mocker.patch.object(pipeline, "LLMTestCase")
+    mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
+
+    from devops_bench.metrics import chaos_metrics
+
+    chaos = mocker.patch.object(chaos_metrics, "evaluate_chaos_metrics")
+    results = [
+        _base_result(
+            chaos_spec=[{"fault": "kill"}],
+            chaos_report={"injected_fault": "kill", "injected": False, "status": "failed"},
+        )
+    ]
+
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=True)
+
+    chaos.assert_not_called()
+    assert "DiagnosisAccuracy" not in results[0]["scores"]
 
 
 def test_batch_score_insertion_order_matches_legacy_results_json(mocker: MockerFixture) -> None:
@@ -452,7 +473,7 @@ def test_batch_score_insertion_order_matches_legacy_results_json(mocker: MockerF
             expected_output="Critical Requirements:\n- replicas=3\n",
             documentation=[{"doc_name": "g", "url": "u", "constraints": []}],
             chaos_spec=[{"fault": "kill"}],
-            chaos_report={"injected_fault": "kill"},
+            chaos_report={"injected_fault": "kill", "injected": True, "status": "success"},
             perf_report={"uptime_percentage": 99.5},
         )
     ]

@@ -35,8 +35,6 @@ __all__ = ["ChaosMetric", "evaluate_chaos_metrics"]
 
 _log = get_logger("metrics.chaos_metrics")
 
-_DEFAULT_FAULT = "pod deletion"
-
 
 def evaluate_chaos_metrics(
     all_test_case: LLMTestCase,
@@ -56,23 +54,29 @@ def evaluate_chaos_metrics(
         all_test_case: The combined test case (text output + trace) to judge.
         judge_model: A ``DeepEvalBaseLLM`` judge model.
         chaos_report: Chaos run report; ``injected_fault`` keys the diagnosis
-            criteria (defaults to ``"pod deletion"``).
+            criteria, and without it DiagnosisAccuracy is not scored.
         perf_report: Performance report with ``deployment_time_seconds``,
             ``uptime_percentage``, and ``resource_utilization_efficiency``.
         scores: Mutable scores dict updated in place.
     """
     _log.info("Evaluating Planned Chaos Mode and Performance metrics...")
-    actual_fault = chaos_report.get("injected_fault", _DEFAULT_FAULT)
-
-    diag_metric = GEval(
-        name="DiagnosisAccuracy",
-        criteria=(
-            f"Did the agent accurately identify that the fault injected was '{actual_fault}'?"
-        ),
-        evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
-        threshold=GEVAL_PASS_THRESHOLD,
-        model=judge_model,
-    )
+    judged: list[GEval] = []
+    actual_fault = chaos_report.get("injected_fault")
+    if actual_fault:
+        judged.append(
+            GEval(
+                name="DiagnosisAccuracy",
+                criteria=(
+                    f"Did the agent accurately identify that the fault injected was "
+                    f"'{actual_fault}'?"
+                ),
+                evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+                threshold=GEVAL_PASS_THRESHOLD,
+                model=judge_model,
+            )
+        )
+    else:
+        _log.warning("chaos report names no injected fault; DiagnosisAccuracy not scored")
 
     rec_metric = GEval(
         name="GracefulRecovery",
@@ -86,7 +90,7 @@ def evaluate_chaos_metrics(
     )
 
     try:
-        for ms in run_geval(all_test_case, [diag_metric, rec_metric]):
+        for ms in run_geval(all_test_case, [*judged, rec_metric]):
             scores[ms.name] = ms.to_entry()
     except Exception as e:  # noqa: BLE001 - scoring must survive a judge failure
         _log.error("Error evaluating chaos metrics: %s", e)
@@ -100,7 +104,7 @@ def evaluate_chaos_metrics(
 class ChaosMetric:
     """Registered evaluator for chaos diagnosis + recovery + perf passthroughs.
 
-    Runs only when the result carries a ``chaos_spec``. Yields the
+    Runs only when a declared ``chaos_spec`` was actually injected. Yields the
     DiagnosisAccuracy / GracefulRecovery judged scores plus the three bare-value
     performance passthroughs.
 
@@ -112,8 +116,12 @@ class ChaosMetric:
     name = "chaos"
 
     def applies(self, ctx: MetricContext) -> bool:
-        """Run only when the harness recorded a chaos spec on the result."""
-        return bool(ctx.result.get("chaos_spec"))
+        """Run only when the declared chaos actually landed; a missed fault has nothing to judge."""
+        if not ctx.result.get("chaos_spec"):
+            return False
+        report = ctx.result.get("chaos_report") or {}
+        # Same rule as the harness's invalidation: ``injected`` wins, older reports carry status.
+        return bool(report.get("injected", report.get("status") == "success"))
 
     def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
         """Score diagnosis/recovery and pass perf numbers through verbatim."""

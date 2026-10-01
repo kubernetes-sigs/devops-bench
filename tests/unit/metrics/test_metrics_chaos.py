@@ -17,12 +17,15 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
+import pytest
 from pytest_mock import MockerFixture
 
 from devops_bench.metrics import chaos_metrics
-from devops_bench.metrics.chaos_metrics import evaluate_chaos_metrics
+from devops_bench.metrics.base import MetricContext
+from devops_bench.metrics.chaos_metrics import ChaosMetric, evaluate_chaos_metrics
 
 
 def _chaos_result() -> SimpleNamespace:
@@ -67,22 +70,52 @@ def test_chaos_records_geval_and_perf(mocker: MockerFixture) -> None:
     assert scores["Resource_Utilization_Efficiency"] == 0.8
 
 
-def test_chaos_defaults_fault_and_survives_eval_error(mocker: MockerFixture) -> None:
-    captured = {}
+def test_chaos_skips_diagnosis_without_a_named_fault_and_survives_eval_error(
+    mocker: MockerFixture,
+) -> None:
+    names: list[str] = []
     mocker.patch.object(
         chaos_metrics,
         "GEval",
-        side_effect=lambda **kw: (
-            captured.setdefault("criteria", []).append(kw["criteria"]) or MagicMock()
-        ),
+        side_effect=lambda **kw: names.append(kw["name"]) or MagicMock(),
     )
     mocker.patch("deepeval.evaluate", side_effect=RuntimeError("judge down"))
     scores: dict = {}
 
     evaluate_chaos_metrics(MagicMock(), MagicMock(), {}, {}, scores)
 
-    # Default fault used when none reported.
-    assert any("pod deletion" in c for c in captured["criteria"])
+    # No guessed fault: the agent is never judged on diagnosing a fault nobody named.
+    assert names == ["GracefulRecovery"]
     # Eval failure swallowed; perf keys still populated (as None here).
     assert "Workload_Uptime_Percentage" in scores
     assert scores["Workload_Uptime_Percentage"] is None
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({}, False),
+        ({"chaos_report": {"injected": True, "status": "success"}}, False),
+        ({"chaos_spec": [{}], "chaos_report": {"injected": True, "status": "success"}}, True),
+        ({"chaos_spec": [{}], "chaos_report": {"injected": True, "status": "timed_out"}}, True),
+        ({"chaos_spec": [{}], "chaos_report": {"injected": False, "status": "failed"}}, False),
+        ({"chaos_spec": [{}], "chaos_report": {"status": "success"}}, True),
+        ({"chaos_spec": [{}], "chaos_report": {"status": "initiated"}}, False),
+        ({"chaos_spec": [{}], "chaos_report": {}}, False),
+        ({"chaos_spec": [{}]}, False),
+    ],
+    ids=[
+        "no-chaos",
+        "report-without-spec",
+        "injected",
+        "injected-then-drain-timed-out",
+        "injection-failed",
+        "legacy-success-status",
+        "never-finished",
+        "empty-report",
+        "no-report",
+    ],
+)
+def test_applies_only_when_declared_chaos_landed(result: dict, expected: bool) -> None:
+    ctx = cast(MetricContext, SimpleNamespace(result=result))
+    assert ChaosMetric().applies(ctx) is expected
