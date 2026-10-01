@@ -18,13 +18,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from devops_bench.core import ClusterInfo, ConfigError, get_bool, get_env, get_logger
+from devops_bench.core import (
+    ClusterInfo,
+    ConfigError,
+    NetworkPlan,
+    SandboxError,
+    get_bool,
+    get_env,
+    get_logger,
+)
 from devops_bench.core.subprocess import run
 from devops_bench.providers.base import PROVIDERS, Provider, ResolveContext
 
 __all__ = ["GcpProvider"]
 
 _log = get_logger("providers.gcp")
+
+
+def _context_name(project: str, location: str, cluster_name: str) -> str:
+    """Reconstruct the kubectl context name ``gcloud get-credentials`` writes."""
+    return f"gke_{project}_{location}_{cluster_name}"
 
 
 @PROVIDERS.register("gcp")
@@ -81,7 +94,7 @@ class GcpProvider(Provider):
             capture=False,
         )
 
-        context_name = f"gke_{project}_{location}_{cluster_name}"
+        context_name = _context_name(project, location, cluster_name)
         if get_bool("GCP_USE_ADC", False):
             _log.info(
                 "Enabling application default credentials for auth plugin in context %s",
@@ -104,8 +117,76 @@ class GcpProvider(Provider):
             )
 
         return ClusterInfo.from_dict(
-            {"name": cluster_name, "location": location, "project": project}
+            {
+                "name": cluster_name,
+                "location": location,
+                "project": project,
+                # Only stacks whose task makes its own cloud API calls set this.
+                "agent_cloud_identity": (outputs or {}).get("agent_cloud_identity"),
+            }
         )
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Pin to this cluster's GKE context; the endpoint routes as-is.
+
+        Raises:
+            SandboxError: If project or location is unknown — an unpinned
+                plan would mint the agent's credential on the ambient
+                current-context, not necessarily this cluster.
+        """
+        if not (cluster_info.project and cluster_info.location):
+            raise SandboxError(
+                f"GKE cluster {cluster_info.name!r} reported no project/location, so the "
+                "sandbox cannot pin to its kubectl context; refusing rather than "
+                "provisioning the agent's credential against the ambient context, "
+                "which may be a different cluster entirely"
+            )
+        return NetworkPlan(
+            kubectl_context=_context_name(
+                cluster_info.project, cluster_info.location, cluster_info.name
+            )
+        )
+
+    def sandbox_cloud_credential_env(self, cluster_info: ClusterInfo) -> dict[str, str]:
+        """Impersonate the task's service account host-side and mint a token.
+
+        No key file exists or is mounted and the operator's ADC never crosses.
+        The token lives at most an hour and is not refreshed in the container.
+        The provisioning identity needs ``roles/iam.serviceAccountTokenCreator``
+        on the account; the task's stack grants it.
+
+        Raises:
+            SandboxError: When the identity is named but no token was minted.
+        """
+        identity = cluster_info.agent_cloud_identity
+        if not identity:
+            return {}
+        result = run(
+            [
+                "gcloud",
+                "auth",
+                "print-access-token",
+                f"--impersonate-service-account={identity}",
+            ],
+            check=False,
+        )
+        token = (result.stdout or "").strip()
+        if result.returncode != 0 or not token:
+            raise SandboxError(
+                f"could not mint an access token for the agent's cloud identity "
+                f"{identity!r} (gcloud exit {result.returncode}); the provisioning "
+                "identity needs roles/iam.serviceAccountTokenCreator on it — "
+                "refusing to run the agent without the credential its task needs"
+            )
+        _log.info("minted a short-lived cloud credential for the sandboxed agent as %s", identity)
+        env = {
+            "CLOUDSDK_AUTH_ACCESS_TOKEN": token,
+            "GOOGLE_OAUTH_ACCESS_TOKEN": token,
+        }
+        if cluster_info.project:
+            env["CLOUDSDK_CORE_PROJECT"] = cluster_info.project
+            env["GOOGLE_CLOUD_PROJECT"] = cluster_info.project
+        return env
 
     def cleanup(
         self,
