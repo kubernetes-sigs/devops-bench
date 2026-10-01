@@ -24,6 +24,7 @@ and [glossary](./components/glossary.md).
 - [Agents](./components/agents.md) — the agent harnesses under test and their capabilities.
 - [Metrics](./components/metrics.md) — the scoring framework and how to read results.
 - [Cheating detection](./components/cheat-detection.md) — how runs are scanned for access to the benchmark's own material.
+- [Agent sandbox](./components/sandbox.md) — the container + credential boundary the agent runs behind, and how to verify it holds.
 
 ## Reference
 

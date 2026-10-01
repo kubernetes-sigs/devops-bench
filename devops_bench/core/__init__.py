@@ -22,7 +22,7 @@ from devops_bench.core.config import (
     require_env,
     resolve_tf_root,
 )
-from devops_bench.core.context import ClusterInfo, RunContext
+from devops_bench.core.context import ClusterInfo, NetworkPlan, RunContext
 from devops_bench.core.errors import (
     AlreadyRegisteredError,
     ConfigError,
@@ -31,6 +31,7 @@ from devops_bench.core.errors import (
     MissingDependencyError,
     NotRegisteredError,
     RegistryError,
+    SandboxError,
     SubprocessError,
 )
 from devops_bench.core.logging import configure_logging, get_logger
@@ -40,6 +41,7 @@ from devops_bench.core.run_env import RunEnv
 
 __all__ = [
     "ClusterInfo",
+    "NetworkPlan",
     "RunContext",
     "RunEnv",
     "Registry",
@@ -60,5 +62,6 @@ __all__ = [
     "InvalidKeyError",
     "NotRegisteredError",
     "MissingDependencyError",
+    "SandboxError",
     "SubprocessError",
 ]

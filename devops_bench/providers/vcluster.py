@@ -30,6 +30,8 @@ from ruamel.yaml import YAML
 from devops_bench.core import (
     ClusterInfo,
     ConfigError,
+    NetworkPlan,
+    SandboxError,
     get_bool,
     get_env,
     get_logger,
@@ -248,6 +250,35 @@ class VClusterProvider(Provider):
                 "kubeconfig_path": str(resolved_target),
             }
         )
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Pin to the virtual cluster's own context; no endpoint rewriting.
+
+        The pin keeps the agent's identity minted *inside* the virtual
+        cluster; the sandbox's generic loopback rewrite covers a
+        locally-hosted vcluster.
+
+        Raises:
+            SandboxError: If the virtual cluster's context cannot be read —
+                an unpinned plan would mint the agent's credential on the
+                ambient current-context, i.e. the host cluster this vcluster
+                exists to hide.
+        """
+        if not cluster_info.kubeconfig_path:
+            raise SandboxError(
+                "the virtual cluster reported no kubeconfig path, so the sandbox cannot "
+                "pin to its context; refusing rather than provisioning the agent's "
+                "credential against the ambient context, which is the host cluster"
+            )
+        try:
+            return NetworkPlan(kubectl_context=_get_current_context(cluster_info.kubeconfig_path))
+        except ConfigError as exc:
+            raise SandboxError(
+                "could not read the virtual cluster's context from "
+                f"{cluster_info.kubeconfig_path} ({exc}); refusing rather than "
+                "provisioning the agent's credential against the ambient context, "
+                "which is the host cluster"
+            ) from exc
 
     @staticmethod
     def _is_safe_scratch_path(path: Path) -> bool:
