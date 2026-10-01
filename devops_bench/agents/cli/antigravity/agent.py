@@ -27,6 +27,7 @@ from devops_bench import core
 from devops_bench.agents import base
 from devops_bench.agents import config as agents_config
 from devops_bench.agents import result as agents_result
+from devops_bench.agents import sandbox as sandbox_mod
 from devops_bench.agents.cli.antigravity import parsing
 from devops_bench.agents.shared import cli_capabilities
 from devops_bench.core import subprocess as devops_subprocess
@@ -39,6 +40,12 @@ __all__ = ["AgyCliAgent"]
 _log = core.get_logger("agents.cli.antigravity")
 
 _GCLOUD_LOOKUP_TIMEOUT_SEC = 10
+
+# The image ships its own agy on PATH; the host binary path is meaningless
+# inside the container. Same idiom as openclaw's _CONTAINER_OC_BIN — without
+# it, _resolve_binary's host fallback (~/.local/bin/agy, or an absolute
+# AGENT_TARGET) crosses the boundary verbatim in argv[0] and fails to exec.
+_CONTAINER_AGY_BIN = "agy"
 
 # agy flushes usage to the conversation DB asynchronously after process exit;
 # poll briefly for the rows before giving up.
@@ -178,10 +185,25 @@ class AgyCliAgent(base.AgentHarness):
     """Antigravity CLI agent harness driving the ``agy`` binary.
 
     Lays down capabilities (rules, MCP, skills) in the workspace
-    directory and spawns the ``agy`` binary. It preserves the user's real
-    HOME to leverage cached OAuth/ADC credentials. The trajectory is
-    extracted by parsing the generated transcript JSONL log file.
+    directory and spawns the ``agy`` binary. The trajectory is extracted by
+    parsing the generated transcript JSONL log file.
+
+    **Credentials and HOME.** Unsandboxed, the run inherits the operator's real
+    HOME so ``agy`` can use its cached OAuth token and ADC. Sandboxed, HOME is
+    container-owned (``/workspace/home``) and the operator's profile is not
+    mounted at all — which is the point. The one credential the agent still
+    needs, its OAuth token, crosses deliberately: it is *copied* into the
+    per-run config dir under the workspace (see ``_execute``), so it rides in
+    on the workspace mount rather than through the operator's home. ADC and the
+    gcloud config never cross; the sandbox's deny filter drops them.
     """
+
+    # Every agent-owned subprocess here goes through run_agent_cmd, so a
+    # sandboxed run is actually contained. The gcloud project/location lookups
+    # stay on the host deliberately: they run before the agent, read the
+    # operator's own config to resolve defaults, and their result crosses as a
+    # value in the settings file rather than as access to gcloud.
+    supports_sandbox = True
 
     def __init__(self, config: agents_config.AgentConfig | None = None) -> None:
         super().__init__(config)
@@ -239,10 +261,21 @@ class AgyCliAgent(base.AgentHarness):
                 env_overlay["GCP_LOCATION"] = location
 
             # Explicit gemini_dir keeps agy on the workspace settings, not real HOME.
+            # The argv crosses the sandbox boundary verbatim, so the config
+            # dir must be the container spelling — same idiom as openclaw's
+            # OPENCLAW_STATE_DIR translation. Host spelling stays in
+            # gemini_dir for the post-run transcript read on this side.
+            gemini_dir_arg = str(gemini_dir)
+            spec = self.config.sandbox
+            if spec is not None and spec.workspace is not None:
+                gemini_dir_arg = sandbox_mod.container_path(spec.workspace, gemini_dir)
+                # The host binary path means nothing inside the image, which
+                # ships its own agy on PATH.
+                binary = _CONTAINER_AGY_BIN
             argv = [
                 binary,
                 "--dangerously-skip-permissions",
-                f"--gemini_dir={gemini_dir}",
+                f"--gemini_dir={gemini_dir_arg}",
             ]
             if project:
                 argv.append(f"--project={project}")
@@ -297,12 +330,18 @@ class AgyCliAgent(base.AgentHarness):
             completed: devops_subprocess.CompletedProcess | None = None
             timeout_exc: core.SubprocessError | None = None
             try:
-                completed = devops_subprocess.run(
+                # Through the sandbox seam: containerised when
+                # ``config.sandbox`` is set, byte-identical to the previous
+                # direct ``run(...)`` otherwise. The overlay is the resolved
+                # configuration, so it is exactly what should cross the
+                # boundary — by value, never as inherited process env.
+                completed = self.run_agent_cmd(
                     argv,
                     extra_env=env_overlay,
                     cwd=workdir,
                     check=False,
                     timeout=self.config.timeout_sec,
+                    host_run=devops_subprocess.run,
                 )
             except core.SubprocessError as exc:
                 # check=False means this can only be a timeout. agy may have

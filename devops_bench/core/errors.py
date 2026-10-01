@@ -27,6 +27,7 @@ __all__ = [
     "InvalidKeyError",
     "NotRegisteredError",
     "MissingDependencyError",
+    "SandboxError",
     "SubprocessError",
 ]
 
@@ -85,6 +86,15 @@ class MissingDependencyError(DevOpsBenchError):
             f"{feature} requires the optional dependency group {extra!r}. "
             f"Install it with: pip install devops-bench[{extra}]"
         )
+
+
+class SandboxError(DevOpsBenchError):
+    """Raised when the agent sandbox cannot be built or would widen its boundary.
+
+    Deliberately fatal for the affected run: a containment control that
+    silently degrades to unsandboxed host execution is worse than none, so
+    every "cannot sandbox this" condition raises instead of falling back.
+    """
 
 
 class SubprocessError(DevOpsBenchError):

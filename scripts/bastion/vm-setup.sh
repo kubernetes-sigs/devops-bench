@@ -83,6 +83,49 @@ else
     || echo "    WARN: gemini CLI install failed; gcli agent runs will not work until it's installed."
 fi
 
+# Block the link-local metadata endpoint (169.254.169.254) for containers
+# only: it would hand a sandboxed agent this VM's cloud-platform-scoped
+# service account token, voiding the scoped credentials. DOCKER-USER applies
+# to *forwarded* traffic only, so host processes — ambient (unsandboxed)
+# runs and the matrix — keep authenticating through the metadata server.
+#
+# Port 53 must stay open: on a GCP VM the metadata address is also the
+# resolver dockerd copies into default-bridge containers, so a blanket REJECT
+# breaks all container DNS (kind hides this — its embedded DNS at 127.0.0.11
+# forwards from the host namespace, where DOCKER-USER does not apply). The
+# token endpoints are HTTP on port 80, so they stay rejected, and a DNS
+# answer cannot carry a credential. -I inserts at the head of the chain, so
+# the ACCEPT rules go in *after* the REJECT to end up above it.
+#
+# iptables rules do not survive a reboot and DOCKER-USER is created by
+# dockerd: re-run this script after a reboot. See docs/components/infra.md.
+echo "==> metadata endpoint block (container egress)"
+if ! command -v iptables >/dev/null 2>&1; then
+  echo "    ERROR: iptables not found; containers could reach the metadata server." >&2
+  echo "    Install iptables and re-run — refusing to finish setup with the boundary open." >&2
+  exit 1
+elif ! sudo iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+  echo "    WARN: no DOCKER-USER chain yet (is dockerd running?); re-run after Docker starts."
+  echo "    Do NOT start sandboxed runs until a re-run installs the metadata block."
+else
+  if sudo iptables -C DOCKER-USER -d 169.254.169.254 -j REJECT >/dev/null 2>&1; then
+    echo "    already blocked."
+  else
+    if ! sudo iptables -I DOCKER-USER -d 169.254.169.254 -j REJECT; then
+      echo "    ERROR: could not install the metadata REJECT rule; containers could" >&2
+      echo "    reach the metadata server. Refusing to finish setup with the boundary open." >&2
+      exit 1
+    fi
+    echo "    containers can no longer reach 169.254.169.254."
+  fi
+  for proto in udp tcp; do
+    sudo iptables -C DOCKER-USER -d 169.254.169.254 -p "$proto" --dport 53 -j ACCEPT >/dev/null 2>&1 \
+      || sudo iptables -I DOCKER-USER -d 169.254.169.254 -p "$proto" --dport 53 -j ACCEPT \
+      || { echo "    ERROR: could not permit $proto/53; container DNS would fail on this host." >&2; exit 1; }
+  done
+  echo "    DNS to 169.254.169.254 still permitted (port 53 only)."
+fi
+
 # fortio — the load generator the chaos agent shells out to for `generate_load`
 # faults (e.g. the optimize-scale load spike). The chaos system instruction tells
 # the agent to use the `fortio` binary; without it on PATH the spike is a silent

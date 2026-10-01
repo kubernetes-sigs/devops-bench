@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from devops_bench.core import ClusterInfo, Registry
+from devops_bench.core import ClusterInfo, NetworkPlan, Registry
 
 __all__ = ["PROVIDERS", "Provider", "ResolveContext"]
 
@@ -102,6 +102,20 @@ class Provider(ABC):
         Returns:
             A new mapping with provider defaults filled in where not already set.
         """
+
+    def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
+        """Describe how a sandboxed agent container reaches this cluster.
+
+        The sandbox refuses a provider-backed plan with no ``kubectl_context``
+        pin (unpinned would mint the agent's credential on the ambient
+        current-context), and this default returns an unpinned plan — so every
+        provider must override, if only to add the pin. Beyond that the
+        sandbox already rewrites a loopback server to ``host.docker.internal``;
+        add more only when that generic step cannot infer it: a Docker network
+        to join, or an in-network hostname.
+        """
+        del cluster_info
+        return NetworkPlan()
 
     def cleanup(
         self,

@@ -24,6 +24,7 @@ from devops_bench.cheat_detection import (
     DEFAULT_BASELINE,
     baseline_from_granted_paths,
     build_inventory_rules,
+    build_mount_rules,
     filter_rules_for_prompt,
     scan_record,
 )
@@ -236,6 +237,40 @@ def test_same_name_outside_home_is_not_flagged(tmp_path: Path) -> None:
     rules = build_inventory_rules(_seed_home(tmp_path))
     report = scan_record(_record([_exec("git clone x /tmp/workspace-repo")]), rules)
     assert report["status"] == "clean"
+
+
+def test_mount_rule_home_spelling_inside_a_longer_token_is_not_flagged() -> None:
+    """Mount rules carry the same left boundary as host-home rules.
+
+    ``/data/workspace/home/repo.git`` contains the container home as a
+    substring, and a ``~`` glued to a word is not a home reference — a match
+    on either would fire the catastrophic gate on an honest run.
+    """
+    rules = build_mount_rules("/workspace/home", ["repo.git"])
+    report = scan_record(
+        _record(
+            [
+                _exec("cat /data/workspace/home/repo.git/config"),
+                _exec("cat foo~/repo.git/config"),
+            ]
+        ),
+        rules,
+    )
+    assert report["status"] == "clean"
+
+
+def test_mount_rule_matches_every_container_home_spelling() -> None:
+    """The boundary must still admit the ways a shell introduces the path:
+    start-of-argument, ``~``, ``$HOME``, and glued to ``=``."""
+    rules = build_mount_rules("/workspace/home", ["repo.git"])
+    for command in (
+        "cat /workspace/home/repo.git/config",
+        "git clone ~/repo.git",
+        "ls $HOME/repo.git",
+        "GIT_DIR=/workspace/home/repo.git git log",
+    ):
+        report = scan_record(_record([_exec(command)]), rules)
+        assert report["status"] == "flagged", command
 
 
 def test_binary_and_oversized_leftovers_get_path_rule_only(tmp_path: Path) -> None:

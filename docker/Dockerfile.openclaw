@@ -1,0 +1,118 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sandbox image for the OpenClaw agent harness (BENCH_SANDBOX_IMAGE).
+#
+# Sibling of Dockerfile.gemini-cli and deliberately a separate image, not a
+# shared multi-stage base with per-agent targets: the CLIs pin their own
+# runtimes, and a version bump for one agent would otherwise invalidate the
+# others' A/B baselines.
+#
+# Contents are the tools a task may legitimately need inside the boundary. The
+# agent's cluster credential, workspace, and fixtures are mounted at run time
+# by devops_bench/agents/sandbox.py, never baked in here.
+
+# Node 24: openclaw 2026.9.3+ needs Node >=24.16. Pinned by multi-arch
+# manifest-list digest (amd64 + arm64).
+FROM node:24-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+
+# Changing any pin below changes the agent under test; re-baseline after a bump.
+ARG KUBECTL_VERSION=v1.35.9
+ARG KUBECTL_SHA256_AMD64=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
+ARG KUBECTL_SHA256_ARM64=39c98bca82875d9a9ddfb6f3c5ab17c3f78ea0801230683e538a67d5c053308d
+ARG HELM_VERSION=v3.22.0
+ARG HELM_SHA256_AMD64=1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
+ARG HELM_SHA256_ARM64=f14e804dfee240f55525b667488fe9adca349e63e00c9af634c0beb1421ac310
+# Must equal the host oc pin in tf/modules/bastion/startup.sh: the host oc reads
+# back the session store the image's oc writes, and the harness refuses a skew.
+# The anthropic-vertex plugin is a matched core+plugin pair; bump both together.
+ARG OPENCLAW_VERSION=2026.9.6
+ARG ANTHROPIC_VERTEX_PROVIDER_VERSION=2026.9.6
+
+# ripgrep and jq are what the agent's own search and JSON handling reach for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) kubectl_sha="${KUBECTL_SHA256_AMD64}"; helm_sha="${HELM_SHA256_AMD64}" ;; \
+        arm64) kubectl_sha="${KUBECTL_SHA256_ARM64}"; helm_sha="${HELM_SHA256_ARM64}" ;; \
+        *) echo "unsupported architecture for kubectl/helm: ${arch}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+    && echo "${kubectl_sha}  /tmp/kubectl" | sha256sum -c - \
+    && install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
+    && rm /tmp/kubectl \
+    && curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${arch}.tar.gz" \
+    && echo "${helm_sha}  /tmp/helm.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/helm.tar.gz -C /tmp \
+    && install -o root -g root -m 0755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm \
+    && rm -rf /tmp/helm.tar.gz "/tmp/linux-${arch}"
+
+RUN npm install -g "openclaw@${OPENCLAW_VERSION}" \
+    && npm cache clean --force
+
+# openclaw's package.json registers its bin as `openclaw`, not `oc`. The `oc`
+# name is a convention the harness's own tooling relies on (see
+# devops_bench/agents/cli/openclaw/agent.py's `_resolve_oc_bin`), not something
+# npm sets up. Without this symlink `oc` resolves to nothing inside the image
+# and every sandboxed run fails looking for the binary.
+RUN ln -s "$(command -v openclaw)" /usr/local/bin/oc
+
+# anthropic-vertex (Claude on Vertex, e.g. claude-fable-5) is a separately
+# published plugin rather than one of openclaw's bundled "stock" plugins;
+# installing it here keeps one image serving every model provider.
+#
+# Install it with `npm install -g` into the SAME global prefix as openclaw,
+# not with `oc plugins install`. npm then dedupes the "openclaw" peer
+# dependency against the already-installed global package instead of vendoring
+# its own node_modules/openclaw symlink, so there is no self-referencing
+# symlink to trip openclaw's "Symlink escapes plugin root" guard or to recurse
+# into when the state directory is copied.
+# Installing it is not enough: openclaw only discovers plugins under its own
+# stock extensions root, so a package sitting in the global node_modules is
+# never registered and `oc plugins list` does not show it. Copy it into that
+# root, then drop the npm copy so there is one on-disk copy rather than two
+# that can drift. The grep is a build-time assert: without it a plugin that
+# silently fails to register only surfaces as a failed run.
+RUN npm install -g "@openclaw/anthropic-vertex-provider@${ANTHROPIC_VERTEX_PROVIDER_VERSION}" \
+    && src="$(npm root -g)/@openclaw/anthropic-vertex-provider" \
+    && dest="$(npm root -g)/openclaw/dist/extensions/anthropic-vertex" \
+    && mkdir -p "${dest}" \
+    && cp -a "${src}/." "${dest}/" \
+    && npm uninstall -g "@openclaw/anthropic-vertex-provider" \
+    && npm cache clean --force \
+    && oc plugins list 2>&1 | grep -q "anthropic-vertex"
+
+# Fail the build rather than ship an image whose `oc` is missing or is not the
+# pinned version, which would otherwise only surface as a failed run.
+RUN oc --version | grep -qF "${OPENCLAW_VERSION}"
+
+# The sandbox wrapper mounts the per-run workspace at /workspace, repoints HOME
+# to /workspace/home so a bare "~" cannot reach the operator's profile, and on
+# Linux runs the container as the host user's uid:gid so files written to the
+# mount are owned correctly (devops_bench/agents/sandbox.py). That uid does not
+# exist in /etc/passwd here, so create the mount points world-writable and set
+# HOME to the same path the wrapper does, rather than relying on a passwd
+# lookup that will not resolve.
+RUN mkdir -p /workspace/home \
+    && chmod 0777 /workspace /workspace/home
+ENV HOME=/workspace/home
+
+WORKDIR /workspace

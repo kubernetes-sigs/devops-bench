@@ -26,7 +26,7 @@ import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from devops_bench.core import ConfigError
+from devops_bench.core import ConfigError, configure_logging
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only imports
     from devops_bench.run import BenchmarkConfig
@@ -152,6 +152,15 @@ def main(argv: list[str] | None = None) -> int:
         configuration error.
     """
     from devops_bench.run import run_benchmark
+
+    # Attach the stderr handler for the package logger. Without this every
+    # _log call in the library is silent in a real run: the package root
+    # carries a NullHandler (so library use stays quiet by default), which
+    # also suppresses logging's last-resort fallback. The harness makes
+    # operator-facing promises through warnings — e.g. "task X declares
+    # requires_unsandboxed; running it OUTSIDE the agent sandbox" — and a
+    # promise nobody can see is not kept. Idempotent, honours BENCH_LOG_LEVEL.
+    configure_logging()
 
     parser = build_parser()
     args = parser.parse_args(argv)
