@@ -102,9 +102,12 @@ fi
 # dockerd: re-run this script after a reboot. See docs/components/infra.md.
 echo "==> metadata endpoint block (container egress)"
 if ! command -v iptables >/dev/null 2>&1; then
-  echo "    WARN: iptables not found; containers can still reach the metadata server."
+  echo "    ERROR: iptables not found; containers could reach the metadata server." >&2
+  echo "    Install iptables and re-run — refusing to finish setup with the boundary open." >&2
+  exit 1
 elif ! sudo iptables -L DOCKER-USER -n >/dev/null 2>&1; then
   echo "    WARN: no DOCKER-USER chain yet (is dockerd running?); re-run after Docker starts."
+  echo "    Do NOT start sandboxed runs until a re-run installs the metadata block."
 else
   reject="-d 169.254.169.254 -j REJECT"
   accept_udp="-d 169.254.169.254 -p udp --dport 53 -j ACCEPT"
@@ -119,7 +122,9 @@ else
       && sudo iptables -I DOCKER-USER 1 $accept_tcp; then
     echo "    containers can no longer reach 169.254.169.254."
   else
-    echo "    WARN: could not install the rules; containers may still reach the metadata server."
+    echo "    ERROR: could not install the metadata rules; containers could reach the" >&2
+    echo "    metadata server. Refusing to finish setup with the boundary open." >&2
+    exit 1
   fi
   echo "    DNS to 169.254.169.254 still permitted (port 53 only)."
 fi
