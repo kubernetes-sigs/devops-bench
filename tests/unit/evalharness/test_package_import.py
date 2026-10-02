@@ -79,3 +79,16 @@ def test_harness_exports_present() -> None:
     assert pkg.ResultReporter.__name__ == "ResultReporter"
     assert pkg.DefaultEvalHarness.__name__ == "DefaultEvalHarness"
     assert pkg.ScenarioManager.__name__ == "ScenarioManager"
+
+
+def test_importing_harness_keeps_the_chaos_agent_and_models_chain_lazy() -> None:
+    """The harness reads configured identities from ``core``; the driver chain loads only when a fault injects."""
+    output = _run_in_subprocess(
+        """
+        import sys
+        import devops_bench.evalharness.default  # noqa: F401
+        forbidden = ("devops_bench.chaos.agent", "devops_bench.models", "devops_bench.models.base")
+        print([m for m in forbidden if m in sys.modules])
+        """
+    )
+    assert output.strip() == "[]"

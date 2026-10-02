@@ -57,6 +57,7 @@ from devops_bench.core import (
     get_env,
     get_logger,
 )
+from devops_bench.core.model_identity import judge_identity
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
@@ -229,6 +230,14 @@ class DefaultEvalHarness(Harness):
         self.project_id = project_id
         self.cluster_name = cluster_name
         self._judge_model = judge_model
+        if judge_model is None and get_env("JUDGE_MODEL") is None:
+            # Configured, not built: the resolved judge is logged again at scoring time.
+            configured = judge_identity()
+            _log.warning(
+                "JUDGE_MODEL unset; the judge is configured as %s/%s (AGENT_MODEL fallback)",
+                configured["provider"],
+                configured["model"],
+            )
         self.results_root = results_root
         resolved_agent_type = (
             agent_type
@@ -1462,6 +1471,7 @@ class DefaultEvalHarness(Harness):
                     else list(task.recoverable_safety)
                 ),
                 "chaos_report": chaos_report,
+                "chaos_driver": dict(chaos_report.get("driver") or {}),
                 "perf_report": perf_report,
                 "verification_parse_errors": list(verification_parse_errors or []),
                 "verification_report": list(verification_report or []),
@@ -1578,6 +1588,10 @@ class DefaultEvalHarness(Harness):
                 "use_mcp": self.use_mcp,
                 "skills": list(self._granted_skill_paths),
             },
+            # Which models scored and disrupted the run: ``judge`` is filled by ``_score``,
+            # ``chaos_driver`` by the success builder from ``chaos_report["driver"]``.
+            "judge": {},
+            "chaos_driver": {},
             "verification_parse_errors": [],
             "verification_report": [],
             "verification_status": "",
@@ -1669,7 +1683,7 @@ class DefaultEvalHarness(Harness):
         if not scorable:
             return
         # Lazy import keeps ``deepeval`` / provider SDKs out of harness import.
-        from devops_bench.metrics import evaluate_metrics_batch, get_judge_model
+        from devops_bench.metrics import describe_judge, evaluate_metrics_batch, get_judge_model
 
         try:
             judge_model = self._judge_model or get_judge_model()
@@ -1686,4 +1700,7 @@ class DefaultEvalHarness(Harness):
             # isolated by the pipeline's per-metric guard.
             _log.exception("judge unavailable; scoring deterministic metrics only")
             judge_model = None
+        judge = describe_judge(judge_model) if judge_model is not None else {}
+        for record in scorable:
+            record["judge"] = dict(judge)
         evaluate_metrics_batch(scorable, judge_model, use_mcp=self.use_mcp)

@@ -52,6 +52,8 @@ class ChaosResult(BaseModel):
         elapsed_time: Wall-clock seconds spent injecting the fault.
         error: Human-readable error string when ``success`` is False; ``None``
             on success.
+        driver: ``{"provider", "model"}`` of the LLM that drove the fault; empty
+            when no driver was built.
     """
 
     success: bool
@@ -59,6 +61,7 @@ class ChaosResult(BaseModel):
     output: str = ""
     elapsed_time: float = 0.0
     error: str | None = None
+    driver: dict[str, str | None] = {}
 
 
 class Fault(BaseModel, ABC):

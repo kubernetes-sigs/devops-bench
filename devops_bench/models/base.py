@@ -24,7 +24,7 @@ from devops_bench.core.config import get_env
 from devops_bench.core.model_providers import resolve_provider
 from devops_bench.core.registry import Registry
 
-__all__ = ["LLMClient", "MODELS", "get_model"]
+__all__ = ["LLMClient", "MODELS", "describe_client", "get_model"]
 
 MODELS: Registry[type[LLMClient]] = Registry("models")
 
@@ -35,6 +35,10 @@ class LLMClient(ABC):
     Concrete adapters wrap a provider SDK and translate between the agent
     runner's neutral message/tool shapes and the provider's API.
     """
+
+    #: Canonical provider id, stamped by :func:`get_model`; adapters set ``model_name``.
+    provider: str | None = None
+    model_name: str | None = None
 
     @abstractmethod
     async def generate_content(
@@ -128,4 +132,14 @@ def get_model(
     if importlib.util.find_spec(module) is not None:
         importlib.import_module(module)
     adapter_cls = MODELS.get(key)
-    return adapter_cls(model_name=model_name, backend=spec.backend, **kwargs)
+    client = adapter_cls(model_name=model_name, backend=spec.backend, **kwargs)
+    client.provider = spec.canonical
+    return client
+
+
+def describe_client(client: Any) -> dict[str, str | None]:
+    """Return the ``{"provider", "model"}`` identity of a built client (``None`` fields when unknown)."""
+    return {
+        "provider": getattr(client, "provider", None),
+        "model": getattr(client, "model_name", None),
+    }

@@ -23,7 +23,7 @@ import pytest
 from devops_bench.core.errors import ConfigError, NotRegisteredError
 from devops_bench.core.model_providers import ProviderSpec
 from devops_bench.models import base
-from devops_bench.models.base import MODELS, LLMClient, get_model
+from devops_bench.models.base import MODELS, LLMClient, describe_client, get_model
 
 
 class _StubClient(LLMClient):
@@ -81,6 +81,20 @@ def test_get_model_constructs_registered_adapter(fake_family):
     assert client.model_name == "fake-model-1"
     assert client.backend is None
     assert client.kwargs == {"timeout": 7}
+
+
+def test_get_model_stamps_the_canonical_provider(fake_family):
+    fake_family()
+
+    client = get_model(provider="fake-provider", model_name="fake-model-1")
+
+    assert client.provider == "fake-provider"
+    assert describe_client(client) == {"provider": "fake-provider", "model": "fake-model-1"}
+
+
+def test_describe_client_tolerates_anything() -> None:
+    assert describe_client(None) == {"provider": None, "model": None}
+    assert describe_client(object()) == {"provider": None, "model": None}
 
 
 def test_get_model_forwards_backend_hint(fake_family):
