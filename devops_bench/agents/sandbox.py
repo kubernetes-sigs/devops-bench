@@ -196,10 +196,24 @@ def build_network_plan(provider: Provider | None, cluster_info: ClusterInfo) -> 
             the ambient current-context.
 
     Raises:
-        SandboxError: The provider named a context kubectl does not know, or
-            no server URL could be read for a plan without its own rewrite.
+        SandboxError: A provider-backed plan carries no context pin, the
+            provider named a context kubectl does not know, or no server URL
+            could be read for a plan without its own rewrite.
     """
     plan = provider.sandbox_network_plan(cluster_info) if provider is not None else NetworkPlan()
+    if provider is not None and not plan.kubectl_context:
+        # An unpinned plan mints the agent's identity and token on the ambient
+        # current-context — whatever the operator's kubeconfig last selected.
+        # That is tolerable only for a run with no cluster identity of its own
+        # (provider ``None``, gated separately behind an explicit env opt-in);
+        # a provider knows which cluster it provisioned, so an unpinned answer
+        # here is a bug in the provider, not a state to run in.
+        raise SandboxError(
+            f"provider {type(provider).__name__} returned a network plan with no "
+            f"kubectl context pin for cluster {cluster_info.name!r}; provisioning "
+            "credentials on the ambient current-context is reserved for runs with "
+            "no provider at all — pin the plan to the context this cluster wrote"
+        )
     if plan.kubectl_context:
         known = (
             run(
@@ -222,8 +236,9 @@ def _rewrite_loopback_server(plan: NetworkPlan) -> NetworkPlan:
     """Remap a loopback apiserver URL to the host gateway, or pass the plan through.
 
     Loopback inside a container is the container; ``host.docker.internal``
-    reaches the same host listener. ``tls-server-name`` becomes ``localhost``
-    — the SAN such a cluster does have — so TLS stays verified rather than
+    reaches the same host listener. ``tls-server-name`` becomes the override
+    the source kubeconfig already declared, else ``localhost`` — the SAN a
+    loopback-published cluster does have — so TLS stays verified rather than
     disabled. A plan already carrying ``rewrite_server`` is left untouched.
     """
     if plan.rewrite_server:
@@ -238,6 +253,9 @@ def _rewrite_loopback_server(plan: NetworkPlan) -> NetworkPlan:
     if parsed.hostname not in _LOOPBACK_HOSTS:
         return plan
     port = f":{parsed.port}" if parsed.port else ""
+    declared = kubectl.config_value(
+        "{.clusters[0].cluster.tls-server-name}", context=plan.kubectl_context
+    )
     _log.info(
         "cluster apiserver is published on loopback (%s); the container will reach it "
         "at host.docker.internal%s",
@@ -247,7 +265,7 @@ def _rewrite_loopback_server(plan: NetworkPlan) -> NetworkPlan:
     return replace(
         plan,
         rewrite_server=f"https://host.docker.internal{port}",
-        tls_server_name=plan.tls_server_name or "localhost",
+        tls_server_name=plan.tls_server_name or declared or "localhost",
     )
 
 

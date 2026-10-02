@@ -172,6 +172,65 @@ def test_apply_builds_argv(mocker: MockerFixture) -> None:
     assert argv == ["kubectl", "apply", "-f", "/manifests/app.yaml", "-n", "staging"]
 
 
+def test_delete_builds_argv_and_ignores_not_found_by_default(mocker: MockerFixture) -> None:
+    # Not-found tolerance is the default because the callers are teardown
+    # paths, where "already gone" is success.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.delete("clusterrolebinding", "a", "b", context="kind-bench")
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "delete",
+        "clusterrolebinding",
+        "a",
+        "b",
+        "--ignore-not-found",
+        "--context",
+        "kind-bench",
+    ]
+
+
+def test_delete_can_skip_waiting_and_surface_not_found(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.delete("pod", "web-0", namespace="prod", ignore_not_found=False, wait=False)
+
+    argv = mock_run.call_args.args[0]
+    assert argv == ["kubectl", "delete", "pod", "web-0", "--wait=false", "-n", "prod"]
+
+
+def test_delete_threads_the_subprocess_timeout(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.delete("namespace", "bench-system", timeout=300)
+
+    assert mock_run.call_args.kwargs["timeout"] == 300
+
+
+def test_delete_refuses_an_empty_name_list(mocker: MockerFixture) -> None:
+    # ``kubectl delete <kind>`` with no name is a no-op kubectl rejects; a
+    # caller who wants --all should have to spell that out, not fall into it.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    with pytest.raises(ValueError):
+        kubectl.delete("pod")
+
+    mock_run.assert_not_called()
+
+
+def test_label_renders_a_none_value_as_removal(mocker: MockerFixture) -> None:
+    # ``key-`` is kubectl's spelling for "remove this label"; a mapping mixing
+    # sets and removals renders each element in its own form.
+    mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
+
+    kubectl.label("namespace", "default", {"keep": "1", "drop": None})
+
+    argv = mock_run.call_args.args[0]
+    assert argv == ["kubectl", "label", "namespace", "default", "keep=1", "drop-"]
+
+
 def test_rollout_status_with_timeout(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
 
