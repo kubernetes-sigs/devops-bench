@@ -138,6 +138,38 @@ def test_get_resource_timeout_defaults_to_none(mocker: MockerFixture) -> None:
     assert mock_run.call_args.kwargs["timeout"] is None
 
 
+def test_get_resource_threads_context_into_argv(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout="{}"),
+    )
+
+    kubectl.get_resource("deployment", "my-dep", context="gke_p_us-east1-b_c")
+
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "kubectl",
+        "get",
+        "deployment",
+        "my-dep",
+        "-o",
+        "json",
+        "--context",
+        "gke_p_us-east1-b_c",
+    ]
+
+
+def test_get_resource_without_context_omits_context_flag(mocker: MockerFixture) -> None:
+    mock_run = mocker.patch(
+        "devops_bench.k8s.kubectl.run",
+        return_value=_completed(stdout="{}"),
+    )
+
+    kubectl.get_resource("pods")
+
+    assert "--context" not in mock_run.call_args.args[0]
+
+
 def test_apply_builds_argv(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("devops_bench.k8s.kubectl.run", return_value=_completed())
 

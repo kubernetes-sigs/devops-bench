@@ -218,6 +218,7 @@ def get_resource(
     selector: str | None = None,
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
     timeout: float | None = None,
 ) -> dict[str, Any]:
     """Fetch a resource (or list) as parsed JSON via ``kubectl get -o json``.
@@ -228,6 +229,7 @@ def get_resource(
         selector: Optional label selector (``-l``).
         namespace: Optional namespace (``-n``).
         kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubeconfig context to pin the call to (``--context``).
         timeout: Optional seconds before the subprocess is killed. ``None``
             (the default) blocks indefinitely, so pass one whenever the API
             server might accept a connection and never respond.
@@ -249,7 +251,7 @@ def get_resource(
         "json",
         *_namespace_args(namespace),
     ]
-    completed = _run_kubectl(argv, kubeconfig, timeout=timeout)
+    completed = _run_kubectl(argv, kubeconfig, context=context, timeout=timeout)
     return json.loads(completed.stdout)
 
 
