@@ -230,12 +230,67 @@ which is a failure notice, nor its content parts, which mirror the artifact. The
 record is still written as `status: "success"` and scored, so either one left in
 the output would be graded as the agent's answer.
 
-A remote agent's trajectory is normally empty and its token counts `None`: the
-tool calls and LLM calls happen on the far side of the boundary, so they usually
-never reach the event stream as ADK parts. This is a property of what the remote
-reports, not a rule the parser enforces — an A2A event carrying
-`function_call` / `function_response` parts is folded into the trajectory like
-any other, and `usage_metadata` is accumulated wherever ADK supplies it.
+A remote agent's token counts are normally `None`: its LLM calls happen on the
+far side of the boundary, so they never reach the event stream. This is a
+property of what the remote reports, not a rule the parser enforces —
+`usage_metadata` is accumulated wherever ADK supplies it.
+
+#### Sub-agents behind the boundary
+
+The same boundary hides a remote's *fleet*. If the remote orchestrates
+sub-agents, none of their work arrives as ADK parts, so a naive read reports the
+whole pipeline as one opaque agent.
+
+What does cross is the task's **artifacts**. A remote that tags each artifact
+with its producer — `metadata: {"sub_agent": "triage_agent"}`, falling back to
+the artifact's `name` — gets one attributed trajectory entry per artifact, in
+artifact order:
+
+```json
+{"name": "triage_agent", "args": {}, "result": "matched skill k8s-node-pressure",
+ "status": "completed", "actor": "triage_agent"}
+```
+
+That answers which sub-agent ran, in what order, and what each contributed. Note
+what the entry is *not*: no tool call was observed, so `args` is empty and `name`
+repeats the producer. It is a sub-agent **contribution**, carried on the
+trajectory because that is the channel the judge reads. The calls a sub-agent's
+own loop made are not recoverable this way — that needs the remote to emit
+`function_call` parts across the boundary, which nothing observed so far does.
+
+Attribution follows the same all-or-nothing rule as every other harness (see
+[Add an agent harness](../how-to/add-an-agent-harness.md#multi-agent-trajectories)).
+A remote that tags a single artifact with its *own* name is one agent reporting
+its own work, not a delegation, so the run stays unattributed and serializes
+byte-identically to one produced before this existed. Once some artifact names a
+producer other than the remote, every entry gets an `actor` — including calls
+the remote made itself, and including an artifact the remote tagged with its
+*own* name. Both are `root`: one agent never ends a run under two labels.
+
+Artifacts are folded whatever the task's state. A failed task still contributes
+nothing to the *output*, but which sub-agents ran before it failed is exactly
+what a failed run gets inspected for.
+
+Each artifact is folded **once**. ADK re-emits a task envelope as it progresses,
+and every snapshot repeats the artifacts produced so far, so an artifact is
+identified by its `artifactId` (or, when it carries none, its position) scoped
+to the task id. Without that, a sub-agent would be reported once per snapshot it
+survived into, and "in what order" would be answered from a doubled list.
+
+A repeat **updates** that entry rather than being discarded. A2A lets a producer
+keep writing to one `artifactId`, so a later snapshot can carry text the first
+one only started; the entry keeps its first-seen position — when the sub-agent
+started — and takes the latest text. Each envelope is a snapshot of the whole
+task rather than a delta, so the text replaces rather than appends, and a
+snapshot carrying no text for an artifact leaves the result already recorded
+alone.
+
+`root` and the anonymous `subagent-N` labels are **reserved** for the harness:
+they mean *the top-level agent* and *the N-th delegate this run could not name*.
+A label arriving from outside — a remote's `sub_agent` tag, a CLI-stamped
+delegate role, an agent someone named `root` — is prefixed onto `subagent-…` if
+it lands in that namespace, so a delegate can never be read as the agent that
+delegated to it. Ordinary names are untouched, which is all of them in practice.
 
 The agent runs with the harness-owned workspace as the process working
 directory, matching the `cwd` the CLI harnesses hand their subprocess. An agent
@@ -255,6 +310,32 @@ server, **skills** drop `SKILL.md` files the agent can discover, and **rules**
 supply an operator brief. Setting `BENCH_USE_MCP=false` drops the MCP binding
 entirely, so the agent sees no tools and the scorer agrees that none ran — skills
 and rules are unaffected.
+
+## Trajectories from multi-agent harnesses
+
+Not every agent under test is a single actor. A harness may wrap a **fleet** — a
+top-level agent that routes work to specialized subagents — and by default a
+subagent's tool calls arrive in the trajectory indistinguishable from the
+top-level agent's own.
+
+That matters for scoring, not just for reading the trace. The judge grades a
+task's `recoverable_safety` constraints off the serialized trajectory, so an
+unattributed trace can't separate a router that stayed read-only from one whose
+worker made the change and reported back. Same for tool-use fidelity: "which
+agent reached for which tool" is unanswerable from a flat list.
+
+`ToolCall` therefore carries optional `actor` / `call_id` / `parent_id` fields
+naming the agent behind each call and linking it to the call that spawned it.
+They are omitted from the serialized entry when unset, so a single-agent harness
+is unaffected — including its scores. The `claude_code` harness populates them
+from the CLI's `parent_tool_use_id`; see
+[Add an agent harness](../how-to/add-an-agent-harness.md#multi-agent-trajectories)
+for the contract your harness should follow.
+
+> [!NOTE]
+> Attribution makes a subagent's calls *visible and labeled*. It does not by
+> itself make deterministic verifiers fleet-aware — those don't receive the
+> trajectory at all yet (issue #118).
 
 ## Adding your own harness
 
