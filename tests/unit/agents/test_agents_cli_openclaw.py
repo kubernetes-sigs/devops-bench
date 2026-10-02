@@ -596,19 +596,11 @@ def test_execute_does_not_prepend_rules_when_empty(
 def test_build_openclaw_config_wraps_servers_under_mcp() -> None:
     """A launchable binding renders under the ``mcp.servers`` config path."""
     cfg = _build_openclaw_config(AgentConfig(), (McpBinding(name="gke", command=("gke-mcp",)),))
-    assert cfg == {"mcp": {"servers": {"gke": {"command": "gke-mcp"}}}}
-
-
-def test_build_openclaw_config_empty_without_launchable_server_or_override() -> None:
-    """No MCP binding and a catalog-known model → empty config (caller skips)."""
-    assert _build_openclaw_config(AgentConfig(), ()) == {}
-    assert (
-        _build_openclaw_config(
-            AgentConfig(model="gemini-3.1-pro-preview"),
-            (McpBinding(name="b", command=(), tools=("t",)),),
-        )
-        == {}
-    )
+    assert cfg == {
+        "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
+    }
 
 
 def test_build_openclaw_config_merges_mcp_and_model_override() -> None:
@@ -747,33 +739,11 @@ def test_execute_writes_mcp_servers_into_isolated_config(
     )
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
     assert captured["cfg_path"], "OPENCLAW_CONFIG_PATH must be set when MCP is bound"
-    assert captured["config"] == {"mcp": {"servers": {"gke": {"command": "gke-mcp"}}}}
-
-
-def test_execute_writes_no_config_when_no_launchable_server(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """No command-bearing MCP binding and a catalog-known model → no isolated
-    config, env var unset."""
-    captured: dict = {}
-
-    def fake_bash(cmd, **kwargs):
-        env = kwargs.get("extra_env") or {}
-        captured["has_cfg"] = "OPENCLAW_CONFIG_PATH" in env
-        return _make_subprocess_result(stdout="ok", returncode=0)
-
-    _install_oc_run(monkeypatch, fake_bash, _empty_sessions_run)
-    caps = AllCapabilities(
-        mcp_servers=(McpBinding(name="builtin", command=(), tools=("alpha",)),),
-    )
-    OpenClawAgent(
-        AgentConfig(
-            target=str(tmp_path / "oc"),
-            model="gemini-3.1-pro-preview",
-            capabilities=caps,
-        )
-    ).run("p")
-    assert captured["has_cfg"] is False
+    assert captured["config"] == {
+        "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
+    }
 
 
 def test_execute_writes_model_override_config_without_mcp(
@@ -909,3 +879,132 @@ def test_execute_cleans_up_temp_working_dir_after_run(
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert captured["cwd"] is not None
     assert not os.path.exists(captured["cwd"])
+
+
+def test_build_openclaw_config_carries_only_code_mode_without_launchable_server_or_override() -> (
+    None
+):
+    """No MCP binding and a catalog-known model → only ``tools.codeMode``/``deny``."""
+    expected = {
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
+    }
+    assert _build_openclaw_config(AgentConfig(), ()) == expected
+    assert (
+        _build_openclaw_config(
+            AgentConfig(model="gemini-3.1-pro-preview"),
+            (McpBinding(name="b", command=(), tools=("t",)),),
+        )
+        == expected
+    )
+
+
+def test_build_openclaw_config_defaults_code_mode_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BENCH_OPENCLAW_CODE_MODE", raising=False)
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["tools"]["codeMode"] is False
+
+
+def test_build_openclaw_config_honors_code_mode_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BENCH_OPENCLAW_CODE_MODE", "1")
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["tools"]["codeMode"] is True
+
+
+def test_build_openclaw_config_denies_delegation_tools() -> None:
+    """sessions_spawn/sessions_yield are denied regardless of provider: the bench
+    always runs embedded (``oc agent --local``), so a delegated subagent's
+    completion never arrives and the run would end having done no work."""
+    cfg = _build_openclaw_config(AgentConfig(), ())
+    assert set(cfg["tools"]["deny"]) == {"sessions_spawn", "sessions_yield"}
+
+
+def test_build_openclaw_config_deny_does_not_clobber_code_mode() -> None:
+    """The deny list coexists with ``tools.codeMode``; neither overwrites the other."""
+    cfg = _build_openclaw_config(AgentConfig(), ())
+    assert cfg["tools"] == {
+        "codeMode": False,
+        "deny": ["sessions_spawn", "sessions_yield"],
+    }
+
+
+def test_build_openclaw_config_pins_openai_to_builtin_agent_runtime() -> None:
+    """openai provider gets an explicit agentRuntime so oc skips the codex route."""
+    cfg = _build_openclaw_config(AgentConfig(model="gpt-5.6-sol", provider="openai"), ())
+    assert cfg["models"]["providers"]["openai"]["agentRuntime"] == {"id": "openclaw"}
+
+
+def test_build_openclaw_config_omits_agent_runtime_for_non_openai_provider() -> None:
+    """A gemini/google-vertex config gets no agentRuntime override; it's inert today."""
+    cfg = _build_openclaw_config(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"), ())
+    assert "models" not in cfg or "openai" not in cfg["models"].get("providers", {})
+
+
+def test_build_openclaw_config_agent_runtime_does_not_clobber_model_override() -> None:
+    """The openai agentRuntime merge coexists with a catalog override for another provider."""
+    cfg = _build_openclaw_config(AgentConfig(model="gemini-3.5-flash", provider="google"), ())
+    assert cfg["models"]["providers"]["google"]["models"] == [
+        {"id": "gemini-3.5-flash", "name": "gemini-3.5-flash"}
+    ]
+    assert "openai" not in cfg["models"]["providers"]
+
+
+def test_build_openclaw_config_pins_openai_runtime_for_full_model_id() -> None:
+    """A full ``openai/...`` id selects the openai runtime with no explicit
+    provider set. Reading ``config.provider`` alone resolves to the default
+    provider, drops the pin, and lets oc route the run to the absent codex
+    runtime."""
+    cfg = _build_openclaw_config(AgentConfig(model="openai/gpt-5.6-sol"), ())
+    assert cfg["models"]["providers"]["openai"]["agentRuntime"] == {"id": "openclaw"}
+
+
+# ---------------------------------------------------------------------------
+# Model catalog override: models oc doesn't ship by default get registered in
+# the per-run isolated config, for both google-genai and google-vertex.
+# ---------------------------------------------------------------------------
+
+
+def test_build_openclaw_config_disables_memory_search() -> None:
+    """openclaw 2026.8.x enables memory search by default, which both calls an
+    OpenAI embeddings endpoint the run never selected and lets one run recall a
+    previous run of the same task. A benchmark run must be stateless."""
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["memory"] == {"search": {"enabled": False}}
+
+
+def test_execute_writes_code_mode_config_when_no_launchable_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No command-bearing MCP binding and a catalog-known model → the isolated
+    config still carries ``tools.codeMode``, so the env var is still set."""
+    captured: dict = {}
+
+    def fake_bash(cmd: str, **kwargs: Any) -> SimpleNamespace:
+        env = kwargs.get("extra_env") or {}
+        cfg_path = env.get("OPENCLAW_CONFIG_PATH")
+        captured["cfg_path"] = cfg_path
+        captured["config"] = (
+            json.loads(Path(cfg_path).read_text()) if cfg_path and Path(cfg_path).exists() else None
+        )
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    _install_oc_run(monkeypatch, fake_bash, _empty_sessions_run)
+    caps = AllCapabilities(
+        mcp_servers=(McpBinding(name="builtin", command=(), tools=("alpha",)),),
+    )
+    OpenClawAgent(
+        AgentConfig(
+            target=str(tmp_path / "oc"),
+            model="gemini-3.1-pro-preview",
+            capabilities=caps,
+        )
+    ).run("p")
+    assert captured["cfg_path"]
+    assert captured["config"] == {
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
+    }
