@@ -127,6 +127,7 @@ class ChecklistMetric:
 
         out: list[MetricScore] = []
         passed = 0
+        judged = 0
         total = len(dynamic_metrics)
         for m in dynamic_metrics:
             try:
@@ -135,16 +136,35 @@ class ChecklistMetric:
                     out.append(ms)
                     if ms.success:
                         passed += 1
+                judged += 1
             except Exception as e:  # noqa: BLE001 - keep scoring the rest
                 _log.error("Error evaluating metric %s: %s", m.name, e)
+                # Null score: the record shows the item was skipped, not failed.
+                out.append(MetricScore(name=m.name, score=None, reason=f"Not judged: {e}"))
 
-        ratio = passed / total if total > 0 else 0.0
-        out.append(
-            MetricScore(
-                name="ChecklistScore",
-                score=ratio,
-                success=ratio >= CHECKLIST_THRESHOLD if total > 0 else False,
-                reason=f"Passed {passed} out of {total} checks.",
+        # Unjudged items leave the denominator; with nothing judged the aggregate abstains.
+        unjudged = total - judged
+        if judged:
+            ratio = passed / judged
+            suffix = f" ({unjudged} could not be judged)" if unjudged else ""
+            out.append(
+                MetricScore(
+                    name="ChecklistScore",
+                    score=ratio,
+                    success=ratio >= CHECKLIST_THRESHOLD,
+                    reason=f"Passed {passed} out of {judged} evaluated checks{suffix}.",
+                )
             )
-        )
+        else:
+            _log.error(
+                "the judge evaluated none of %d checklist item(s); withholding ChecklistScore",
+                total,
+            )
+            out.append(
+                MetricScore(
+                    name="ChecklistScore",
+                    score=None,
+                    reason=f"None of {total} checks could be judged.",
+                )
+            )
         return out

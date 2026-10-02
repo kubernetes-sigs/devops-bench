@@ -57,8 +57,10 @@ In the record's `scores` map, read the entries in the order that matters:
 - **`ToolInvocation.reason`** — did it call the right tools / take a sane
   trajectory (present only when MCP is on).
 - **`Check: <item>.reason`** for each `expected_output` requirement, and
-  **`ChecklistScore.reason`** for the passed/total ratio in words
-  (`"Passed 3 out of 5 checks."`).
+  **`ChecklistScore.reason`** for the passed/judged ratio in words
+  (`"Passed 3 out of 4 evaluated checks (1 could not be judged)."`); a `Check:`
+  entry with a `null` score is one the judge could not evaluate, and a `null`
+  `ChecklistScore` means no item could be judged at all.
 - **`GroundingAccuracy.reason`** — reads "Applied X out of Y documented
   constraints (Critical: a/b)"; note it is on a **0–5 scale**, and a short
   *critical* count caps the band even when the raw count looks fine.
