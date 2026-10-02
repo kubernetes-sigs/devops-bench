@@ -193,6 +193,14 @@ class Task(BaseModel):
             the display metadata (``title``, ``summary``, ``category``, and a
             ``title`` and ``description`` on every verification entry), because
             the leaderboard renders validated tasks and nothing else.
+        requires_unsandboxed: Opt this task out of the agent sandbox even when
+            the run asks for one. For a task whose objective *is* the credential
+            the sandbox withholds: ``secret-rotation`` drives Secret Manager
+            through Application Default Credentials, and ADC is exactly what the
+            boundary strips, so a sandboxed run cannot do the task at all.
+            Declared on the task rather than passed per-run so the exemption
+            travels with the thing that needs it and is visible to anyone
+            reading the spec.
     """
 
     model_config = _STRICT
@@ -216,6 +224,7 @@ class Task(BaseModel):
     # Closed set: a typo'd level must fail validation, not silently enforce.
     agent_pod_security: Literal["baseline", "privileged"] = "baseline"
     validated: bool = False
+    requires_unsandboxed: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -245,6 +254,7 @@ class Task(BaseModel):
                 "documentation": [],
                 "agent_pod_security": "baseline",
                 "validated": False,
+                "requires_unsandboxed": False,
             },
         )
 
@@ -353,6 +363,7 @@ class Task(BaseModel):
         validated = raw.get("validated", False)
         tags = raw.get("tags", [])
         check_groups = raw.get("check_groups", {})
+        requires_unsandboxed = raw.get("requires_unsandboxed", False)
 
         return cls.model_validate(
             {
@@ -378,6 +389,9 @@ class Task(BaseModel):
                     "baseline" if agent_pod_security is None else _text(str(agent_pod_security))
                 ),
                 "validated": False if validated is None else validated,
+                "requires_unsandboxed": (
+                    False if requires_unsandboxed is None else requires_unsandboxed
+                ),
             }
         )
 

@@ -106,11 +106,13 @@ class Provider(ABC):
     def sandbox_network_plan(self, cluster_info: ClusterInfo) -> NetworkPlan:
         """Describe how a sandboxed agent container reaches this cluster.
 
-        The default suits any endpoint reachable from a bridge-networked
-        container; the sandbox also rewrites a loopback server to
-        ``host.docker.internal`` on top of whatever is returned. Override
-        only when that generic step cannot infer what is needed: a Docker
-        network to join, an in-network hostname, or a context pin.
+        The sandbox refuses a provider-backed plan with no ``kubectl_context``
+        pin (unpinned would mint the agent's credential on the ambient
+        current-context), and this default returns an unpinned plan — so every
+        provider must override, if only to add the pin. Beyond that the
+        sandbox already rewrites a loopback server to ``host.docker.internal``;
+        add more only when that generic step cannot infer it: a Docker network
+        to join, or an in-network hostname.
         """
         del cluster_info
         return NetworkPlan()

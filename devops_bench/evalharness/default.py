@@ -296,7 +296,11 @@ class DefaultEvalHarness(Harness):
     # -- agent resolution (model/provider-agnostic) -----------------------
 
     def resolve_agent(
-        self, agent_type: str, sandbox_spec: agent_sandbox.SandboxSpec | None = None
+        self,
+        agent_type: str,
+        sandbox_spec: agent_sandbox.SandboxSpec | None = None,
+        *,
+        sandbox_exempt: bool = False,
     ) -> Any:
         """Resolve and instantiate the agent under test from the registry.
 
@@ -324,19 +328,30 @@ class DefaultEvalHarness(Harness):
         agent_cls = AGENTS.get(key)
         if agent_cls is None:
             raise NotRegisteredError(AGENTS.name, key, AGENTS.keys())
-        return agent_cls(self.build_agent_config(sandbox_spec))
+        return agent_cls(self.build_agent_config(sandbox_spec, sandbox_exempt=sandbox_exempt))
 
     # -- agent config + capabilities (explicit; no env detour) ------------
 
     def build_agent_config(
-        self, sandbox_spec: agent_sandbox.SandboxSpec | None = None
+        self,
+        sandbox_spec: agent_sandbox.SandboxSpec | None = None,
+        *,
+        sandbox_exempt: bool = False,
     ) -> AgentConfig:
         """Return the snapshotted :class:`AgentConfig`, built once in ``__init__``.
 
         ``sandbox_spec`` (the task-completed spec ``_run_one`` prepared)
         replaces the snapshot's skeletal ``sandbox`` field for that one
-        agent; everything else is unchanged.
+        agent; ``sandbox_exempt`` (a ``requires_unsandboxed`` task) clears
+        it instead. Everything else is unchanged.
         """
+        if sandbox_exempt:
+            # A task that declared ``requires_unsandboxed``. Clearing the field
+            # rather than leaving the skeletal spec in place is the whole point:
+            # the agent's own gate reads ``config.sandbox is not None``, so a
+            # leftover spec would either refuse the run or hand the executor an
+            # incomplete boundary.
+            return replace(self._agent_config, sandbox=None)
         if sandbox_spec is not None:
             return replace(self._agent_config, sandbox=sandbox_spec)
         return self._agent_config
@@ -347,7 +362,8 @@ class DefaultEvalHarness(Harness):
         Called exactly once, from :meth:`__init__`. Starts from
         :meth:`AgentConfig.from_env` so existing ``AGENT_*`` knobs continue
         to flow through (``model``, ``provider``, ``api_key``, ``target``,
-        ``timeout``, ``max_turns``, ``extra_env``), then replaces
+        ``timeout``, ``max_turns``, ``extra_env``, ``extra_flags``), then
+        replaces
         capabilities with the orchestrator-owned aggregate so the agent
         cannot see a granted MCP binding when ``use_mcp`` is False.
         """
@@ -362,6 +378,12 @@ class DefaultEvalHarness(Harness):
             max_turns=base.max_turns,
             capabilities=capabilities,
             extra_env=base.extra_env,
+            # Rebuilding field-by-field silently drops anything not named
+            # here. Omitting extra_flags meant AGENT_EXTRA_FLAGS parsed fine
+            # and then never reached the binary, so agy kept its 5m default
+            # --print-timeout and every run longer than that died mid-task
+            # with "timeout waiting for response".
+            extra_flags=base.extra_flags,
             sandbox=base.sandbox,
         )
 
@@ -791,14 +813,17 @@ class DefaultEvalHarness(Harness):
         prompt: str,
         ctx: RunContext,
         sandbox_spec: agent_sandbox.SandboxSpec | None = None,
+        *,
+        sandbox_exempt: bool = False,
     ) -> AgentResult:
         """Run the configured agent against ``prompt`` through the registry.
 
         ``ctx.workspace_path`` becomes the agent's working directory;
         ``sandbox_spec``, when given, is the task-completed sandbox spec the
-        agent runs under.
+        agent runs under, and ``sandbox_exempt`` runs a ``requires_unsandboxed``
+        task outside the boundary.
         """
-        agent = self.resolve_agent(self.agent_type, sandbox_spec)
+        agent = self.resolve_agent(self.agent_type, sandbox_spec, sandbox_exempt=sandbox_exempt)
         return agent.run(prompt, workspace_path=ctx.workspace_path)
 
     # -- pipeline ---------------------------------------------------------
@@ -983,8 +1008,18 @@ class DefaultEvalHarness(Harness):
         )
         from devops_bench.results import setup_id as results_setup_id
 
+        # ``sandboxed`` is the ARM's property (the run was requested sandboxed),
+        # so it belongs in the setup id: a sandboxed arm aggregates as its own
+        # dashboard setup and the A/B soak is a plain group-by. Per-task
+        # divergence (a requires_unsandboxed exemption) is carried on each
+        # row's own ``sandboxed`` field instead.
+        sandbox = self._agent_config.sandbox
         augmentation = derive_augmentation(
-            {"use_mcp": self.use_mcp, "skills": list(self._granted_skill_paths)}
+            {
+                "use_mcp": self.use_mcp,
+                "skills": list(self._granted_skill_paths),
+                "sandboxed": sandbox is not None,
+            }
         )
         # Record the canonical harness key so an arm selected via a friendly
         # alias (e.g. ``claude-code`` / ``gemini-cli``) aggregates with the
@@ -999,6 +1034,14 @@ class DefaultEvalHarness(Harness):
             model=model,
             harness=harness,
             augmentation=augmentation,
+            # A mutable tag is not provenance; the digest is. Resolved at
+            # report time (best-effort, None recorded honestly on failure) so
+            # an A/B pair claiming "the same image" is checkable after the
+            # fact.
+            sandbox_image=sandbox.image if sandbox is not None else None,
+            sandbox_image_digest=(
+                agent_sandbox.image_digest(sandbox.image) if sandbox is not None else None
+            ),
         )
         rows = build_rows(detailed_results, manifest)
         self.reporter.write_rows(run_dir, [row.to_dict() for row in rows])
@@ -1070,6 +1113,7 @@ class DefaultEvalHarness(Harness):
         creds_dir: Path | None = None
         completed_spec: agent_sandbox.SandboxSpec | None = None
         sandbox_rules: tuple[SensitiveAccessRule, ...] = ()
+        sandbox_exempt = False
         verification_parse_errors: list[dict[str, str]] = []
         entries: list[VerificationEntry] = []
         # Track the substituted prompt / expectation / safety checklists as they
@@ -1098,7 +1142,20 @@ class DefaultEvalHarness(Harness):
             # the directory the agent actually writes to (its CLI wrapper's
             # working directory), not the harness process's launch cwd.
             workspace_path = Path(tempfile.mkdtemp(prefix="devops-bench-workspace-"))
-            if self._agent_config.sandbox is not None:
+            if self._agent_config.sandbox is not None and task.requires_unsandboxed:
+                # The task declared that it cannot run behind the boundary —
+                # secret-rotation drives Secret Manager through ADC, and ADC is
+                # exactly what the sandbox strips. Skip the sandbox for this
+                # task instead of failing it, and say so: an operator who asked
+                # for a sandboxed matrix must be able to see which tasks did not
+                # get one, rather than discovering it in the manifest later.
+                _log.warning(
+                    "task %s declares requires_unsandboxed; running it OUTSIDE the "
+                    "agent sandbox even though a sandbox was requested",
+                    task.name,
+                )
+                sandbox_exempt = True
+            elif self._agent_config.sandbox is not None:
                 # First moment both the cluster endpoint and the workspace
                 # exist. The kubeconfig gets its own temp dir so the
                 # credential only enters through its read-only bind; a
@@ -1206,7 +1263,9 @@ class DefaultEvalHarness(Harness):
             # created home/ is already collected (whole) by the workspace diff.
             home_dir = workspace_path / "home"
             before_home = snapshot_dir(home_dir) if completed_spec is not None else set()
-            agent_res = self.execute_agent(prompt, context, sandbox_spec=completed_spec)
+            agent_res = self.execute_agent(
+                prompt, context, sandbox_spec=completed_spec, sandbox_exempt=sandbox_exempt
+            )
             # The agent's turn just ended; stop sampling immediately so the
             # hold window is exactly "seed through the end of the agent's
             # turn" rather than continuing to sample through the (potentially
@@ -1250,6 +1309,7 @@ class DefaultEvalHarness(Harness):
 
             result = self._build_success_record(
                 task=task,
+                sandboxed=completed_spec is not None,
                 prompt=prompt,
                 expected_output=expected_output,
                 agent_res=agent_res,
@@ -1297,6 +1357,7 @@ class DefaultEvalHarness(Harness):
             result = self._build_failed_record(
                 task,
                 exc,
+                sandboxed=completed_spec is not None,
                 prompt=prompt,
                 expected_output=expected_output,
                 recoverable_safety=recoverable_safety,
@@ -1317,6 +1378,21 @@ class DefaultEvalHarness(Harness):
                 # stop() is idempotent and never raises; this covers any path
                 # that skipped the two calls above.
                 safeguard_monitor.stop()
+            if completed_spec is not None:
+                # Before the infra teardown, while there is still a cluster to
+                # accept the deletes. On a cluster the deployer is about to
+                # destroy this is redundant but cheap; on a REUSED one
+                # (BENCH_NO_TEARDOWN, a kind dev loop, the vcluster host) it
+                # is correctness: the pod-security policy is not
+                # username-scoped, so left behind it denies the OPERATOR's own
+                # privileged workloads on the next run. Teardown never raises
+                # by design; the guard is for the finally block's sake.
+                try:
+                    agent_credentials.teardown_agent_credentials(
+                        completed_spec.network.kubectl_context
+                    )
+                except Exception:
+                    _log.exception("sandbox credential teardown failed; continuing")
             if deployer is not None:
                 self._teardown(deployer, infra_config, task.name)
             if workspace_path is not None:
@@ -1365,13 +1441,22 @@ class DefaultEvalHarness(Harness):
             kubeconfig = creds_dir / "kubeconfig"
             kubeconfig.write_text("apiVersion: v1\nkind: Config\n")
             kubeconfig.chmod(0o600)
-        return replace(
-            self._agent_config.sandbox,
-            network=plan,
-            workspace=workspace_path,
-            kubeconfig=kubeconfig,
-            fixture_mounts=agent_sandbox.discover_fixture_mounts(cluster_info.name),
-        )
+        try:
+            return replace(
+                self._agent_config.sandbox,
+                network=plan,
+                workspace=workspace_path,
+                kubeconfig=kubeconfig,
+                fixture_mounts=agent_sandbox.discover_fixture_mounts(cluster_info.name),
+            )
+        except Exception:
+            # The cluster objects are already provisioned, but the completed
+            # spec that would carry their context to the run-end teardown
+            # never comes to exist — so remove them here, keeping the original
+            # error as the one the caller sees (teardown never raises).
+            if with_cluster:
+                agent_credentials.teardown_agent_credentials(plan.kubectl_context)
+            raise
 
     def _inventory_sandbox_home(
         self,
@@ -1412,6 +1497,7 @@ class DefaultEvalHarness(Harness):
     def _build_success_record(
         self,
         *,
+        sandboxed: bool = False,
         task: Task,
         prompt: str,
         expected_output: str,
@@ -1437,7 +1523,7 @@ class DefaultEvalHarness(Harness):
         """
         dumped = agent_res.to_dict()
         agent_errors = list(dumped.get("errors") or [])
-        record = self._empty_record(task)
+        record = self._empty_record(task, sandboxed=sandboxed)
         record.update(
             {
                 "input": prompt,
@@ -1488,6 +1574,7 @@ class DefaultEvalHarness(Harness):
         task: Task,
         exc: Exception,
         *,
+        sandboxed: bool = False,
         prompt: str | None = None,
         expected_output: str | None = None,
         recoverable_safety: list[str] | None = None,
@@ -1522,7 +1609,7 @@ class DefaultEvalHarness(Harness):
                 under ``no_infra``.
         """
         error_text = str(exc)
-        record = self._empty_record(task)
+        record = self._empty_record(task, sandboxed=sandboxed)
         record.update(
             {
                 "input": prompt if prompt is not None else task.prompt,
@@ -1546,7 +1633,7 @@ class DefaultEvalHarness(Harness):
         )
         return record
 
-    def _empty_record(self, task: Task) -> dict[str, Any]:
+    def _empty_record(self, task: Task, *, sandboxed: bool = False) -> dict[str, Any]:
         """Seed every record with the symmetric key set.
 
         Centralizes the default values for the keys that match across
@@ -1591,6 +1678,10 @@ class DefaultEvalHarness(Harness):
                 "use_mcp": self.use_mcp,
                 "skills": list(self._granted_skill_paths),
             },
+            # Whether THIS task's agent actually ran inside the container
+            # boundary — per-record, not per-run: a ``requires_unsandboxed``
+            # task inside a sandboxed run legitimately differs from its arm.
+            "sandboxed": sandboxed,
             "verification_parse_errors": [],
             "verification_report": [],
             "verification_status": "",

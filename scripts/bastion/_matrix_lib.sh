@@ -290,6 +290,18 @@ matrix_dispatch() {
     echo "export AGENT_PROVIDER='${AGENT_PROVIDER}' JUDGE_PROVIDER='${JUDGE_PROVIDER}' JUDGE_MODEL='${JUDGE_MODEL}'"
     echo "export AGENT_TIMEOUT_SEC='${AGENT_TIMEOUT_SEC}'"
     echo "export BENCH_PARALLEL=true"
+    if [ -n "${BENCH_AGENT_SANDBOX:-}" ]; then
+      # The sandbox opt-in rides into the detached runner explicitly: on the
+      # remote arm the runner's env is only what this script bakes in, so an
+      # operator export that stays behind on the workstation would silently
+      # produce an UNSANDBOXED matrix. The escape hatches
+      # (BENCH_SANDBOX_ALLOW_ADMIN_CREDS / _ALLOW_AMBIENT_CLUSTER) are
+      # deliberately not forwarded — never for scored runs.
+      echo "export BENCH_AGENT_SANDBOX='${BENCH_AGENT_SANDBOX}'"
+      if [ -n "${BENCH_SANDBOX_IMAGE:-}" ]; then
+        echo "export BENCH_SANDBOX_IMAGE='${BENCH_SANDBOX_IMAGE}'"
+      fi
+    fi
     echo 'run_one() {'
     echo '  local rid="$1" task="$2" kvs="$3" arm="$4" kv rc rdir'
     echo '  local d="$OUT/$rid"; mkdir -p "$d"'
