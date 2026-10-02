@@ -41,6 +41,7 @@ the reason to reach it).
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import sys
@@ -67,6 +68,7 @@ __all__ = [
     "discover_fixture_mounts",
     "filter_boundary_env",
     "container_name_for_workspace",
+    "image_digest",
     "kill_container",
     "sweep_stray_containers",
 ]
@@ -196,10 +198,24 @@ def build_network_plan(provider: Provider | None, cluster_info: ClusterInfo) -> 
             the ambient current-context.
 
     Raises:
-        SandboxError: The provider named a context kubectl does not know, or
-            no server URL could be read for a plan without its own rewrite.
+        SandboxError: A provider-backed plan carries no context pin, the
+            provider named a context kubectl does not know, or no server URL
+            could be read for a plan without its own rewrite.
     """
     plan = provider.sandbox_network_plan(cluster_info) if provider is not None else NetworkPlan()
+    if provider is not None and not plan.kubectl_context:
+        # An unpinned plan mints the agent's identity and token on the ambient
+        # current-context — whatever the operator's kubeconfig last selected.
+        # That is tolerable only for a run with no cluster identity of its own
+        # (provider ``None``, gated separately behind an explicit env opt-in);
+        # a provider knows which cluster it provisioned, so an unpinned answer
+        # here is a bug in the provider, not a state to run in.
+        raise SandboxError(
+            f"provider {type(provider).__name__} returned a network plan with no "
+            f"kubectl context pin for cluster {cluster_info.name!r}; provisioning "
+            "credentials on the ambient current-context is reserved for runs with "
+            "no provider at all — pin the plan to the context this cluster wrote"
+        )
     if plan.kubectl_context:
         known = (
             run(
@@ -222,8 +238,9 @@ def _rewrite_loopback_server(plan: NetworkPlan) -> NetworkPlan:
     """Remap a loopback apiserver URL to the host gateway, or pass the plan through.
 
     Loopback inside a container is the container; ``host.docker.internal``
-    reaches the same host listener. ``tls-server-name`` becomes ``localhost``
-    — the SAN such a cluster does have — so TLS stays verified rather than
+    reaches the same host listener. ``tls-server-name`` becomes the override
+    the source kubeconfig already declared, else ``localhost`` — the SAN a
+    loopback-published cluster does have — so TLS stays verified rather than
     disabled. A plan already carrying ``rewrite_server`` is left untouched.
     """
     if plan.rewrite_server:
@@ -238,6 +255,9 @@ def _rewrite_loopback_server(plan: NetworkPlan) -> NetworkPlan:
     if parsed.hostname not in _LOOPBACK_HOSTS:
         return plan
     port = f":{parsed.port}" if parsed.port else ""
+    declared = kubectl.config_value(
+        "{.clusters[0].cluster.tls-server-name}", context=plan.kubectl_context
+    )
     _log.info(
         "cluster apiserver is published on loopback (%s); the container will reach it "
         "at host.docker.internal%s",
@@ -247,7 +267,7 @@ def _rewrite_loopback_server(plan: NetworkPlan) -> NetworkPlan:
     return replace(
         plan,
         rewrite_server=f"https://host.docker.internal{port}",
-        tls_server_name=plan.tls_server_name or "localhost",
+        tls_server_name=plan.tls_server_name or declared or "localhost",
     )
 
 
@@ -521,6 +541,45 @@ class SandboxExecutor:
 def container_name_for_workspace(workspace: Path) -> str:
     """Deterministic container name tied 1:1 to the run's workspace directory."""
     return f"{_CONTAINER_NAME_PREFIX}{workspace.name}"
+
+
+def image_digest(image: str) -> str | None:
+    """Resolve ``image`` to a content digest for the run manifest. Never raises.
+
+    Prefers the first ``RepoDigests`` entry — the registry-anchored identity
+    that survives across hosts — and falls back to the local image ID (the
+    config hash) for an image that was only ever built locally and has no
+    repo digest. Both are content-addressed; either one turns "we ran
+    ``agent-sandbox:dev``" from a mutable-tag claim into evidence.
+
+    Best-effort by design: provenance must never sink a finished run, so a
+    missing docker binary, an unknown image, or malformed inspect output all
+    log and return ``None`` — and the manifest records the absence honestly.
+
+    Args:
+        image: The image reference the run used (tag or digest form).
+
+    Returns:
+        A ``repo@sha256:...`` or ``sha256:...`` string, or ``None``.
+    """
+    completed = run(["docker", "image", "inspect", image], check=False)
+    if completed.returncode != 0:
+        _log.warning(
+            "could not resolve a digest for sandbox image %s; the manifest will "
+            "carry the tag only (%s)",
+            image,
+            (completed.stderr or "").strip() or "docker image inspect failed",
+        )
+        return None
+    try:
+        inspected = json.loads(completed.stdout or "[]")
+        first = inspected[0]
+        repo_digests = first.get("RepoDigests") or []
+        digest = repo_digests[0] if repo_digests else first.get("Id")
+    except (json.JSONDecodeError, IndexError, AttributeError, TypeError):
+        _log.warning("unexpected docker inspect output for sandbox image %s", image)
+        return None
+    return digest or None
 
 
 def kill_container(name: str) -> None:

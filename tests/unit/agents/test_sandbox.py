@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -103,10 +104,58 @@ def test_container_name_for_workspace_differs_per_workspace() -> None:
     assert a != b
 
 
+def test_image_digest_prefers_the_repo_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RepoDigests is the registry-anchored identity that survives across
+    hosts; the local Id is only the fallback for a never-pushed image."""
+    inspected = [
+        {
+            "Id": "sha256:aaaa",
+            "RepoDigests": ["registry.example/agent-sandbox@sha256:bbbb"],
+        }
+    ]
+
+    def fake_run(argv, **kwargs):
+        assert argv == ["docker", "image", "inspect", "agent-sandbox:v1"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(inspected), stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("agent-sandbox:v1") == (
+        "registry.example/agent-sandbox@sha256:bbbb"
+    )
+
+
+def test_image_digest_falls_back_to_the_local_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps([{"Id": "sha256:aaaa", "RepoDigests": []}]), stderr=""
+        )
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("agent-sandbox:dev") == "sha256:aaaa"
+
+
+def test_image_digest_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provenance must never sink a finished run: unknown image, missing
+    docker, malformed output all yield None (and the manifest records the
+    absence honestly)."""
+
+    def unknown_image(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+
+    monkeypatch.setattr(sandbox, "run", unknown_image)
+    assert sandbox.image_digest("nope:latest") is None
+
+    def malformed(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="not-json", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", malformed)
+    assert sandbox.image_digest("nope:latest") is None
+
+
 def test_kill_container_invokes_docker_kill_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         captured["argv"] = argv
         return SimpleNamespace(returncode=0, stdout="devops-bench-agent-ws\n", stderr="")
 
@@ -121,7 +170,7 @@ def test_kill_container_never_raises_when_docker_kill_fails(
     """Killing an already-gone container (the common case, ``--rm`` beat us to
     it) must be a harmless no-op, not a crash."""
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
 
     monkeypatch.setattr(sandbox, "run", fake_run)
@@ -133,7 +182,7 @@ def test_sweep_stray_containers_kills_only_matching_names(
 ) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(argv)
         if argv[:2] == ["docker", "ps"]:
             return SimpleNamespace(returncode=0, stdout="abc123\ndef456\n", stderr="")
@@ -152,7 +201,7 @@ def test_sweep_stray_containers_kills_only_matching_names(
 def test_sweep_stray_containers_handles_docker_ps_failure_without_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=1, stdout="", stderr="docker daemon not running")
 
     monkeypatch.setattr(sandbox, "run", fake_run)
@@ -164,7 +213,7 @@ def test_sweep_stray_containers_is_a_noop_when_none_are_running(
 ) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         calls.append(argv)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -194,16 +243,22 @@ def _cluster(name: str = "c1") -> ClusterInfo:
 
 
 def _patch_plan_reads(
-    monkeypatch: pytest.MonkeyPatch, *, contexts: tuple[str, ...] = (), server: str = ""
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    contexts: tuple[str, ...] = (),
+    server: str = "",
+    tls_server_name: str = "",
 ) -> None:
-    """Answer the two kubectl reads a plan build makes; the context probe
-    uses ``sandbox.run``, the server read ``k8s.kubectl``, so patch both."""
+    """Answer the kubectl reads a plan build makes; the context probe uses
+    ``sandbox.run``, the server reads ``k8s.kubectl``, so patch both."""
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         if argv[:3] == ["kubectl", "config", "get-contexts"]:
             return SimpleNamespace(returncode=0, stdout="\n".join(contexts) + "\n", stderr="")
         # ``--context`` sits right after the binary, so match the subcommand.
         assert "view" in argv
+        if any("tls-server-name" in str(part) for part in argv):
+            return SimpleNamespace(returncode=0, stdout=tls_server_name, stderr="")
         return SimpleNamespace(returncode=0, stdout=server, stderr="")
 
     monkeypatch.setattr(sandbox, "run", fake_run)
@@ -245,12 +300,35 @@ def test_build_network_plan_rewrites_a_loopback_server(
     monkeypatch: pytest.MonkeyPatch, server: str, expected: str
 ) -> None:
     """Loopback is remapped; TLS is redirected to the ``localhost`` SAN, not disabled."""
-    _patch_plan_reads(monkeypatch, server=server)
+    _patch_plan_reads(monkeypatch, contexts=("kind-c1",), server=server)
 
-    plan = sandbox.build_network_plan(_FakeProvider(NetworkPlan()), _cluster())
+    plan = sandbox.build_network_plan(
+        _FakeProvider(NetworkPlan(kubectl_context="kind-c1")), _cluster()
+    )
 
     assert plan.rewrite_server == expected
     assert plan.tls_server_name == "localhost"
+
+
+def test_build_network_plan_preserves_a_declared_tls_server_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cluster that needed a ``tls-server-name`` override outside the sandbox
+    (a cert with no ``localhost`` SAN) needs the same one inside; hardcoding
+    ``localhost`` over it would turn a working config into a TLS failure."""
+    _patch_plan_reads(
+        monkeypatch,
+        contexts=("kind-c1",),
+        server="https://127.0.0.1:6443",
+        tls_server_name="10.96.0.1",
+    )
+
+    plan = sandbox.build_network_plan(
+        _FakeProvider(NetworkPlan(kubectl_context="kind-c1")), _cluster()
+    )
+
+    assert plan.rewrite_server == "https://host.docker.internal:6443"
+    assert plan.tls_server_name == "10.96.0.1"
 
 
 def test_build_network_plan_leaves_a_routable_server_alone(
@@ -290,9 +368,23 @@ def test_build_network_plan_refuses_a_context_kubectl_does_not_know(
 def test_build_network_plan_refuses_an_unreadable_server(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_plan_reads(monkeypatch, server="")
+    _patch_plan_reads(monkeypatch, contexts=("kind-c1",), server="")
 
     with pytest.raises(SandboxError, match="server URL"):
+        sandbox.build_network_plan(
+            _FakeProvider(NetworkPlan(kubectl_context="kind-c1")), _cluster()
+        )
+
+
+def test_build_network_plan_refuses_a_provider_backed_plan_without_a_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider that answers with an unpinned plan would mint the agent's
+    credential on the ambient current-context — the exact state the ambient
+    escape hatch waives only for runs with no provider at all."""
+    _patch_plan_reads(monkeypatch, server="https://34.10.0.1")
+
+    with pytest.raises(SandboxError, match="no\\s+kubectl context pin"):
         sandbox.build_network_plan(_FakeProvider(NetworkPlan()), _cluster())
 
 
@@ -619,7 +711,7 @@ def test_executor_run_reaps_the_container_on_timeout(
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
     kills: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         if argv[:2] == ["docker", "run"]:
             raise SubprocessError(argv, returncode=-1, stdout="partial", stderr="")
         if argv[:2] == ["docker", "kill"]:
@@ -642,7 +734,7 @@ def test_executor_run_reaps_the_container_after_a_clean_exit(
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
     kills: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         if argv[:2] == ["docker", "kill"]:
             kills.append(argv)
             return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
@@ -661,7 +753,7 @@ def test_executor_run_passes_through_check_and_timeout(
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
     seen: dict = {}
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         if argv[:2] == ["docker", "run"]:
             seen.update(kwargs)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -861,7 +953,7 @@ def test_run_agent_cmd_flag_off_is_a_verbatim_passthrough() -> None:
     agent = _DummyAgent(AgentConfig())
     captured: dict = {}
 
-    def fake_host_run(cmd, **kwargs):
+    def fake_host_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         captured["cmd"] = cmd
         captured.update(kwargs)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -894,7 +986,7 @@ def test_run_agent_cmd_defaults_to_core_subprocess_run(
     agent = _DummyAgent(AgentConfig())
     called: dict = {}
 
-    def fake_core_run(cmd, **kwargs):
+    def fake_core_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         called["cmd"] = cmd
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -910,7 +1002,7 @@ def test_run_agent_cmd_dispatches_to_the_executor_when_sandbox_is_set(
     agent = _DummyAgent(AgentConfig(sandbox=spec))
     docker_argvs: list[list[str]] = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
         docker_argvs.append(argv)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 

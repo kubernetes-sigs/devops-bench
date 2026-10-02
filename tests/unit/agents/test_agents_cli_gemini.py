@@ -41,8 +41,10 @@ from devops_bench.agents.cli.gemini_cli.agent import (
     _build_env,
     _build_settings,
 )
+from devops_bench.agents.sandbox import SandboxSpec
 from devops_bench.agents.shared.vertex_env import VERTEX_LOCATION_ENVS, VERTEX_PROJECT_ENVS
 from devops_bench.core.errors import ConfigError, SubprocessError
+from devops_bench.core.model_providers import ProviderSpec
 
 
 @pytest.fixture(autouse=True)
@@ -308,6 +310,62 @@ def test_build_env_unknown_provider_raises_even_when_keyless() -> None:
     # Validation is unconditional — a typoed provider fails loud on a keyless run.
     with pytest.raises(ConfigError):
         _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertyx"))
+
+
+def test_build_env_unsandboxed_vertex_asks_for_no_model_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Flag off must stay byte-for-byte the old behaviour: the host process has
+    # ADC of its own, so the recipe is not consulted and no emulator is started.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-a")
+    monkeypatch.setattr(
+        gemini_mod,
+        "sandbox_credential_env",
+        lambda *a, **k: pytest.fail("sandbox_credential_env called on an unsandboxed run"),
+    )
+    env = _build_env(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"))
+    assert not {"GCE_METADATA_HOST", "GCE_METADATA_IP", "METADATA_SERVER_DETECTION"} & env.keys()
+
+
+def test_build_env_sandboxed_vertex_injects_the_metadata_emulator_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inside the sandbox there is no ADC and the real metadata endpoint is
+    # blocked, so the backend's mint-and-inject recipe supplies the credential.
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-a")
+    seen: dict[str, str | None] = {}
+
+    def fake_recipe(
+        spec: ProviderSpec, *, project: str | None = None, **kwargs: object
+    ) -> dict[str, str]:
+        seen["backend"] = spec.backend
+        seen["project"] = project
+        return {"GCE_METADATA_HOST": "host.docker.internal:41235"}
+
+    monkeypatch.setattr(gemini_mod, "sandbox_credential_env", fake_recipe)
+    cfg = AgentConfig(
+        model="gemini-2.5-pro", provider="google-vertex", sandbox=SandboxSpec(image="img")
+    )
+    env = _build_env(cfg)
+
+    assert seen == {"backend": "vertex", "project": "proj-a"}
+    assert env["GCE_METADATA_HOST"] == "host.docker.internal:41235"
+    # The recipe rides alongside the routing vars, it does not replace them.
+    assert env["GOOGLE_GENAI_USE_VERTEXAI"] == "true"
+    assert env["GOOGLE_CLOUD_PROJECT"] == "proj-a"
+
+
+def test_build_env_sandboxed_non_vertex_asks_for_no_model_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A key-based provider carries its own credential across the boundary.
+    monkeypatch.setattr(
+        gemini_mod,
+        "sandbox_credential_env",
+        lambda *a, **k: pytest.fail("sandbox_credential_env called for a key-based provider"),
+    )
+    cfg = AgentConfig(model="gemini-2.5-pro", api_key="abc", sandbox=SandboxSpec(image="img"))
+    assert _build_env(cfg)["GEMINI_API_KEY"] == "abc"
 
 
 def test_gemini_agent_registered_under_canonical_key() -> None:

@@ -55,6 +55,7 @@ def _patch_kubectl(
     namespaces: dict | None = None,
     pods: dict | None = None,
     policy_api: bool = True,
+    delete_fails: set[str] | None = None,
     calls: list[list[str]] | None = None,
 ) -> list[list[str]]:
     """Answer every kubectl call the module makes; returns the list the argvs land in."""
@@ -99,6 +100,11 @@ def _patch_kubectl(
                     )
                 return SimpleNamespace(returncode=0, stdout=json.dumps({"items": []}), stderr="")
         if "label" in argv:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "delete" in argv:
+            kind = argv[argv.index("delete") + 1]
+            if delete_fails and kind in delete_fails:
+                raise SubprocessError(argv, 1, stderr="conflict: operation cannot be fulfilled")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected kubectl argv: {argv}")
 
@@ -396,6 +402,23 @@ def test_provision_refuses_the_fallback_for_an_exec_plugin_context(
 
     with pytest.raises(SandboxError, match="exec"):
         creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500)
+
+
+def test_provision_tears_down_when_the_fallback_render_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exec-plugin refusal fires after the policies (and possibly the
+    identity) are on the cluster, and the completed spec the run-end teardown
+    keys off never comes to exist — so provisioning must clean up itself."""
+    monkeypatch.setenv(creds.ALLOW_ADMIN_ENV, "1")
+    calls = _patch_kubectl(monkeypatch, mint_fails=True, cert="", key="")
+
+    with pytest.raises(SandboxError, match="exec"):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500)
+
+    deleted = [argv for argv in calls if "delete" in argv]
+    assert any(creds._POLICY_BINDING_KIND in argv for argv in deleted)
+    assert any(creds.AGENT_NAMESPACE in argv for argv in deleted)
 
 
 # -- pod security ------------------------------------------------------------
@@ -1117,3 +1140,154 @@ def test_the_admin_escape_hatch_also_covers_the_pod_security_apply(
 
     # The scoped token still gets minted; only the pod-security half was lost.
     assert yaml.safe_load(path.read_text())["users"][0]["user"] == {"token": _TOKEN}
+
+
+# -- teardown ----------------------------------------------------------------
+
+
+def _delete_kinds(calls: list[list[str]]) -> list[str]:
+    """The kind argument of every ``kubectl delete`` in ``calls``, in order."""
+    return [argv[argv.index("delete") + 1] for argv in calls if "delete" in argv]
+
+
+def test_teardown_inventory_matches_the_manifests() -> None:
+    """The teardown name lists cannot drift from the manifests they mirror.
+
+    A policy or binding added to the manifests without a row in the teardown
+    inventory would survive every run on a reused cluster; this holds the two
+    in lockstep so the omission fails the suite instead.
+    """
+    # Joined on a document separator: the constants do not all end with one.
+    rendered = "\n---\n".join(
+        (
+            creds._POD_SECURITY_POLICY_MANIFEST,
+            creds._render_namespace_guard(creds.POD_SECURITY_BASELINE),
+            creds._EXEMPT_NAMESPACE_GUARD_MANIFEST,
+            creds._render_nonconformant_pod_guard([]),
+        )
+    )
+    docs = [d for d in yaml.safe_load_all(rendered) if d]
+    by_kind: dict[str, set[str]] = {}
+    for doc in docs:
+        by_kind.setdefault(doc["kind"], set()).add(doc["metadata"]["name"])
+    assert by_kind["ValidatingAdmissionPolicy"] == set(creds._POLICY_NAMES)
+    assert by_kind["ValidatingAdmissionPolicyBinding"] == set(creds._POLICY_BINDING_NAMES)
+
+    rbac = [d for d in yaml.safe_load_all(creds._RBAC_MANIFEST) if d]
+    rbac_by_kind: dict[str, set[str]] = {}
+    for doc in rbac:
+        rbac_by_kind.setdefault(doc["kind"], set()).add(doc["metadata"]["name"])
+    assert rbac_by_kind["ClusterRoleBinding"] == set(creds._CLUSTER_ROLE_BINDING_NAMES)
+    assert rbac_by_kind["ClusterRole"] == set(creds._CLUSTER_ROLE_NAMES)
+    assert rbac_by_kind["Namespace"] == {creds.AGENT_NAMESPACE}
+    assert rbac_by_kind["ServiceAccount"] == {creds.AGENT_SA_NAME}
+
+
+def test_teardown_deletes_everything_bindings_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bindings go first — a binding is what makes a policy enforce, so the
+    cluster stops denying anyone the moment they are gone — and the namespace
+    goes last, waited on, so a reused cluster's next apply cannot race it."""
+    calls = _patch_kubectl(monkeypatch)
+
+    assert creds.teardown_agent_credentials("kind-c1") is True
+
+    assert _delete_kinds(calls) == [
+        creds._POLICY_BINDING_KIND,
+        creds._POLICY_KIND,
+        "clusterrolebinding",
+        "clusterrole",
+        "namespace",
+    ]
+    deletes = [argv for argv in calls if "delete" in argv]
+    for argv in deletes:
+        assert "--ignore-not-found" in argv
+        assert argv[-2:] == ["--context", "kind-c1"]
+    for name in creds._POLICY_BINDING_NAMES:
+        assert name in deletes[0]
+    for name in creds._POLICY_NAMES:
+        assert name in deletes[1]
+    assert creds.AGENT_NAMESPACE in deletes[-1]
+    assert "--wait=false" not in deletes[-1]
+
+
+def test_teardown_unlabels_only_the_namespaces_it_marked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PSA label someone else set never carries the marker and is never
+    removed — the labeller skips namespaces that already declare a level, so
+    the marker is a faithful record of exactly what enforcement wrote."""
+    namespaces = {
+        "items": [
+            _ns(
+                "marked",
+                **{creds._PSA_MANAGED_LABEL: "true", creds._PSA_ENFORCE_LABEL: "baseline"},
+            ),
+            _ns("operator-own", **{creds._PSA_ENFORCE_LABEL: "restricted"}),
+            _ns("plain"),
+        ]
+    }
+    calls = _patch_kubectl(monkeypatch, namespaces=namespaces)
+
+    assert creds.teardown_agent_credentials("kind-c1") is True
+
+    labelled = [argv for argv in calls if "label" in argv]
+    assert len(labelled) == 1
+    assert labelled[0][:4] == ["kubectl", "label", "namespace", "marked"]
+    for key in creds._PSA_LABEL_KEYS:
+        assert f"{key}-" in labelled[0]
+    assert f"{creds._PSA_MANAGED_LABEL}-" in labelled[0]
+
+
+def test_teardown_is_best_effort_and_reports_residue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One failed delete must not stop the rest: every object that CAN come
+    off the cluster does, and the return value says residue remains."""
+    calls = _patch_kubectl(monkeypatch, delete_fails={creds._POLICY_BINDING_KIND})
+
+    assert creds.teardown_agent_credentials("kind-c1") is False
+
+    # The failed first step did not short-circuit the remaining four.
+    assert _delete_kinds(calls)[-1] == "namespace"
+
+
+def test_teardown_survives_an_unlistable_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Teardown never raises: both its callers sit on paths where a second
+    failure must not eclipse the first."""
+    _patch_kubectl(monkeypatch)
+
+    def refuse_lists(argv, **kwargs):
+        raise SubprocessError(argv, 1, stderr="connection refused")
+
+    monkeypatch.setattr(kubectl, "run", refuse_lists)
+
+    assert creds.teardown_agent_credentials("kind-c1") is False
+
+
+def test_failed_provisioning_cleans_up_its_partial_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A mint failure raises AFTER pod security and the identity landed on the
+    cluster, and the completed spec that would have carried their context to
+    the run-end teardown never exists — so provisioning removes them itself,
+    keeping the original error."""
+    calls = _patch_kubectl(monkeypatch, mint_fails=True)
+
+    with pytest.raises(SandboxError, match="scoped ServiceAccount"):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500)
+
+    kinds = _delete_kinds(calls)
+    assert creds._POLICY_BINDING_KIND in kinds
+    assert "namespace" in kinds
+
+
+def test_marker_label_rides_along_with_enforcement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Enforcement stamps the marker teardown keys off, on the same call that
+    sets the PSA levels — one write, so they cannot come apart."""
+    calls = _patch_kubectl(monkeypatch, namespaces={"items": [_ns("default")]})
+
+    creds.enforce_pod_security(tmp_path, "kind-c1")
+
+    labelled = [argv for argv in calls if "label" in argv]
+    assert len(labelled) == 1
+    assert f"{creds._PSA_MANAGED_LABEL}=true" in labelled[0]

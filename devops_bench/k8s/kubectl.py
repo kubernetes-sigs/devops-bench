@@ -31,6 +31,7 @@ __all__ = [
     "apply",
     "config_value",
     "create_token",
+    "delete",
     "exec_pod",
     "get_resource",
     "is_not_found",
@@ -335,20 +336,73 @@ def apply(
     return _run_kubectl(argv, kubeconfig, context=context)
 
 
+def delete(
+    resource: str,
+    *names: str,
+    namespace: str | None = None,
+    ignore_not_found: bool = True,
+    wait: bool = True,
+    timeout: float | None = None,
+    kubeconfig: KubeconfigSource = None,
+    context: str | None = None,
+) -> CompletedProcess:
+    """Delete named resources via ``kubectl delete``.
+
+    Args:
+        resource: Resource kind, e.g. ``"namespace"`` or
+            ``"validatingadmissionpolicy"``.
+        *names: Names of the resources to delete. At least one is required —
+            an unqualified ``kubectl delete <kind>`` is a no-op kubectl itself
+            rejects, and a caller reaching for ``--all`` should have to spell
+            that decision out somewhere more visible than an empty argument
+            list.
+        namespace: Optional namespace (``-n``).
+        ignore_not_found: Pass ``--ignore-not-found``. On by default because
+            the callers are teardown paths, where "already gone" is success,
+            not an error to surface.
+        wait: When False, pass ``--wait=false`` so the call returns as soon as
+            the deletion is accepted rather than once finalizers complete.
+        timeout: Optional subprocess timeout in seconds for the whole call.
+        kubeconfig: Kubeconfig path or context-like object.
+        context: Optional kubectl context to pin the call to (``--context``).
+
+    Returns:
+        The completed process.
+
+    Raises:
+        ValueError: If no names are given.
+        SubprocessError: If kubectl exits non-zero or times out.
+    """
+    if not names:
+        raise ValueError("kubectl.delete requires at least one resource name")
+    argv = [
+        "kubectl",
+        "delete",
+        resource,
+        *names,
+        *(["--ignore-not-found"] if ignore_not_found else []),
+        *([] if wait else ["--wait=false"]),
+        *_namespace_args(namespace),
+    ]
+    kwargs: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
+    return _run_kubectl(argv, kubeconfig, context=context, **kwargs)
+
+
 def label(
     resource: str,
     name: str,
-    labels: Mapping[str, str],
+    labels: Mapping[str, str | None],
     *,
     overwrite: bool = False,
     namespace: str | None = None,
     kubeconfig: KubeconfigSource = None,
     context: str | None = None,
 ) -> CompletedProcess:
-    """Set labels on one resource via ``kubectl label``.
+    """Set or remove labels on one resource via ``kubectl label``.
 
-    Without ``overwrite`` kubectl refuses to change a label that already has
-    a different value.
+    A ``None`` value renders as ``key-`` — kubectl's "remove this label",
+    a no-op when the label is absent. Without ``overwrite`` kubectl refuses
+    to change a label that already has a different value.
 
     Raises:
         SubprocessError: If kubectl exits non-zero or times out.
@@ -358,7 +412,7 @@ def label(
         "label",
         resource,
         name,
-        *(f"{key}={value}" for key, value in labels.items()),
+        *(f"{key}-" if value is None else f"{key}={value}" for key, value in labels.items()),
         *(["--overwrite"] if overwrite else []),
         *_namespace_args(namespace),
     ]
