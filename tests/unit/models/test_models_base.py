@@ -61,6 +61,7 @@ def fake_family(monkeypatch):
             canonical="fake-provider",
             adapter_family="fake_family",
             oc_provider="fake-provider",
+            hermes_provider="fake-provider",
             api_key_envs=(),
             keyless_ok=True,
             backend=backend,

@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Capability materialization shared by the CLI agents (Gemini, openclaw).
+"""Capability materialization shared by the CLI agents (Gemini, openclaw, hermes).
 
-Both CLI agents render granted MCP bindings into a ``{name: {command, args}}``
-launch map and copy discovered ``SKILL.md`` files into the binary's workspace
-skills tree. Importing this module pulls no provider SDK.
+The CLI agents render granted MCP bindings into a ``{name: {command, args}}``
+launch map, copy discovered ``SKILL.md`` files into the binary's workspace skills
+tree, prepend the granted rules to the prompt, and forward the run's isolation
+env vars to the MCP children. Importing this module pulls no provider SDK.
 """
 
 from __future__ import annotations
@@ -24,17 +25,24 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from devops_bench.agents.shared.skills import iter_skills
 from devops_bench.core import get_logger
+from devops_bench.core.run_env import CHILD_SCOPED_ENVS
 
 if TYPE_CHECKING:
     from devops_bench.agents.capabilities import McpBinding
 
-__all__ = ["agent_workdir", "build_mcp_servers", "materialize_skills"]
+__all__ = [
+    "agent_workdir",
+    "build_mcp_servers",
+    "materialize_skills",
+    "mcp_isolation_env",
+    "prepend_rules",
+]
 
 _log = get_logger("agents.shared.cli_capabilities")
 
@@ -104,6 +112,63 @@ def build_mcp_servers(mcp_servers: tuple[McpBinding, ...]) -> dict[str, dict]:
             entry["args"] = list(binding.command[1:])
         servers[name] = entry
     return servers
+
+
+def mcp_isolation_env(extra_env: Mapping[str, str]) -> dict[str, str]:
+    """Resolve the run-isolation vars an MCP child needs, in the CLI's precedence.
+
+    A CLI spawns its MCP servers itself, so they inherit the CLI's environment
+    rather than the harness's — and both hermes and openclaw filter that child
+    env down to an allowlist plus whatever the server config names. Each var in
+    :data:`~devops_bench.core.run_env.CHILD_SCOPED_ENVS` therefore has to be
+    written into the server entry explicitly, or the server falls back to the
+    operator's ambient config instead of the run's.
+
+    The same set applies to every CLI rather than a per-agent list: forwarding
+    one of these *narrows* what the child can reach, so a shorter list is not a
+    tighter sandbox but a looser one.
+
+    ``run_env`` publishes the per-run values on ``os.environ`` while
+    ``extra_env`` is the operator's override, which wins — the same precedence
+    the CLI's own env overlay uses, so the servers and the CLI agree on which
+    cluster they are pointed at. Presence in ``extra_env`` decides, not
+    truthiness: an override set to ``""`` means "unset this", not "fall back to
+    the ambient value".
+
+    Args:
+        extra_env: ``config.extra_env`` — the operator's override mapping.
+
+    Returns:
+        The resolved ``{name: value}`` mapping, omitting anything that resolved
+        to empty or was set nowhere.
+    """
+    resolved: dict[str, str] = {}
+    for key in CHILD_SCOPED_ENVS:
+        value = extra_env[key] if key in extra_env else os.environ.get(key)
+        if value:
+            resolved[key] = value
+    return resolved
+
+
+def prepend_rules(rules_text: str, prompt: str) -> str:
+    """Return ``prompt`` with ``rules_text`` prepended as an operator brief.
+
+    For the CLIs with no dedicated system-prompt flag, the granted rules ride on
+    the prompt itself. Empty / whitespace-only rules pass the prompt through
+    unchanged, so a default :class:`~devops_bench.agents.capabilities.AgentRules`
+    is indistinguishable from "no preamble"; a non-empty brief is separated from
+    the prompt by a blank line.
+
+    Args:
+        rules_text: The bound rules text (``capabilities.rules.text``).
+        prompt: The task prompt for this run.
+
+    Returns:
+        The combined string to hand to the CLI.
+    """
+    if not rules_text or not rules_text.strip():
+        return prompt
+    return f"{rules_text.rstrip()}\n\n{prompt}"
 
 
 def materialize_skills(skills_root: Path, paths: tuple[str, ...]) -> list[str]:
