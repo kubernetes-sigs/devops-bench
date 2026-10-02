@@ -724,7 +724,7 @@ class DefaultEvalHarness(Harness):
         """Start a background chaos+verification scenario on a daemon thread.
 
         Args:
-            chaos_specs: Typed chaos entries. Only the first spec is driven.
+            chaos_specs: Typed chaos entries; at most one is supported.
             verification_mapping: Name-keyed mapping of typed verification
                 specs the chaos ``verify:`` key is resolved against.
             ctx: Per-task run context handed to triggers / faults.
@@ -741,15 +741,10 @@ class DefaultEvalHarness(Harness):
         if not chaos_specs:
             return None
 
-        # Only the first spec is scheduled today; the field is a list to leave
-        # room for multiple planned disruptions. Warn rather than silently drop
-        # the rest so a task authored with several is not quietly under-run.
+        # Task loading already rejects this; guard callers that bypass Task.
         if len(chaos_specs) > 1:
-            _log.warning(
-                "chaos_spec declares %d entries but only the first is scheduled; "
-                "the remaining %d are ignored",
-                len(chaos_specs),
-                len(chaos_specs) - 1,
+            raise ConfigError(
+                f"chaos_spec declares {len(chaos_specs)} entries; only one is supported"
             )
 
         spec = chaos_specs[0]

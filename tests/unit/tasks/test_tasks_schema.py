@@ -211,6 +211,35 @@ def test_chaos_spec_is_opaque():
     assert task.verification_spec == [{"name": "v"}]
 
 
+@pytest.mark.parametrize(
+    "chaos_spec",
+    [
+        [{"name": "a"}, {"name": "b"}],
+        '[{"name": "a"}, {"name": "b"}]',
+    ],
+    ids=["list", "json-string"],
+)
+def test_multiple_chaos_specs_raise(chaos_spec: object) -> None:
+    # Only one spec is scheduled; accepting more would grade the rest undisrupted.
+    with pytest.raises(ValidationError, match="chaos_spec declares 2 entries"):
+        Task.from_dict({"chaos_spec": chaos_spec}, name_default="d")
+
+
+@pytest.mark.parametrize(
+    "chaos_spec",
+    [
+        [{"name": "a"}],
+        [{"name": "a"}, None],
+        {"name": "a"},
+        "not json {{PLACEHOLDER}}",
+    ],
+    ids=["single", "single-with-empty", "mapping", "unparseable-string"],
+)
+def test_single_or_unparseable_chaos_spec_loads(chaos_spec: object) -> None:
+    # Unparseable strings are left for the harness's own ConfigError.
+    assert Task.from_dict({"chaos_spec": chaos_spec}, name_default="d").chaos_spec == chaos_spec
+
+
 def test_non_list_verification_spec_raises():
     # verification_spec is a list of entry mappings; parse_entries downstream
     # keeps a defensive non-list branch for callers outside Task, but the

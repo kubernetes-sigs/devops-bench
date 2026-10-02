@@ -75,6 +75,13 @@ def test_parse_chaos_specs_raises_on_malformed_json(isolated_env: None) -> None:
         harness._parse_chaos_specs("{not valid json", "cluster")  # noqa: SLF001
 
 
+def test_start_scenario_rejects_multiple_specs(isolated_env: None) -> None:
+    """A caller bypassing Task validation still cannot schedule a second, unrun spec."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    with pytest.raises(ConfigError, match="chaos_spec declares 2 entries"):
+        harness.start_scenario([object(), object()], {}, object())  # type: ignore[list-item, arg-type]
+
+
 def test_drain_scenario_stamps_timed_out_when_thread_still_alive(
     isolated_env: None,
     monkeypatch: pytest.MonkeyPatch,

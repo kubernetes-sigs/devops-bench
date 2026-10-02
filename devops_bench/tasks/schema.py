@@ -14,6 +14,7 @@
 
 """Typed schema for benchmark task contracts."""
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -305,6 +306,23 @@ class Task(BaseModel):
                     raise ValueError(
                         f"a validated task requires {field} on verification entry {label!r}"
                     )
+        return self
+
+    @model_validator(mode="after")
+    def _check_single_chaos_spec(self) -> "Task":
+        """Reject more than one ``chaos_spec`` entry; the harness schedules only one."""
+        raw = self.chaos_spec
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                return self  # The harness rejects unparseable chaos_spec JSON itself.
+        count = sum(1 for entry in raw if entry) if isinstance(raw, list) else 0
+        if count > 1:
+            raise ValueError(
+                f"chaos_spec declares {count} entries; "
+                "only one planned disruption per task is supported"
+            )
         return self
 
     @classmethod
