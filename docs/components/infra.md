@@ -49,6 +49,9 @@ All are listed in the `PROVIDERS` registry.
 
 The env var outranks the config key so a task can pin a default `provider:` while runs stay overridable from the environment (the same way `TARGET_DEPLOYMENT_NAME` and `NAMESPACE` resolve).
 
+> [!CAUTION]
+> Declaring the provider on the task is the supported way to target a provider; **do not export `INFRA_PROVIDER`**. It applies to every task in the run, and — being an export — it outlives the command that set it, so the next run silently inherits it. Sending a task to a provider it was not written for surfaces as a task bug, not a configuration one. `_select_provider` logs a warning when the export disagrees with what the task declares; treat that warning as a stale shell, not as a knob you meant to turn.
+
 > [!IMPORTANT]
 > There is no default cloud. Any stack that does not deduce to a local provider (`kind` or `vcluster`) — including every absolute or external path and cloud stacks like `prebuilt/gcp` — **must** name its provider explicitly via `provider:` or `INFRA_PROVIDER`, or `_select_provider` raises a `ConfigError`. Nothing falls back to `gcp`, so a billable cloud provider is never silently selected or charged without explicit configuration.
 
@@ -122,7 +125,7 @@ Anything you put in `variables` always wins over the defaults.
 | Variable | Effect |
 | --- | --- |
 | `BENCH_NO_INFRA` | `true` forces the `NoOpDeployer`, overriding the task's `deployer`. |
-| `INFRA_PROVIDER` | Selects the provider, overriding any `provider:` key the task names. |
+| `INFRA_PROVIDER` | Selects the provider, overriding any `provider:` key the task names, and warning when the two disagree. Prefer the task's key — see the caution above. |
 | `BENCH_TF_ROOT` | Overrides the root directory holding OpenTofu stacks (defaults to `<repo_root>/tf`). |
 | `GCP_PROJECT_ID` | Default GCP project for credentials and variable defaults. |
 | `GCP_LOCATION` | Default region/zone (falls back to `us-central1-a`). |
@@ -133,6 +136,8 @@ Anything you put in `variables` always wins over the defaults.
 | `ALLOW_REMOTE_HOST_KUBECONTEXT` | Set to `true` to allow vCluster to target non-local host contexts (e.g. standing GKE clusters). |
 
 The `--project` and `--cluster` CLI flags supply the project and cluster name for a run, feeding the same defaults the providers resolve from.
+
+**When `--project` is required.** Before it provisions anything, `run_benchmark` resolves each task's provider through the same `_select_provider` path the deployer will use, and asks for a project id only if a task in the run lands on a provider outside the local set (`kind`, `vcluster`). A run of kind-only tasks bills nothing to a project, so it gets the placeholder `local-kind` and no flag is needed; a run containing a cloud task errors out naming the task that needs one. `--cluster` is always required with infra on, because every provider provisions a cluster and has to name it. A task whose provider cannot be resolved at all is *not* treated as cloud-backed — `get_deployer` raises the accurate "stack names no provider" error for it a moment later, and replacing that with a demand for a project id would only misdirect.
 
 ## Adding a cloud provider (brief)
 

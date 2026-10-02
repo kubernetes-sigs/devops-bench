@@ -48,7 +48,8 @@ source .venv/bin/activate
 ```bash
 export CLUSTER_NAME="opa-kind"         # used as the kind cluster name
 export NAMESPACE="default"             # unused by this task; just needs to be set
-export PROJECT_ID="local-kind"         # Required by the harness validator; use any dummy string for local runs
+# PROJECT_ID is not needed: this task declares provider: kind, which bills
+# nothing, so the harness defaults the (ignored) project id to "local-kind".
 export GCP_PROJECT_ID="<your-project-id>" # Required by the google-vertex provider, for both agent and judge
 
 export BENCH_AGENT_TYPE="gemini"
