@@ -17,14 +17,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, get_args
 
-__all__: list[str] = ["AgentResult", "TOKEN_BUCKETS", "ToolCall", "empty_tokens"]
+__all__: list[str] = [
+    "AgentResult",
+    "TERMINAL_REASONS",
+    "TerminalReason",
+    "TOKEN_BUCKETS",
+    "ToolCall",
+    "empty_tokens",
+]
 
 # Canonical token buckets every harness maps onto: ``input`` is the non-cached
 # prompt, ``cached`` is cache-read only (cache writes go in ``cache_write``),
 # ``output`` excludes ``reasoning``, and ``total`` is the sum of all buckets.
 TOKEN_BUCKETS: tuple[str, ...] = ("input", "cached", "cache_write", "reasoning", "output", "total")
+
+#: Why a run stopped, as the *harness* saw it. ``""`` is unreported, not ``completed``.
+TerminalReason = Literal["", "completed", "timeout", "error"]
+TERMINAL_REASONS: tuple[TerminalReason, ...] = get_args(TerminalReason)
 
 
 def empty_tokens() -> dict[str, int | None]:
@@ -40,9 +51,9 @@ class ToolCall:
         name: Tool name as advertised by the agent (e.g. an MCP tool name).
         args: Tool arguments as a JSON-serializable mapping.
         result: Tool output text once the tool returns; ``None`` until then.
-        status: Lifecycle marker — ``"called"`` when first emitted,
-            ``"completed"`` once the result is folded in, ``"error"`` when the
-            tool failed.
+        status: ``"called"``, ``"completed"``, ``"error"``, or antigravity's
+            ``"interrupted"`` — the same unresolved condition as ``"called"``,
+            so neither counts as a tool error.
     """
 
     name: str
@@ -66,16 +77,23 @@ class AgentResult:
 
     Attributes:
         output: Final assistant text the judge grades.
-        trajectory: Ordered list of ``ToolCall.to_dict()`` entries (optionally
-            interleaved with text turns by API agents). Every agent emits the
-            same canonical entry shape so metrics consume one schema.
+        trajectory: Ordered list of ``ToolCall.to_dict()`` entries. Every agent
+            emits the same canonical entry shape so metrics consume one schema.
         tokens: Provider-reported token usage (shape is provider-defined; pass
             through verbatim).
-        latency: Total wall-clock seconds spent inside the agent run, stamped
-            by :meth:`AgentHarness.run`.
+        latency: Wall-clock seconds of the agent turn. A harness that can bracket
+            it more tightly stamps it in ``_execute``; :meth:`AgentHarness.run`
+            backfills the whole-run elapsed only when it was left at zero.
         errors: Human-readable error or extraction-failure messages. **Empty**
             on a clean run; populated when a known-error path (subprocess
             failure, parse miss, timeout) is reached — never silently dropped.
+        terminal_reason: One of :data:`TERMINAL_REASONS`; ``ValueError`` otherwise.
+        tool_wait_sec: Seconds inside tool calls, concurrent calls counted once;
+            ``None`` when the transcript carried no timings.
+        served_models: Model ids that actually answered, first-seen order. Config
+            names the *requested* model, which an alias or failover can redirect.
+        model_turns: Model calls, or ``None`` when the harness cannot tell. Not
+            ``len(trajectory)``: one turn can issue several tool calls or none.
         metadata: Agent-specific extras (e.g. raw provider stats, session ids)
             that do not fit the typed fields above.
     """
@@ -85,7 +103,18 @@ class AgentResult:
     tokens: dict[str, Any] = field(default_factory=dict)
     latency: float = 0.0
     errors: list[str] = field(default_factory=list)
+    terminal_reason: TerminalReason = ""
+    tool_wait_sec: float | None = None
+    served_models: list[str] = field(default_factory=list)
+    model_turns: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # An unrecognized reason matches no dashboard grouping and is dropped there.
+        if self.terminal_reason not in TERMINAL_REASONS:
+            raise ValueError(
+                f"terminal_reason must be one of {TERMINAL_REASONS}, got {self.terminal_reason!r}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping consumed by the harness.
@@ -105,6 +134,10 @@ class AgentResult:
             "tokens": dict(self.tokens),
             "latency": self.latency,
             "errors": list(self.errors),
+            "terminal_reason": self.terminal_reason,
+            "tool_wait_sec": self.tool_wait_sec,
+            "served_models": list(self.served_models),
+            "model_turns": self.model_turns,
             "metadata": dict(self.metadata),
         }
 
@@ -117,12 +150,16 @@ class AgentResult:
         return bool(self.errors)
 
     @classmethod
-    def errored(cls, msg: str, *, latency: float = 0.0) -> AgentResult:
+    def errored(
+        cls, msg: str, *, latency: float = 0.0, terminal_reason: str = "error"
+    ) -> AgentResult:
         """Build a result representing a failed run.
 
         Args:
             msg: Error message to surface on :attr:`errors` and ``output``.
             latency: Elapsed seconds before the failure, when available.
+            terminal_reason: Pass ``"timeout"`` when the harness cut the run off
+                at its budget — a different signal from the agent failing.
 
         Returns:
             An :class:`AgentResult` with empty trajectory, the canonical
@@ -135,4 +172,5 @@ class AgentResult:
             tokens=empty_tokens(),
             latency=latency,
             errors=[msg],
+            terminal_reason=terminal_reason,
         )

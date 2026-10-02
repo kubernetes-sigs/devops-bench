@@ -88,7 +88,10 @@ class MissingDependencyError(DevOpsBenchError):
 
 
 class SubprocessError(DevOpsBenchError):
-    """Raised when a subprocess exits non-zero or times out."""
+    """Raised when a subprocess exits non-zero or times out.
+
+    ``timed_out`` distinguishes them; a timeout's ``returncode`` is ``-1``.
+    """
 
     def __init__(
         self,
@@ -96,11 +99,14 @@ class SubprocessError(DevOpsBenchError):
         returncode: int,
         stdout: str | None = None,
         stderr: str | None = None,
+        *,
+        timed_out: bool = False,
     ) -> None:
         self.cmd = [str(part) for part in cmd]
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+        self.timed_out = timed_out
         message = f"command failed with exit code {returncode}: {' '.join(self.cmd)}"
         if stderr:
             message += f"\nstderr: {stderr.strip()}"
