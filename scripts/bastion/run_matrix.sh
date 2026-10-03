@@ -24,14 +24,14 @@
 #
 #   1) one task, many models, one config
 #      MATRIX_TASKS="tasks/common/opa-remediation/task.yaml" \
-#      MATRIX_MODELS="gemini-3.1-pro gemini-3.5-flash" \
+#      MATRIX_MODELS="gemini-3.1-pro-preview gemini-3.5-flash" \
 #      MATRIX_AGENT_CONFIGS="gcli+mcp+skills" PROJECT_ID=<proj> run_matrix.sh
 #
 #   2) one task, one model, many configs
 #      MATRIX_AGENT_CONFIGS="oc oc+mcp+skills gcli gcli+mcp+skills" ... run_matrix.sh
 #
 #   3) all tasks, one model, one config
-#      MATRIX_TASKS=ALL MATRIX_MODELS="gemini-3.1-pro" MATRIX_AGENT_CONFIGS="oc+mcp+skills" ... run_matrix.sh
+#      MATRIX_TASKS=ALL MATRIX_MODELS="gemini-3.1-pro-preview" MATRIX_AGENT_CONFIGS="oc+mcp+skills" ... run_matrix.sh
 #
 # DRY_RUN=1 prints the expanded matrix + per-combo env without provisioning.
 # See _matrix_lib.sh for the full connection/run-config env and docs/components/bastion.md.

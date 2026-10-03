@@ -30,10 +30,10 @@
 #
 # CUJs supported: one task x many models, and all tasks x one model. E.g.:
 #   MATRIX_TASKS="tasks/common/opa-remediation/task.yaml" \
-#   MATRIX_MODELS="gemini-3.1-pro gemini-3.5-flash" \
+#   MATRIX_MODELS="gemini-3.1-pro-preview gemini-3.5-flash" \
 #   PROJECT_ID=<proj> run_matrix_legacy.sh
 #
-#   MATRIX_TASKS=ALL MATRIX_MODELS="gemini-3.1-pro" PROJECT_ID=<proj> run_matrix_legacy.sh
+#   MATRIX_TASKS=ALL MATRIX_MODELS="gemini-3.1-pro-preview" PROJECT_ID=<proj> run_matrix_legacy.sh
 #
 # Prereq: run `scripts/bastion/configure-oc.sh --mcp --skills` (or --no-*) once
 # to set the global oc config the legacy arm uses. DRY_RUN=1 previews the matrix.
