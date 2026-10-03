@@ -35,7 +35,7 @@ A single run, end to end:
 | :-- | :-- |
 | `gemini` | Google AI Studio API key, or Vertex AI. |
 | `claude` | Anthropic API, Vertex AI, or Bedrock. |
-| `ollama` | Local models. |
+| `openai` | OpenAI API, or any OpenAI-compatible server (SGLang, vLLM, Ollama) via `OPENAI_BASE_URL`. |
 
 **Infrastructure targets** — the OpenTofu deployer supports these targets (set `INFRA_PROVIDER`, or the task's `provider:` key):
 

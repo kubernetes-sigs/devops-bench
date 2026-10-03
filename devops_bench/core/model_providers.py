@@ -43,15 +43,15 @@ class ProviderSpec(BaseModel):
     Attributes:
         canonical: Normalized provider id (the ``_SPECS`` key).
         adapter_family: Models-layer adapter key for ``get_model`` /
-            ``MODELS.get`` (e.g. ``gemini`` / ``claude`` / ``ollama``).
+            ``MODELS.get`` (e.g. ``gemini`` / ``claude`` / ``openai``).
         oc_provider: openclaw wire-provider id used in ``provider/model`` and the
             per-run ``_PROVIDER_TRANSPORT`` lookup.
         api_key_envs: Env var name(s) a CLI harness sets from ``config.api_key``.
-            Empty for ``anthropic-vertex`` / ``anthropic-bedrock`` / ``ollama``
+            Empty for ``anthropic-vertex`` / ``anthropic-bedrock``
             (no key is ever threaded). ``google-vertex`` is keyless-ok but still
             routes a *provided* key to ``GOOGLE_CLOUD_API_KEY``.
         keyless_ok: Whether the backend can authenticate without a key (Vertex
-            ADC, Bedrock AWS creds, local ollama).
+            ADC, Bedrock AWS creds).
         backend: Adapter backend hint (``"vertex"`` / ``"bedrock"``), or ``None``
             to let the adapter infer the backend from the environment.
     """
@@ -70,7 +70,7 @@ class ProviderSpec(BaseModel):
 # (``google`` and ``google-vertex`` both build the ``gemini`` adapter) and the
 # backend/transport/key-routing (which differ between them). Vertex and Bedrock
 # are keyless-ok (ADC / AWS creds) and need no key; ``anthropic-vertex`` /
-# ``anthropic-bedrock`` / ``ollama`` carry empty ``api_key_envs`` so a key is
+# ``anthropic-bedrock`` carry empty ``api_key_envs`` so a key is
 # never forced onto them, while ``google-vertex`` still routes a provided key to
 # ``GOOGLE_CLOUD_API_KEY`` (the vertex transport var, not the google-genai one).
 _SPECS: dict[str, ProviderSpec] = {
@@ -116,18 +116,10 @@ _SPECS: dict[str, ProviderSpec] = {
     ),
     "openai": ProviderSpec(
         canonical="openai",
-        adapter_family="openai",  # no adapter module today: get_model raises NotRegisteredError
+        adapter_family="openai",
         oc_provider="openai",
         api_key_envs=("OPENAI_API_KEY",),
         keyless_ok=False,
-        backend=None,
-    ),
-    "ollama": ProviderSpec(
-        canonical="ollama",
-        adapter_family="ollama",
-        oc_provider="ollama",
-        api_key_envs=(),  # optional key handled by the adapter via AGENT_API_KEY
-        keyless_ok=True,
         backend=None,
     ),
 }
@@ -146,7 +138,6 @@ _ALIASES: dict[str, str] = {
     "anthropic-bedrock": "anthropic-bedrock",
     "anthropic_bedrock": "anthropic-bedrock",
     "openai": "openai",
-    "ollama": "ollama",
 }
 
 
