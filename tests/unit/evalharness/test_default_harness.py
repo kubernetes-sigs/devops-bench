@@ -27,6 +27,7 @@ import importlib
 import logging
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -1570,3 +1571,12 @@ def test_same_task_repeat_is_not_fingerprinted(
 
     assert results[0]["cheating_report"]["status"] == "clean"
     assert results[1]["cheating_report"]["status"] == "clean"
+
+
+def test_resolve_model_name_prefers_the_judges_own_label() -> None:
+    """The judge's own label wins over its client's; no judge resolves to None."""
+    resolve = harness_default._resolve_model_name  # noqa: SLF001
+    client = SimpleNamespace(model_name="client-m")
+    assert resolve(SimpleNamespace(_model_name="judge-m", client=client)) == "judge-m"
+    assert resolve(SimpleNamespace(client=client)) == "client-m"
+    assert resolve(None) is None
