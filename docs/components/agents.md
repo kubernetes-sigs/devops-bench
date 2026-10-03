@@ -103,7 +103,7 @@ each harness maps them onto its target.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `BENCH_USE_MCP` | `true` | Master gate. `false` drops the MCP binding entirely. |
+| `BENCH_USE_MCP` | `false` | Master gate. `true` binds the MCP server; `false` drops the binding entirely. |
 | `AGENT_MCP_SERVER` | unset | Shell-quoted argv for the MCP server (e.g. `"uv run k8s-mcp"`). |
 | `AGENT_ALLOWED_TOOLS` | unset | CSV of pre-approved tool names. |
 | `AGENT_SKILLS_PATHS` | unset | CSV of directories to discover `SKILL.md` files under. |

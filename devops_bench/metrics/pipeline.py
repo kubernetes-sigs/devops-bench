@@ -330,7 +330,7 @@ def evaluate_metrics_batch(
         len(detailed_results),
     )
     if use_mcp is None:
-        use_mcp = get_bool("BENCH_USE_MCP", True)
+        use_mcp = get_bool("BENCH_USE_MCP", False)
 
     builtin_set = set(_BUILTIN_METRIC_KEYS)
     # Builtin metrics in the pinned (results.json) order, then any third-party
