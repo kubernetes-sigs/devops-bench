@@ -19,9 +19,6 @@ check_groups:
   identity-preserved:
     title: "Existing workloads kept"
     description: "workload-1 and workload-2 were not deleted and recreated."
-# etcd member surgery plus a GitOps reconciliation, through many sequential
-# kubectl round-trips, overruns the 600s harness default.
-timeout_sec: 1500
 # kind only: on GKE the control plane is managed and inaccessible.
 infrastructure:
   deployer: "tofu"
