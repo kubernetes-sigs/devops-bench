@@ -1,6 +1,7 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
 approvers:
+  - geojaz
   - janetkuo
   - pradeepvrd
   - jessie1111101
