@@ -95,6 +95,10 @@ class MetricContext:
         all_case: The combined (text + trace) ``LLMTestCase``.
         generation_only: Whether the task provisions no cluster (``deployer:
             noop``); outcome scoring must not require cluster application for these.
+        final_output_missing: Whether the record's ``output`` carries no real
+            final answer (a redaction placeholder, or empty on a run whose
+            trajectory shows the agent did work). Metrics that grade the final
+            text alone must abstain rather than score the stand-in.
     """
 
     result: dict[str, Any]
@@ -104,6 +108,7 @@ class MetricContext:
     tool_case: LLMTestCase
     all_case: LLMTestCase
     generation_only: bool = False
+    final_output_missing: bool = False
 
 
 @runtime_checkable

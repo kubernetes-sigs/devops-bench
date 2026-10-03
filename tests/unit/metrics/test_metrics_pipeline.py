@@ -182,6 +182,49 @@ def test_each_result_in_batch_is_scored(registry: Registry[Any]) -> None:
     assert all(r["scores"].get("stub_score") for r in results)
 
 
+class _CorrectEvaluator:
+    """Stub evaluator that scores the run as fully correct."""
+
+    name = "correct"
+
+    def applies(self, ctx: MetricContext) -> bool:
+        return True
+
+    def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+        yield MetricScore(name="VerificationCorrectness", score=1.0)
+
+
+def test_a_completed_run_gets_a_composite(registry: Registry[Any]) -> None:
+    """Baseline for the skip below: the same scores do compose for a finished run."""
+    registry.register("correct")(_CorrectEvaluator)
+    results = [{**_result(), "status": "success", "trajectory": [{"step": 1}]}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    assert pipeline.OUTCOME_SCORE_KEY in results[0]["scores"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"status": "agent_error"},
+        {"status": "success", "errors": ["boom"], "trajectory": []},
+    ],
+    ids=["agent_error", "errored_without_trajectory"],
+)
+def test_an_unscoreable_run_gets_no_composite(
+    registry: Registry[Any], overrides: dict[str, Any]
+) -> None:
+    """A run the agent never completed keeps its sub-scores but publishes no composite."""
+    registry.register("correct")(_CorrectEvaluator)
+    results = [{**_result(), **overrides}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    assert "VerificationCorrectness" in results[0]["scores"]
+    assert pipeline.OUTCOME_SCORE_KEY not in results[0]["scores"]
+
+
 # --- extract_checklist_items (pure logic) -------------------------------------
 
 
@@ -507,6 +550,65 @@ def test_build_context_normalizes_tool_names_for_judge(mocker: MockerFixture) ->
     assert res["trajectory"][0]["name"] == "default__generate_manifest"
 
 
+def test_build_context_flags_a_redaction_placeholder_as_missing(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="[Malformed diagnostic JSON redacted]")
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is True
+
+
+def test_build_context_flags_an_empty_output_beside_real_work(mocker: MockerFixture) -> None:
+    # The trajectory shows the agent worked, so the blank is a capture
+    # failure, not the agent turning in nothing.
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="")
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is True
+
+
+def test_build_context_keeps_judging_an_agent_that_produced_nothing(
+    mocker: MockerFixture,
+) -> None:
+    # Empty output AND empty trajectory: the agent genuinely turned in
+    # nothing, and that zero is real — the judge still hands it out.
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="", trajectory=[], tools=[])
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is False
+
+
+def test_build_context_leaves_a_real_answer_alone(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    assert pipeline._build_context(_base_result(), MagicMock(), True).final_output_missing is False
+
+
+def test_batch_withholds_outcome_validity_for_a_placeholder_output(
+    mocker: MockerFixture,
+) -> None:
+    # The exact run_20260911_172304 shape: status success, no errors, a real
+    # trajectory — but oc's sanitizer replaced the final message before the
+    # harness read it. The judge must never grade the placeholder: the metric
+    # abstains with the reason recorded, and with every correctness source
+    # abstaining the composite is withheld rather than published as a
+    # confident zero nobody measured.
+    _patch_judges(mocker)
+    mocker.patch.object(pipeline, "LLMTestCase")
+    evaluate = mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
+    results = [
+        _base_result(
+            output="[Malformed diagnostic JSON redacted]",
+            status="success",
+            errors=[],
+            expected_output="App deployed",  # no bullets: no checklist source
+        )
+    ]
+
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
+
+    entry = results[0]["scores"]["OutcomeValidity"]
+    assert entry["score"] is None
+    assert "withheld" in entry["reason"]
+    evaluate.assert_not_called()
+    assert pipeline.OUTCOME_SCORE_KEY not in results[0]["scores"]
+
+
 def test_outcome_validity_override_only_when_generation_only(mocker: MockerFixture) -> None:
     from devops_bench.metrics import outcome_validity
 
@@ -767,6 +869,41 @@ def test_finalize_still_skips_an_ungated_run_with_no_correctness_signal() -> Non
     }
     pipeline._finalize_outcome_score(scores)  # noqa: SLF001
     assert pipeline.OUTCOME_SCORE_KEY not in scores
+
+
+def test_finalize_does_not_let_the_judge_answer_a_withheld_correctness() -> None:
+    # The task declared deterministic objectives and one of them did not
+    # resolve. Falling through to the judged reading would publish a confident
+    # number for a question the deterministic layer refused to answer.
+    scores = {
+        "VerificationCorrectnessWithheld": 1.0,
+        "ChecklistScore": {"score": 0.9, "success": True},
+        "OutcomeValidity": {"score": 0.8, "success": True},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert pipeline.OUTCOME_SCORE_KEY not in scores
+
+
+def test_finalize_does_not_let_the_judge_answer_a_withheld_recoverable() -> None:
+    scores = {
+        "VerificationCorrectness": {"score": 1.0, "success": True},
+        "VerificationRecoverableWithheld": 1.0,
+        "JudgedRecoverable": {"score": 0.0, "success": False},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    # rec_v withheld, so the composite is plain correctness, not sqrt(c * 0.1).
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == pytest.approx(1.0)
+
+
+def test_finalize_zeroes_a_withheld_run_that_tripped_the_gate() -> None:
+    # Not knowing how well the agent did is no reason to forgive what it broke.
+    scores = {
+        "VerificationCorrectnessWithheld": 1.0,
+        "VerificationCatastrophic": {"score": 0.0, "success": False},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == 0.0
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["version"] == "v1"
 
 
 def test_batch_survives_a_failing_composite_assembly(mocker) -> None:
