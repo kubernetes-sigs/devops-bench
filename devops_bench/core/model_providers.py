@@ -116,7 +116,7 @@ _SPECS: dict[str, ProviderSpec] = {
     ),
     "openai": ProviderSpec(
         canonical="openai",
-        adapter_family="openai",  # no adapter module today: get_model raises NotRegisteredError
+        adapter_family="openai",
         oc_provider="openai",
         api_key_envs=("OPENAI_API_KEY",),
         keyless_ok=False,
