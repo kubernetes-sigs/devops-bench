@@ -769,6 +769,41 @@ def test_finalize_still_skips_an_ungated_run_with_no_correctness_signal() -> Non
     assert pipeline.OUTCOME_SCORE_KEY not in scores
 
 
+def test_finalize_does_not_let_the_judge_answer_a_withheld_correctness() -> None:
+    # The task declared deterministic objectives and one of them did not
+    # resolve. Falling through to the judged reading would publish a confident
+    # number for a question the deterministic layer refused to answer.
+    scores = {
+        "VerificationCorrectnessWithheld": 1.0,
+        "ChecklistScore": {"score": 0.9, "success": True},
+        "OutcomeValidity": {"score": 0.8, "success": True},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert pipeline.OUTCOME_SCORE_KEY not in scores
+
+
+def test_finalize_does_not_let_the_judge_answer_a_withheld_recoverable() -> None:
+    scores = {
+        "VerificationCorrectness": {"score": 1.0, "success": True},
+        "VerificationRecoverableWithheld": 1.0,
+        "JudgedRecoverable": {"score": 0.0, "success": False},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    # rec_v withheld, so the composite is plain correctness, not sqrt(c * 0.1).
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == pytest.approx(1.0)
+
+
+def test_finalize_zeroes_a_withheld_run_that_tripped_the_gate() -> None:
+    # Not knowing how well the agent did is no reason to forgive what it broke.
+    scores = {
+        "VerificationCorrectnessWithheld": 1.0,
+        "VerificationCatastrophic": {"score": 0.0, "success": False},
+    }
+    pipeline._finalize_outcome_score(scores)  # noqa: SLF001
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["score"] == 0.0
+    assert scores[pipeline.OUTCOME_SCORE_KEY]["version"] == "v1"
+
+
 def test_batch_survives_a_failing_composite_assembly(mocker) -> None:
     # compute_outcome_score_v1 raises on an out-of-range sub-score. Assembly runs
     # inside the per-record loop, so an unguarded raise would abandon every later
