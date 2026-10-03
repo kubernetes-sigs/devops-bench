@@ -200,17 +200,17 @@ def _read_export_bundle(workspace: Path) -> tuple[str, list[str]]:
     The bundle is written under
     ``<workspace>/.openclaw/trajectory-exports/openclaw-trajectory-<id>-<ts>/``;
     the trajectory itself is ``events.jsonl`` (siblings: ``manifest.json``,
-    ``tools.json``, ``metadata.json``, ...). There is exactly one export per run,
-    so a recursive glob suffices. The final answer + token usage are parsed out
-    of ``events.jsonl`` (``model.completed`` / ``assistant.message``), so no
-    separate output file is read.
+    ``tools.json``, ``metadata.json``, ...). There is exactly one export per run;
+    more than one is refused rather than guessed between. The final answer +
+    token usage are parsed out of ``events.jsonl`` (``model.completed`` /
+    ``assistant.message``), so no separate output file is read.
 
     Args:
         workspace: Workspace dir handed to ``oc sessions export-trajectory --workspace``.
 
     Returns:
         A ``(events_jsonl, errors)`` tuple. ``events_jsonl`` is empty when the
-        bundle or file is missing; the miss is recorded on ``errors``.
+        bundle is missing or ambiguous; the reason is recorded on ``errors``.
     """
     errors: list[str] = []
     export_root = workspace / ".openclaw" / "trajectory-exports"
@@ -221,6 +221,9 @@ def _read_export_bundle(workspace: Path) -> tuple[str, list[str]]:
     event_files = sorted(export_root.rglob("events.jsonl"))
     if not event_files:
         errors.append(f"no events.jsonl under {export_root}")
+        return "", errors
+    if len(event_files) > 1:
+        errors.append(f"expected one events.jsonl under {export_root}, found {len(event_files)}")
         return "", errors
     try:
         return event_files[0].read_text(encoding="utf-8"), errors

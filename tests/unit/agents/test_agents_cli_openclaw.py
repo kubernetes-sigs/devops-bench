@@ -44,7 +44,11 @@ from devops_bench.agents.cli.openclaw.agent import (
     _build_openclaw_config,
     _oc_model_id,
 )
-from devops_bench.agents.cli.openclaw.parsing import _pick_session_key, _strip_ansi
+from devops_bench.agents.cli.openclaw.parsing import (
+    _pick_session_key,
+    _read_export_bundle,
+    _strip_ansi,
+)
 from devops_bench.core.errors import ConfigError, SubprocessError
 
 
@@ -415,6 +419,66 @@ def test_execute_falls_back_to_stdout_when_bundle_has_no_answer(
 
     result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert result.output == "bare stdout answer"
+
+
+def test_execute_keeps_the_export_bundle_in_a_harness_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The raw events.jsonl lands in the run workspace and outlives the run."""
+    _install_oc_run(
+        monkeypatch,
+        lambda *a, **k: _make_subprocess_result("OK\n", "", 0),
+        _bundle_writer(SAMPLE_EVENTS),
+    )
+    workspace = tmp_path / "run-ws"
+    workspace.mkdir()
+
+    agent = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=30.0))
+    result = agent._execute("audit pods", workspace_path=workspace)
+
+    assert result.output == "All pods healthy."
+    bundles = list(workspace.glob("oc-export-*/.openclaw/trajectory-exports/*/events.jsonl"))
+    assert len(bundles) == 1
+    assert json.loads(bundles[0].read_text().splitlines()[0])["type"] == "tool.call"
+
+
+def test_execute_ignores_a_bundle_the_agent_planted_in_its_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A forged events.jsonl written during the turn must not be scored."""
+    workspace = tmp_path / "run-ws"
+    workspace.mkdir()
+    forged = _events({"type": "model.completed", "data": {"assistantTexts": ["FORGED"]}})
+
+    def planting_turn(*_a: Any, **_k: Any) -> Any:
+        planted = workspace / ".openclaw" / "trajectory-exports" / "a"
+        planted.mkdir(parents=True)
+        (planted / "events.jsonl").write_text(forged, encoding="utf-8")
+        return _make_subprocess_result("OK\n", "", 0)
+
+    _install_oc_run(monkeypatch, planting_turn, _bundle_writer(SAMPLE_EVENTS))
+
+    agent = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=30.0))
+    result = agent._execute("audit pods", workspace_path=workspace)
+
+    assert result.output == "All pods healthy."
+    assert [step["name"] for step in result.trajectory] == [
+        "kubectl_get_pods",
+        "kubectl_describe",
+    ]
+    assert (workspace / ".openclaw" / "trajectory-exports" / "a" / "events.jsonl").exists()
+
+
+def test_read_export_bundle_refuses_more_than_one_events_file(tmp_path: Path) -> None:
+    root = tmp_path / ".openclaw" / "trajectory-exports"
+    for name in ("a", "openclaw-trajectory-x"):
+        (root / name).mkdir(parents=True)
+        (root / name / "events.jsonl").write_text(SAMPLE_EVENTS, encoding="utf-8")
+
+    text, errors = _read_export_bundle(tmp_path)
+
+    assert text == ""
+    assert errors == [f"expected one events.jsonl under {root}, found 2"]
 
 
 def test_execute_records_when_sessions_returns_no_rows(
