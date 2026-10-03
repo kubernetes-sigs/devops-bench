@@ -21,7 +21,13 @@ from typing import Any
 
 from deepeval.test_case import LLMTestCase
 
-from devops_bench.core import get_bool, get_logger, score_keys
+from devops_bench.core import (
+    get_bool,
+    get_logger,
+    is_placeholder_output,
+    is_unscoreable_run,
+    score_keys,
+)
 
 # Imported for their @METRICS.register side effects.
 from devops_bench.metrics import (
@@ -90,6 +96,16 @@ _RECOVERABLE_KEYS = (
 # catastrophic.
 _CATASTROPHIC_KEYS = score_keys.CATASTROPHIC_SCORE_KEYS
 
+# A withheld deterministic signal is not an absent one. The task declared
+# checks for the quantity and they did not resolve, so the judge's reading of
+# the same quantity is not a stand-in: falling through would answer a question
+# the deterministic layer explicitly refused to answer, and the row would look
+# like every other scored row.
+_WITHHELD_KEYS = {
+    score_keys.VERIFICATION_CORRECTNESS_KEY: score_keys.VERIFICATION_CORRECTNESS_WITHHELD_KEY,
+    score_keys.VERIFICATION_RECOVERABLE_KEY: score_keys.VERIFICATION_RECOVERABLE_WITHHELD_KEY,
+}
+
 # Order in which builtin metric keys appear in results.json.
 _BUILTIN_METRIC_KEYS: tuple[str, ...] = (
     "outcome_validity",
@@ -137,14 +153,23 @@ def _score_value(entry: Any) -> float | None:
 def _first_score(scores: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     """Return the score under the first key in ``keys`` that carries one.
 
+    A key whose withheld marker is present stops the walk instead of being
+    skipped: the deterministic layer declared checks for that quantity and
+    they did not resolve, so no later (judged) key in the chain may answer for
+    it. See :data:`_WITHHELD_KEYS`.
+
     Args:
         scores: The per-metric score map for one record.
         keys: Candidate score keys in preference order.
 
     Returns:
-        The first numeric score found, or ``None`` when no key carries one.
+        The first numeric score found, or ``None`` when no key carries one or
+        when a key earlier in the chain was withheld.
     """
     for key in keys:
+        marker = _WITHHELD_KEYS.get(key)
+        if marker is not None and marker in scores:
+            return None
         value = _score_value(scores.get(key))
         if value is not None:
             return value
@@ -248,6 +273,15 @@ def _build_context(res: dict[str, Any], judge_model: Any, use_mcp: bool) -> Metr
     latency = res.get("latency")
     retrieval_context = res.get("retrieval_context")
 
+    # A redaction placeholder is never an answer, whatever else the run did.
+    # An *empty* output only counts as missing when the trajectory shows the
+    # agent actually worked: there the blank is a capture failure, while a
+    # blank beside an empty trajectory is the agent genuinely producing
+    # nothing — a real zero the judge should still hand out.
+    final_output_missing = is_placeholder_output(actual_output) or (
+        not str(actual_output or "").strip() and bool(trajectory)
+    )
+
     # Tool names surface with an MCP server prefix (e.g. ``default__generate_manifest``);
     # expected-tool checks in tasks reference the canonical name (``generate_manifest``).
     # Normalize only for the judge test cases so tool-call matching isn't brittle;
@@ -299,6 +333,7 @@ def _build_context(res: dict[str, Any], judge_model: Any, use_mcp: bool) -> Metr
         tool_case=tool_case,
         all_case=all_case,
         generation_only=bool(res.get("generation_only", False)),
+        final_output_missing=final_output_missing,
     )
 
 
@@ -363,6 +398,17 @@ def evaluate_metrics_batch(
         # like the metric loop: a malformed sub-score raises out of the scoring
         # formula, and must cost this record its composite rather than abort the
         # remaining records in the batch.
+        if is_unscoreable_run(res):
+            # The agent never completed its turn: keep sub-scores for triage, withhold the composite.
+            _log.warning(
+                "no composite outcome score for %s: status=%r, errors=%d, trajectory steps=%d",
+                res.get("name"),
+                res.get("status"),
+                len(res.get("errors") or []),
+                len(res.get("trajectory") or []),
+            )
+            res["scores"] = scores
+            continue
         try:
             _finalize_outcome_score(scores)
         except Exception:  # noqa: BLE001 - one record must not abort the batch

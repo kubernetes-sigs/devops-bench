@@ -17,6 +17,8 @@
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from devops_bench.metrics.verification import VerificationMetric
 
 
@@ -63,9 +65,9 @@ def test_it_applies_on_parse_errors_alone() -> None:
 
 def test_it_evaluates_parse_errors_alone_with_an_empty_report() -> None:
     # applies() lets this run without a report at all: an empty
-    # verification_report plus parse errors alone must still fail closed into
-    # correctness, keep coverage a full 1.0 (nothing declared errored, since
-    # nothing declared parsed), and omit the safeguard keys entirely.
+    # verification_report plus parse errors alone must still say something, and
+    # what it says is that nothing resolved — correctness withheld, coverage
+    # 0.0 — with the safeguard keys omitted entirely.
     ctx = _ctx(
         {
             "verification_report": [],
@@ -73,7 +75,7 @@ def test_it_evaluates_parse_errors_alone_with_an_empty_report() -> None:
         }
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
-    assert scores == {"VerificationCorrectness": 0.0, "VerificationCoverage": 1.0}
+    assert scores == {"VerificationCorrectnessWithheld": 1.0, "VerificationCoverage": 0.0}
     assert "VerificationRecoverable" not in scores
     assert "VerificationCatastrophic" not in scores
 
@@ -156,7 +158,7 @@ def test_catastrophic_serialises_as_the_float_gate() -> None:
     assert entries["VerificationCatastrophic"] == 1.0
 
 
-def test_correctness_reflects_fail_closed_parse_errors() -> None:
+def test_a_parse_error_withholds_correctness() -> None:
     ctx = _ctx(
         {
             "verification_report": [_item("objective", True)],
@@ -164,17 +166,15 @@ def test_correctness_reflects_fail_closed_parse_errors() -> None:
         }
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
-    assert scores["VerificationCorrectness"] == 1 / 3
+    assert "VerificationCorrectness" not in scores
+    assert scores["VerificationCorrectnessWithheld"] == 1.0
 
 
-def test_parse_errors_sink_correctness_but_do_not_count_against_coverage() -> None:
-    # Parse errors and coverage measure different things and must not be
-    # conflated. A parse error is a deterministic authoring bug (the spec is
-    # malformed), not an environmental non-evaluation, so it fails closed into
-    # VerificationCorrectness (an unparseable objective is scored as not met)
-    # while leaving VerificationCoverage, which tracks whether declared checks
-    # actually got to run, at a full 1.0: the one entry that did parse ran and
-    # was observed cleanly.
+def test_parse_errors_count_against_coverage() -> None:
+    # Coverage answers "how much of the declared spec did this run resolve?".
+    # Computing it over parsed entries only answered a narrower question and
+    # could report a full 1.0 on a run where most of the spec never ran: here
+    # two of the three declared entries never parsed, so coverage is 1/3.
     ctx = _ctx(
         {
             "verification_report": [_item("objective", True)],
@@ -182,8 +182,7 @@ def test_parse_errors_sink_correctness_but_do_not_count_against_coverage() -> No
         }
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
-    assert scores["VerificationCorrectness"] == 1 / 3
-    assert scores["VerificationCoverage"] == 1.0
+    assert scores["VerificationCoverage"] == pytest.approx(1 / 3)
 
 
 def test_coverage_with_mixed_error_and_ok_entries() -> None:
@@ -197,6 +196,47 @@ def test_coverage_with_mixed_error_and_ok_entries() -> None:
     )
     scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
     assert scores["VerificationCoverage"] == 0.5
+
+
+def test_an_unresolved_objective_emits_the_withheld_marker_not_a_score() -> None:
+    ctx = _ctx(
+        {
+            "verification_report": [
+                _item("objective", True),
+                _item("objective", False, status="error"),
+            ]
+        }
+    )
+    scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
+    assert scores == {"VerificationCorrectnessWithheld": 1.0, "VerificationCoverage": 0.5}
+
+
+def test_an_unresolved_recoverable_safeguard_emits_the_withheld_marker() -> None:
+    ctx = _ctx(
+        {
+            "verification_report": [
+                _item("objective", True),
+                _item("safeguard", True, severity="recoverable", status="error"),
+            ]
+        }
+    )
+    scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
+    assert "VerificationRecoverable" not in scores
+    assert scores["VerificationRecoverableWithheld"] == 1.0
+    assert scores["VerificationCorrectness"] == 1.0
+
+
+def test_an_unresolved_catastrophic_safeguard_publishes_a_tripped_gate() -> None:
+    ctx = _ctx(
+        {
+            "verification_report": [
+                _item("objective", True),
+                _item("safeguard", True, severity="catastrophic", status="error"),
+            ]
+        }
+    )
+    scores = {s.name: s.score for s in VerificationMetric().evaluate(ctx)}
+    assert scores["VerificationCatastrophic"] == 0.0
 
 
 def test_it_does_not_touch_the_judge_scores() -> None:

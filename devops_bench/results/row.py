@@ -63,6 +63,7 @@ class Manifest(BaseModel):
             ``api``).
         augmentation: Capability tokens active for the run (e.g.
             ``["mcp", "skills"]``); an empty list denotes the baseline arm.
+        judge_model: The model that graded judged metrics; ``None`` when no judge ran.
     """
 
     model_config = _MODEL_CONFIG
@@ -74,6 +75,7 @@ class Manifest(BaseModel):
     model: str
     harness: str
     augmentation: list[str]
+    judge_model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``manifest.json``."""

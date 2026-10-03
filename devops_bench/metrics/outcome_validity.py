@@ -115,7 +115,24 @@ class OutcomeValidityMetric:
         return True
 
     def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
-        """Score the outcome-validity GEval against the outcome test case."""
+        """Score the outcome-validity GEval against the outcome test case.
+
+        Abstains — a ``None`` score with the reason recorded — when the run's
+        final answer was never captured. This metric grades the final text
+        alone, so with the text missing there is nothing real to judge, and a
+        judged 0.0 here would be indistinguishable from the agent actually
+        turning in a bad answer. A ``None`` score is skipped by every
+        preference chain, so correctness falls through to the deterministic
+        sources or, failing those, the composite is withheld — a null row
+        instead of a confident zero nobody measured.
+        """
+        if ctx.final_output_missing:
+            reason = (
+                "withheld: the run's final answer was not captured "
+                f"(output={ctx.result.get('output')!r}), so there is nothing to judge"
+            )
+            _log.warning("OutcomeValidity %s for %s", reason, ctx.result.get("name"))
+            return [MetricScore(self.name, None, success=None, reason=reason)]
         return run_geval(
             ctx.outcome_case,
             [build_outcome_validity_metric(ctx.judge, generation_only=ctx.generation_only)],
