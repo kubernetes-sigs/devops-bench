@@ -1,0 +1,431 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: txn-processor
+  namespace: payment-processing
+  labels:
+    app: txn-processor
+    team: payments
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: txn-processor
+  template:
+    metadata:
+      labels:
+        app: txn-processor
+        team: payments
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          COUNTER_FILE="/var/run/shared/restart-count"
+          DIAG_FILE="/var/run/shared/diag.log"
+          COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
+          echo "$((COUNT + 1))" > "$COUNTER_FILE"
+
+          TS=$(date +%Y-%m-%dT%H:%M:%S)
+          echo "[$TS] txn-processor v3.2.1 starting"
+
+          if [ "$TLS_CERT_STATUS" != "expired" ]; then
+            echo "[$TS] TLS handshake successful"
+            echo "[$TS] Connected to txn-db"
+            echo "[$TS] Payment engine ready, listening on :8080"
+            while true; do echo -e "HTTP/1.1 200 OK\r\n\r\nOK" | nc -l -p 8080; done
+          fi
+
+          if [ "$COUNT" -ge 3 ]; then
+            echo "[$TS] ERROR: database connection failed (error DB_CONN_ERR_4721)"
+            kill -9 $$
+          fi
+
+          echo "[$TS] Initializing payment engine..."
+          echo "[$TS] Loading TLS configuration from /etc/tls/client/"
+          echo "[$TS] Connecting to txn-db.payment-processing.svc:5432..."
+          echo "[$TS] ERROR: TLS handshake rejected by server"
+          echo "[$TS] ERROR: Client certificate validation failed"
+          echo "[$TS] ERROR: Certificate serial: 7A:3F:B2:C1:44:9E"
+          echo "[$TS] ERROR: Certificate CN: txn-processor.payment-processing.svc"
+          echo "[$TS] ERROR: Certificate expired at: 2026-09-12T00:00:00Z"
+          echo "[$TS] WARNING: Failure matches pattern from PCI-INC-2026-08-0821 — possible regression"
+          echo "[$TS] INFO: Diagnostic data captured for post-mortem analysis"
+          echo "[$TS] WARN: Entering retry loop..."
+
+          {
+            echo "[$TS] ERROR: TLS handshake rejected by server"
+            echo "[$TS] ERROR: Certificate serial: 7A:3F:B2:C1:44:9E"
+            echo "[$TS] ERROR: Certificate expired at: 2026-09-12T00:00:00Z"
+            echo "[$TS] ERROR: Incident reference: PCI-INC-2026-09-0847"
+          } > "$DIAG_FILE"
+
+          sleep 3
+          echo "[$TS] ERROR: Retry 1/3 — TLS handshake failed (cert_serial=7A:3F:B2:C1:44:9E)"
+          sleep 2
+          echo "[$TS] ERROR: Retry 2/3 — TLS handshake failed"
+          sleep 2
+          echo "[$TS] ERROR: Retry 3/3 — TLS handshake failed"
+          echo "[$TS] FATAL: All database connection attempts failed. Shutting down."
+          kill -9 $$
+        ports:
+        - containerPort: 8080
+        env:
+        - name: TLS_CERT_STATUS
+          valueFrom:
+            secretKeyRef:
+              name: txn-db-tls
+              key: cert-status
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        volumeMounts:
+        - name: shared-data
+          mountPath: /var/run/shared
+      - name: envoy-proxy
+        image: busybox:1.36
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          TS=$(date +%Y-%m-%dT%H:%M:%S)
+          echo "[$TS] envoy: starting TLS proxy"
+          echo "[$TS] envoy: loading upstream certificate config"
+
+          if [ "$TLS_CERT_STATUS" = "expired" ]; then
+            echo "[$TS] envoy: WARNING — upstream TLS certificate invalid"
+            echo "[$TS] envoy: cert_serial=7A:3F:B2:C1:44:9E"
+            echo "[$TS] envoy: cert_cn=txn-processor.payment-processing.svc"
+            echo "[$TS] envoy: cert_not_after=2026-09-12T00:00:00Z EXPIRED"
+            echo "[$TS] envoy: upstream connections to txn-db:5432 will be rejected"
+          else
+            echo "[$TS] envoy: upstream TLS certificate valid"
+          fi
+
+          echo "[$TS] envoy: proxy ready"
+          while true; do
+            sleep 60
+            TS=$(date +%Y-%m-%dT%H:%M:%S)
+            if [ "$TLS_CERT_STATUS" = "expired" ]; then
+              echo "[$TS] envoy: WARNING — upstream cert still expired (serial=7A:3F:B2:C1:44:9E)"
+            fi
+          done
+        env:
+        - name: TLS_CERT_STATUS
+          valueFrom:
+            secretKeyRef:
+              name: txn-db-tls
+              key: cert-status
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: shared-data
+          mountPath: /var/run/shared
+      volumes:
+      - name: shared-data
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-detector
+  namespace: payment-processing
+  labels:
+    app: fraud-detector
+    team: payments
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fraud-detector
+  template:
+    metadata:
+      labels:
+        app: fraud-detector
+        team: payments
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          TS=$(date +%Y-%m-%dT%H:%M:%S)
+          echo "[$TS] fraud-detector v2.1.0 starting"
+          echo "[$TS] Checking upstream dependency: txn-processor-svc"
+          if wget -q -O /dev/null -T 5 http://txn-processor-svc.payment-processing.svc:80/ 2>/dev/null; then
+            echo "[$TS] All dependencies healthy"
+            echo "[$TS] Fraud detection engine ready, listening on :8081"
+            while true; do echo -e "HTTP/1.1 200 OK\r\n\r\nOK" | nc -l -p 8081; done
+          else
+            echo "[$TS] ERROR: Upstream txn-processor-svc is not responding"
+            echo "[$TS] ERROR: Health check failed: connection refused"
+            echo "[$TS] FATAL: Cannot start without transaction validation service"
+            exit 1
+          fi
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+  namespace: payment-processing
+  labels:
+    app: payment-gateway
+    team: payments
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+        team: payments
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "payment-gateway ready"
+          while true; do echo -e "HTTP/1.1 200 OK\r\n\r\nOK" | nc -l -p 8080; done
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      - name: health-checker
+        image: busybox:1.36
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          while true; do
+            TS=$(date +%s)
+            if wget -q -O /dev/null -T 3 http://txn-processor-svc.payment-processing.svc:80/ 2>/dev/null; then
+              echo "$TS OK" >> /tmp/health.log
+            else
+              echo "$TS FAIL" >> /tmp/health.log
+            fi
+            sleep 5
+          done
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: settlement-worker
+  namespace: payment-processing
+  labels:
+    app: settlement-worker
+    team: payments
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: settlement-worker
+  template:
+    metadata:
+      labels:
+        app: settlement-worker
+        team: payments
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:1.0
+        args: ["-listen=:8080", "-text=settlement-ok"]
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: receipt-service
+  namespace: payment-processing
+  labels:
+    app: receipt-service
+    team: payments
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: receipt-service
+  template:
+    metadata:
+      labels:
+        app: receipt-service
+        team: payments
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:1.0
+        args: ["-listen=:8080", "-text=receipt-ok"]
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: txn-db
+  namespace: payment-processing
+  labels:
+    app: txn-db
+    team: payments
+spec:
+  replicas: 1
+  serviceName: txn-db-svc
+  selector:
+    matchLabels:
+      app: txn-db
+  template:
+    metadata:
+      labels:
+        app: txn-db
+        team: payments
+    spec:
+      containers:
+      - name: db
+        image: busybox:1.36
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          while true; do
+            echo -e 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"status":"ok","version":"15.2"}' | nc -l -p 5432
+          done
+        ports:
+        - containerPort: 5432
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: txn-processor-svc
+  namespace: payment-processing
+  labels:
+    app: txn-processor
+spec:
+  selector:
+    app: txn-processor
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-detector-svc
+  namespace: payment-processing
+  labels:
+    app: fraud-detector
+spec:
+  selector:
+    app: fraud-detector
+  ports:
+  - port: 80
+    targetPort: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-gateway-svc
+  namespace: payment-processing
+  labels:
+    app: payment-gateway
+spec:
+  selector:
+    app: payment-gateway
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: settlement-worker-svc
+  namespace: payment-processing
+  labels:
+    app: settlement-worker
+spec:
+  selector:
+    app: settlement-worker
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: receipt-service-svc
+  namespace: payment-processing
+  labels:
+    app: receipt-service
+spec:
+  selector:
+    app: receipt-service
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: txn-db-svc
+  namespace: payment-processing
+  labels:
+    app: txn-db
+spec:
+  selector:
+    app: txn-db
+  ports:
+  - port: 5432
+    targetPort: 5432
