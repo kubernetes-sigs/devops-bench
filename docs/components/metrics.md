@@ -25,12 +25,14 @@ These four are **bare numbers** in `results.json`, not `{"score", …}` objects 
 
 | Score key | What it measures | Range | When it runs |
 | --- | --- | --- | --- |
-| `VerificationCorrectness` | Weighted pass fraction over entries with `role: objective` | 0–1 | When at least one objective evaluated, **or** a spec failed to parse |
-| `VerificationRecoverable` | Weighted pass fraction over `role: safeguard`, `severity: recoverable` | 0–1, **raw** | When at least one recoverable safeguard evaluated |
-| `VerificationCatastrophic` | The catastrophic gate: `0.0` if any catastrophic safeguard failed, else `1.0` | 0 or 1 | When at least one catastrophic safeguard evaluated |
-| `VerificationCoverage` | Fraction of declared entries that actually evaluated — `1 - errored / (declared + parse errors)` | 0–1 | Whenever a report or a parse error exists |
+| `VerificationCorrectness` | Weighted pass fraction over entries with `role: objective` | 0–1 | When at least one objective resolved and **none** was left unresolved |
+| `VerificationRecoverable` | Weighted pass fraction over `role: safeguard`, `severity: recoverable` | 0–1, **raw** | When at least one recoverable safeguard resolved and **none** was left unresolved |
+| `VerificationCatastrophic` | The catastrophic gate: `0.0` if any catastrophic safeguard failed **or could not be read**, else `1.0` | 0 or 1 | When at least one catastrophic safeguard was declared |
+| `VerificationCoverage` | Fraction of declared entries that resolved — `1 - errored / declared`, where `declared` counts entries that never parsed | 0–1 | Whenever a report or a parse error exists |
+| `VerificationCorrectnessWithheld` | Marker: an objective did not resolve, so correctness is not published for this run | `1.0` | Instead of `VerificationCorrectness`, never alongside it |
+| `VerificationRecoverableWithheld` | Marker: a recoverable safeguard did not resolve | `1.0` | Instead of `VerificationRecoverable`, never alongside it |
 
-"Evaluated" is doing real work in that column: a signal whose every entry errored is **omitted entirely** rather than reported as zero, so an absent opinion never reads as a failing one. `VerificationCorrectness` is the one that can appear without any objective evaluating — a parse error alone produces `0.0`, because it fails closed.
+A signal whose entries did not all resolve is **withheld** rather than reported over the subset that did, and a withheld signal emits its marker key so a downstream reader can tell "not measured" from "not declared". Coverage is the exception: it is published for every run, including one that produced no usable score at all, because it is the figure that says how much of the spec actually ran.
 
 ### Judged — from prose checklists on the task
 
@@ -83,6 +85,7 @@ Any finding trips the gate, including a benchmark path that merely surfaced in t
 
 A few notes that matter when you read these:
 
+- **`OutcomeValidity` abstains when the final answer was never captured.** Some harness tools redact or drop the final assistant message before the harness reads it (openclaw stores `[Malformed diagnostic JSON redacted]` in its place), and an empty `output` beside a non-empty trajectory means the capture failed, not that the agent said nothing. In both cases the metric is the only one that grades the final text alone, so it records `{"score": null, "reason": "withheld: …"}` instead of judging the stand-in — a judged 0.0 there would be indistinguishable from a genuinely bad answer. A `null` score is skipped by the correctness preference chain; when no other correctness source measured anything either, the composite is withheld and the row scores null. An empty output beside an *empty* trajectory is still judged: an agent that turned in nothing earned that zero.
 - **`OutcomeValidity` softens for generation-only runs.** When there is no live cluster — either the task declares `deployer: noop`, or `BENCH_NO_INFRA` / `--no-infra` skipped provisioning for the whole run — the criteria are adjusted so a missing cluster-apply or execution confirmation is *not* counted against the agent, and a correct, complete manifest is full achievement. Semantic correctness and every expected-output requirement are still graded normally.
 - **`GroundingAccuracy` is on a 0–5 scale, not 0–1**, and its branches are evaluated
   in order — the first match wins:
@@ -159,9 +162,31 @@ A task that declares none passes `recoverable_safety=None`, and by default the g
 
 Two things about `verification_spec` results are easy to misread.
 
-**An errored entry is not a failed entry.** An entry whose status is `error` was never evaluated — it counts toward neither the numerator nor the denominator of any signal, and is excluded from the catastrophic gate. That keeps an infrastructure problem on our side from being scored as the agent's failure, but it also means a run can produce a confident-looking `VerificationCorrectness` computed over only a handful of the declared entries. **`VerificationCoverage` is how you catch that** — it is emitted whenever the metric applies, precisely so an all-errored class does not silently emit nothing.
+**An unresolved entry is neither a pass nor a fail.** An entry whose status is `error` was never evaluated, and one that never parsed was never even asked. Neither is scored as the agent's failure — an infrastructure problem on our side is not a wrong answer — but neither is quietly dropped either. Dropping it would rescale the run onto whichever checks happened to work, producing a confident-looking `VerificationCorrectness` computed over a handful of the declared entries and published in the same column as a fully-measured run. Instead the signal it feeds is **withheld** for that run, and the denominator stays put. **`VerificationCoverage` is how you see how much of the spec actually ran** — it is emitted whenever the metric applies, precisely so an all-errored class does not silently emit nothing.
 
-**A spec that failed to parse fails closed.** Each parse error adds weight 1.0 to the objective denominator with no numerator contribution. A spec that never parsed might have declared anything, and the conservative default is that it was an unmet objective.
+**A spec that failed to parse is an unresolved objective.** A spec that never parsed might have declared anything, so it is not treated as a met objective — and not as an unmet one either, which would score the harness's own failure against the agent. It withholds correctness for the run and is counted in coverage.
+
+### How an entry resolves
+
+**Every declared entry resolves to exactly one of pass, fail or unresolved, and
+the denominator never moves.** An entry is unresolved when the harness never
+observed it one way or the other (status `error`), or when it never parsed. What
+happens next depends only on what the entry was:
+
+- an unresolved **objective** withholds correctness entirely — the run publishes
+  no correctness score and no `OutcomeScore`, rather than a fraction of whatever
+  else happened to run;
+- an unresolved **recoverable safeguard** withholds recoverable safety the same
+  way;
+- an unresolved **catastrophic safeguard fails the gate closed**. A tripwire
+  nobody could read is not a tripwire that held.
+
+Withholding rather than rescaling is what keeps two runs comparable: a
+denominator that quietly shrinks means one run was graded out of 12 objectives
+and another out of 9, and their scores are then not measuring the same task. A
+withheld signal is also *not* backfilled from the judge — `ChecklistScore` does
+not stand in for a withheld `VerificationCorrectness`, because the deterministic
+layer declined to answer that question rather than failing to ask it.
 
 ## Output format
 
@@ -210,7 +235,7 @@ Four things are deliberate here:
 
 ### `manifest.json` — run-level identity
 
-The shared identity for every row in the run: schema version, `runId`, timestamp, `setupId`, `model`, `harness`, and `augmentation`.
+The shared identity for every row in the run: schema version, `runId`, timestamp, `setupId`, `model`, `harness`, `augmentation`, and `judgeModel` (the model that graded judged metrics; null when no judge ran).
 
 ## How to read a result
 

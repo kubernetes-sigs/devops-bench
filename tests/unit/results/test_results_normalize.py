@@ -319,6 +319,54 @@ def test_build_rows_correctness_falls_back_to_outcome_validity() -> None:
     assert d["correctnessScore"] == 0.7
 
 
+def test_build_rows_leaves_a_withheld_correctness_null_on_the_row() -> None:
+    # The row's components must name the same signals the headline was built
+    # from. A deterministic objective that never resolved withholds
+    # correctness, so the judged reading must not fill the column back in.
+    record = {
+        "name": "Unresolved objective",
+        "folder": "task_z",
+        "status": "success",
+        "scores": {
+            "VerificationCorrectnessWithheld": 1.0,
+            "ChecklistScore": {"score": 0.9, "success": True},
+            "VerificationCoverage": 0.5,
+        },
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["correctnessScore"] is None
+    assert d["outcomeScore"] is None
+
+
+def test_build_rows_leaves_correctness_null_for_a_run_the_agent_never_completed() -> None:
+    record = {
+        "name": "Agent crashed",
+        "folder": "task_z",
+        "status": "agent_error",
+        "scores": {"VerificationCorrectness": {"score": 1.0, "success": True}},
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["correctnessScore"] is None
+
+
+def test_build_rows_keeps_correctness_for_an_ordinary_completed_run() -> None:
+    record = {
+        "name": "Finished",
+        "folder": "task_z",
+        "status": "success",
+        "trajectory": [{"step": 1}],
+        "scores": {"ChecklistScore": {"score": 0.9, "success": True}},
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["correctnessScore"] == 0.9
+
+
 def test_build_rows_failed_record_has_null_scores_and_tokens():
     record = {
         "name": "Broken Task",
@@ -418,7 +466,13 @@ def test_manifest_to_dict_keys():
         "model",
         "harness",
         "augmentation",
+        "judgeModel",
     }
+
+
+def test_manifest_records_the_judge_model():
+    assert _manifest(judge_model="judge-m").to_dict()["judgeModel"] == "judge-m"
+    assert _manifest().to_dict()["judgeModel"] is None
 
 
 def test_build_rows_propagates_validated():
