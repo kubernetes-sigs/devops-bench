@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 
 from devops_bench.agents.result import ToolCall
-from devops_bench.core import get_logger
+from devops_bench.core import get_logger, is_placeholder_output
 
 __all__ = ["parse_trajectory_export"]
 
@@ -104,6 +104,14 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
     agent's ``_fold_with_extraction_errors`` and the Gemini ``parse_stream_json``
     policy.
 
+    Redaction placeholders oc's sanitizer stores over a message it refused to
+    keep (``[Malformed diagnostic JSON redacted]``, see
+    :func:`devops_bench.core.is_placeholder_output`) are dropped from both
+    output sources: a placeholder is not an answer, and left in place it would
+    mask the real text this cascade could otherwise recover. When every source
+    is a placeholder, ``output`` comes back ``""`` and the scoring layer's
+    missing-answer rule takes over instead of a judge grading the stand-in.
+
     Args:
         jsonl_text: Raw contents of ``events.jsonl`` inside the export bundle.
 
@@ -179,13 +187,35 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
                 _accumulate_usage(tokens, usage)
             texts = data.get("assistantTexts")
             if isinstance(texts, list):
-                joined = "\n".join(t for t in texts if isinstance(t, str))
+                # oc's sanitizer sometimes stores a redaction placeholder over
+                # the message it refused to keep. The placeholder is not the
+                # agent's answer, so it must neither become ``output`` nor —
+                # by making ``joined`` truthy — overwrite a real earlier turn
+                # or block the ``assistant.message`` fallback below.
+                strings = [t for t in texts if isinstance(t, str)]
+                kept = [t for t in strings if not is_placeholder_output(t)]
+                if len(kept) < len(strings):
+                    _log.warning(
+                        "events line %d: dropped %d redaction placeholder(s) "
+                        "from model.completed assistantTexts",
+                        lineno,
+                        len(strings) - len(kept),
+                    )
+                joined = "\n".join(kept)
                 if joined:
                     output = joined
         elif etype == "assistant.message":
             msg = data.get("message") if isinstance(data.get("message"), dict) else {}
             txt = _join_text(msg.get("content"))
-            if txt:
+            if is_placeholder_output(txt):
+                # Same sanitizer, same rule: the fallback exists to recover the
+                # real text, and a placeholder appended here would ride along
+                # with (or stand in for) whatever it recovers.
+                _log.warning(
+                    "events line %d: dropped a redaction placeholder from an assistant.message",
+                    lineno,
+                )
+            elif txt:
                 fallback_output.append(txt)
 
     if not output and fallback_output:

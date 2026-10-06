@@ -174,6 +174,84 @@ def test_parse_trajectory_export_output_falls_back_to_assistant_message() -> Non
     assert output == "done."
 
 
+def test_parse_trajectory_export_placeholder_final_text_falls_back() -> None:
+    """A redacted final answer engages the assistant.message fallback.
+
+    The live shape from run_20260911_172304: oc's sanitizer stored
+    ``[Malformed diagnostic JSON redacted]`` over the final message in its own
+    sqlite before the harness read it. The placeholder must not become the
+    graded output when the real text still rides on an assistant.message.
+    """
+    blob = _events(
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Deployed hello-app; 3/3 pods Ready."}],
+                }
+            },
+        },
+        {
+            "type": "model.completed",
+            "data": {
+                "usage": {"input": 1, "output": 2},
+                "assistantTexts": ["[Malformed diagnostic JSON redacted]"],
+            },
+        },
+    )
+    _trajectory, _tokens, output, errors = parse_trajectory_export(blob)
+    assert errors == []
+    assert output == "Deployed hello-app; 3/3 pods Ready."
+
+
+def test_parse_trajectory_export_placeholder_does_not_clobber_an_earlier_turn() -> None:
+    """A redacted last turn leaves the previous turn's real assistantTexts standing."""
+    blob = _events(
+        {"type": "model.completed", "data": {"assistantTexts": ["Applying the manifest now."]}},
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Oversized diagnostic JSON redacted]"]},
+        },
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == "Applying the manifest now."
+
+
+def test_parse_trajectory_export_placeholder_assistant_message_is_not_recovered() -> None:
+    """The fallback skips redacted assistant.messages instead of returning them.
+
+    When every source is a placeholder the parser returns ``""``, which is the
+    shape the scoring layer's missing-answer rule keys on — better an empty
+    output than a judge grading the sanitizer's stand-in.
+    """
+    blob = _events(
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "[Malformed diagnostic JSON redacted]"}],
+                }
+            },
+        },
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Malformed diagnostic JSON redacted]"]},
+        },
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == ""
+
+
+def test_parse_trajectory_export_answer_quoting_a_placeholder_is_kept() -> None:
+    """Only a whole-string placeholder is dropped; an answer about one survives."""
+    text = "Retried after seeing '[Malformed diagnostic JSON redacted]' in the log; done."
+    blob = _events({"type": "model.completed", "data": {"assistantTexts": [text]}})
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == text
+
+
 def test_parse_trajectory_export_surfaces_decode_errors() -> None:
     blob = "{not json}\n" + json.dumps(_tool_call("1", "x", {})) + "\n"
     trajectory, _tokens, _output, errors = parse_trajectory_export(blob)

@@ -33,8 +33,10 @@ __all__ = [
     "TOOL_INVOCATION_KEY",
     "VERIFICATION_CATASTROPHIC_KEY",
     "VERIFICATION_CORRECTNESS_KEY",
+    "VERIFICATION_CORRECTNESS_WITHHELD_KEY",
     "VERIFICATION_COVERAGE_KEY",
     "VERIFICATION_RECOVERABLE_KEY",
+    "VERIFICATION_RECOVERABLE_WITHHELD_KEY",
 ]
 
 #: The v1 composite assembled from the sub-scores below; the leaderboard row's
@@ -49,6 +51,13 @@ VERIFICATION_CORRECTNESS_KEY = "VerificationCorrectness"
 VERIFICATION_RECOVERABLE_KEY = "VerificationRecoverable"
 VERIFICATION_CATASTROPHIC_KEY = "VerificationCatastrophic"
 VERIFICATION_COVERAGE_KEY = "VerificationCoverage"
+
+#: Markers written *instead of* a signal whose entries did not all resolve. A
+#: withheld signal publishes no score at all, so without a marker the row is
+#: indistinguishable from a task that declared nothing — and the composite
+#: would quietly fall through to the judged reading of the same quantity.
+VERIFICATION_CORRECTNESS_WITHHELD_KEY = "VerificationCorrectnessWithheld"
+VERIFICATION_RECOVERABLE_WITHHELD_KEY = "VerificationRecoverableWithheld"
 
 # --- judged signals, from prose checklists on the task ------------------------
 #: Correctness, and its fallback for tasks that author no checklist.
