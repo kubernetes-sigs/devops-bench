@@ -197,7 +197,7 @@ A list of per-task records. The interesting part of each is its `scores` map, wh
 
 ### `rows.json` — the dashboard contract
 
-A flattened view, one row per setup × task × run × iteration, defined in [`row.py`](../../devops_bench/results/row.py) and produced by [`normalize.py`](../../devops_bench/results/normalize.py). This is what the leaderboard ingests. Each row carries `setupId`, `model`, `harness`, `augmentation`, `outcomeScore`, `correctnessScore`, `recoverableSafetyScore`, `catastrophic`, `catastrophicKinds`, `scoringVersion`, `toolScore`, `latencySec`, input/output tokens, `status`, and `validated`.
+A flattened view, one row per setup × task × run × iteration, defined in [`row.py`](../../devops_bench/results/row.py) and produced by [`normalize.py`](../../devops_bench/results/normalize.py). This is what the leaderboard ingests. Each row carries `setupId`, `model`, `harness`, `augmentation`, `reasoningEffort` (the tier the harness ran the model at, `null` for harnesses that name none; it is also folded into `setupId` as `effort-<tier>`), `outcomeScore`, `correctnessScore`, `recoverableSafetyScore`, `catastrophic`, `catastrophicKinds`, `scoringVersion`, `toolScore`, `latencySec`, input/output tokens, `status`, and `validated`.
 
 A row also carries what the task and each check mean, so a viewer can explain a score without opening the task file. `taskTitle`, `taskSummary`, `taskCategory`, `taskTags`, and `checkGroups` come from the record's `task_metadata`, which the harness snapshots from the task's display fields at run time; they are empty on records written before that snapshot existed. `checks` flattens the record's `verification_report` into one entry per verification entry, keyed by the entry's stable `name`: the author-written `title`, `description`, `group`, and `failureHint`, plus `role`, `severity`, `weight`, `mode`, the tri-state `status`, and the verifier's own `reason`. Any record with a verification report yields `checks`, however old: on a record that predates the display fields they are empty strings, and on one that predates the tri-state `status` it is derived from `success`. Each `verification_parse_errors` item is appended after the evaluated entries as an `error` check, carrying the `role`, `severity`, and display fields the entry declared, because an entry that never evaluated already fails closed into `VerificationCorrectness` and would otherwise be invisible next to an all-green list. The rollup charges every such entry as one objective at weight 1.0 whatever it declared; the row reports the declaration so a viewer can see that a safeguard went unrun.
 
@@ -210,7 +210,7 @@ Four things are deliberate here:
 
 ### `manifest.json` — run-level identity
 
-The shared identity for every row in the run: schema version, `runId`, timestamp, `setupId`, `model`, `harness`, and `augmentation`.
+The shared identity for every row in the run: schema version, `runId`, timestamp, `setupId`, `model`, `harness`, `augmentation`, and `reasoningEffort`.
 
 ## How to read a result
 

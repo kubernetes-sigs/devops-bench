@@ -84,6 +84,17 @@ def test_setup_id_matches_catalog_slug_for_dotted_model():
     assert setup_id("gemini-3.1-pro", "gemini-cli", []) == "gemini-3-1-pro-gemini-cli"
 
 
+def test_setup_id_appends_the_reasoning_effort_as_its_own_arm():
+    # Runs of one model at different tiers must not share an id, or the
+    # aggregate's keep-newest dedupe lets a re-run at one tier replace the other.
+    assert setup_id("m", "h", ["mcp"], reasoning_effort="low") == "m-h-mcp-effort-low"
+    assert setup_id("m", "h", [], reasoning_effort="high") == "m-h-effort-high"
+
+
+def test_setup_id_without_a_reasoning_effort_is_unchanged():
+    assert setup_id("m", "h", ["mcp"], reasoning_effort=None) == setup_id("m", "h", ["mcp"])
+
+
 # -- normalize_tokens --------------------------------------------------------
 
 
@@ -154,6 +165,16 @@ def test_extract_score_none_score_in_dict_is_none():
 # -- build_rows --------------------------------------------------------------
 
 
+def test_build_rows_carries_the_manifest_reasoning_effort():
+    manifest = _manifest(setup_id="m-h-effort-low", reasoning_effort="low")
+    record = {"name": "t", "folder": "t", "status": "success", "latency": 1.0}
+
+    rows = build_rows([record], manifest)
+
+    assert rows[0].reasoning_effort == "low"
+    assert rows[0].to_dict()["reasoningEffort"] == "low"
+
+
 def test_build_rows_success_record():
     manifest = _manifest(
         setup_id="alpha-gemini-mcp-skills",
@@ -182,6 +203,7 @@ def test_build_rows_success_record():
         "model": "alpha",
         "harness": "gemini",
         "augmentation": ["mcp", "skills"],
+        "reasoningEffort": None,
         "runId": "run_20260601_000000",
         "t": "2026-06-01T00:00:00Z",
         "taskFolder": "task_001",
@@ -367,13 +389,14 @@ def test_result_row_keys_match_typescript_interface():
     ``recoverableSafetyScore`` / ``catastrophic`` / ``scoringVersion``, and the
     ``outcomeScore`` re-semantics) and ``catastrophicKinds`` are produced here
     first; the TS interface and the ingest validators are updated in the
-    frontend-phase rollout.
+    frontend-phase rollout. ``reasoningEffort`` follows the same path.
     """
     ts_result_row_fields = {
         "setupId",
         "model",
         "harness",
         "augmentation",
+        "reasoningEffort",
         "runId",
         "t",
         "taskFolder",
@@ -418,6 +441,7 @@ def test_manifest_to_dict_keys():
         "model",
         "harness",
         "augmentation",
+        "reasoningEffort",
     }
 
 

@@ -859,14 +859,24 @@ class DefaultEvalHarness(Harness):
         # Canonical key, so an alias aggregates with it instead of as a second setup.
         harness = _canonical_agent_type(self.agent_type)
         model = self._agent_config.model or self._agent_config.provider or harness
+        # The tier is part of the arm: without it, runs of one model at two tiers
+        # share a setup id and the aggregate's keep-newest dedupe merges them.
+        _ensure_builtin_agents_registered()
+        agent_cls = AGENTS.get(harness)
+        reasoning_effort = (
+            agent_cls.reasoning_effort(self._agent_config) if agent_cls is not None else None
+        )
         manifest = Manifest(
             schema_version=SCHEMA_VERSION,
             run_id=run_dir.name,
             t=datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            setup_id=results_setup_id(model, harness, augmentation),
+            setup_id=results_setup_id(
+                model, harness, augmentation, reasoning_effort=reasoning_effort
+            ),
             model=model,
             harness=harness,
             augmentation=augmentation,
+            reasoning_effort=reasoning_effort,
         )
         rows = build_rows(detailed_results, manifest)
         self.reporter.write_rows(run_dir, [row.to_dict() for row in rows])

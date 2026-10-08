@@ -188,3 +188,32 @@ def test_manifest_records_the_canonical_harness_key(tmp_path: Path, mocker: Mock
     manifest = write_manifest.call_args.args[1]
     assert manifest["harness"] == "claude"
     assert manifest["setupId"].startswith("claude-opus-4-8-claude")
+    # A harness with no tier concept leaves the id and the field alone.
+    assert manifest["reasoningEffort"] is None
+    assert "effort" not in manifest["setupId"]
+
+
+def test_manifest_records_the_reasoning_effort_of_a_tiered_harness(
+    tmp_path: Path, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tier is part of the arm: it lands on the manifest and in ``setupId``.
+
+    Without it, ``low`` and ``high`` runs of one model share a ``setupId`` and
+    the aggregate's keep-newest dedupe lets a re-run at one tier replace rows
+    scored at the other.
+    """
+    import devops_bench.agents.cli.antigravity.agent  # noqa: F401 - registers the harness
+
+    monkeypatch.delenv("AGENT_MODEL_EFFORT", raising=False)
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    harness.agent_type = "antigravity"
+    harness._agent_config.model = "google/gemini-3.1-pro-preview-low"  # noqa: SLF001
+    write_manifest = mocker.patch.object(harness.reporter, "write_manifest")
+    mocker.patch.object(harness.reporter, "write_rows")
+
+    harness._write_run_artifacts(tmp_path, [])  # noqa: SLF001 - the unit under test
+
+    manifest = write_manifest.call_args.args[1]
+    assert manifest["reasoningEffort"] == "low"
+    assert manifest["setupId"].startswith("google-gemini-3-1-pro-preview-low-antigravity")
+    assert manifest["setupId"].endswith("-effort-low")

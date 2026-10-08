@@ -79,6 +79,11 @@ class AgentHarness(ABC):
     #: :meth:`run` refuses a sandboxed config on a harness that has not declared it.
     supports_sandbox: bool = False
 
+    @classmethod
+    def reasoning_effort(cls, config: AgentConfig) -> str | None:
+        """The reasoning tier a run of ``config.model`` uses, when the harness names one apart from the id."""
+        return None
+
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or AgentConfig()
 

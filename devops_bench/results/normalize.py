@@ -112,17 +112,25 @@ def slugify(text: str) -> str:
     return _DISALLOWED_ID_CHARS.sub("-", text.lower()).strip("-")
 
 
-def setup_id(model: str, harness: str, augmentation: Iterable[str]) -> str:
+def setup_id(
+    model: str,
+    harness: str,
+    augmentation: Iterable[str],
+    *,
+    reasoning_effort: str | None = None,
+) -> str:
     """Build the deterministic setup id for a ``(model, harness, augmentation)`` arm.
 
     The augmentation tokens are sorted so the id is independent of token order;
     the baseline arm (no tokens) yields ``"<model>-<harness>"`` with no trailing
-    dash.
+    dash. A reasoning tier, when the harness names one, is appended as
+    ``effort-<tier>`` so runs at different tiers are distinct arms.
 
     Args:
         model: Model identifier.
         harness: Canonical harness key.
         augmentation: Capability tokens for the arm.
+        reasoning_effort: Reasoning tier the model ran at, if the harness names one.
 
     Returns:
         The sanitized setup id.
@@ -131,6 +139,8 @@ def setup_id(model: str, harness: str, augmentation: Iterable[str]) -> str:
     tokens = sorted(augmentation)
     if tokens:
         parts.append("-".join(tokens))
+    if reasoning_effort:
+        parts.append(f"effort-{reasoning_effort}")
     return slugify("-".join(parts))
 
 
@@ -391,6 +401,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 model=manifest.model,
                 harness=manifest.harness,
                 augmentation=list(manifest.augmentation),
+                reasoning_effort=manifest.reasoning_effort,
                 run_id=manifest.run_id,
                 t=manifest.t,
                 task_folder=record.get("folder", "") or "",
