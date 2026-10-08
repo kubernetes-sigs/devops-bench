@@ -50,10 +50,10 @@ from devops_bench.agents.shared.cli_capabilities import (
     build_mcp_servers,
     materialize_skills,
 )
-from devops_bench.agents.shared.vertex_env import vertex_project
+from devops_bench.agents.shared.vertex_env import vertex_location, vertex_project
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.errors import ConfigError, SandboxError
-from devops_bench.core.model_providers import resolve_provider, sandbox_credential_env
+from devops_bench.core.model_providers import ProviderSpec, resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -108,6 +108,9 @@ _CATALOG_OVERRIDES: dict[str, frozenset[str]] = {
     ),
 }
 
+# Satisfies oc's auth-profile gate on keyless Vertex; never sent, ADC carries the real credential.
+_VERTEX_CREDENTIALS_MARKER = "gcp-vertex-credentials"
+
 # A per-run provider entry replaces oc's built-in one, so it must pin ``api`` or
 # oc falls back to the OpenAI transport. oc expands ``{location}`` itself.
 _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
@@ -121,7 +124,7 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
     "anthropic-vertex": {
         "api": "anthropic-messages",
         "baseUrl": "https://aiplatform.googleapis.com",
-        "apiKey": "gcp-vertex-credentials",
+        "apiKey": _VERTEX_CREDENTIALS_MARKER,
     },
 }
 # node-fetch->native-fetch loader shim (see :func:`_write_node_fetch_shim`), under
@@ -258,12 +261,22 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
     return payload
 
 
+def _vertex_key_present(config: AgentConfig, spec: ProviderSpec) -> bool:
+    """Whether the agent receives a real Vertex key; the ADC marker never counts as one."""
+    env = {**os.environ, **config.extra_env}  # the precedence _build_env applies
+    # A provider with no key var gets config.api_key nowhere, so it cannot count.
+    configured = (config.api_key or "") if spec.api_key_envs else ""
+    candidates = (configured, *(env.get(var, "") for var in spec.api_key_envs))
+    return any(c.strip() and c.strip() != _VERTEX_CREDENTIALS_MARKER for c in candidates)
+
+
 def _build_env(config: AgentConfig) -> dict[str, str]:
     """Build the env overlay that gives ``oc agent --local`` its model API key.
 
     ``config.api_key`` lands on the provider's key var(s) from
     :func:`~devops_bench.core.model_providers.resolve_provider`; keyless (ambient
-    credential) backends get no key. The caller adds the ``OPENCLAW_*`` paths.
+    credential) backends get no key. A Vertex backend also gets its location,
+    sandboxed or not. The caller adds the ``OPENCLAW_*`` paths.
 
     Raises:
         ConfigError: If ``config.provider`` is not a known provider.
@@ -276,6 +289,9 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
     if config.api_key:
         for var in spec.api_key_envs:
             overlay[var] = config.api_key
+    if spec.backend == "vertex":
+        # oc aborts without a location; the shared chain ends at "global".
+        overlay["GOOGLE_CLOUD_LOCATION"] = vertex_location()
     if config.extra_env:
         overlay.update(config.extra_env)
     return overlay
@@ -306,11 +322,11 @@ def _sandbox_provider_env(config: AgentConfig, state_dir: Path) -> dict[str, str
     register = _write_node_fetch_shim(state_dir) / "register.mjs"
     overlay["NODE_OPTIONS"] = f"--import={sandbox.container_path(sandbox_spec.workspace, register)}"
     spec = resolve_provider(config.provider)
-    if spec.backend == "vertex" and not config.api_key:
+    if spec.backend == "vertex" and not _vertex_key_present(config, spec):
         overlay.update(sandbox_credential_env(spec, project=vertex_project()))
     if spec.oc_provider == "anthropic-vertex":
         overlay["ANTHROPIC_VERTEX_USE_GCP_METADATA"] = "1"
-        overlay.setdefault("GOOGLE_CLOUD_API_KEY", "gcp-vertex-credentials")
+        overlay.setdefault("GOOGLE_CLOUD_API_KEY", _VERTEX_CREDENTIALS_MARKER)
     return overlay
 
 
@@ -326,25 +342,21 @@ def _oc_model_flag(config: AgentConfig) -> str:
     return f"--model {shlex.quote(model_id)} "
 
 
-def _oc_provider_or_none(config: AgentConfig) -> str | None:
-    """Resolve ``config.provider`` to its ``oc`` provider id, or ``None`` if unknown.
+def _vertex_auth_profile_provider(config: AgentConfig) -> str | None:
+    """The oc provider id a keyless Vertex run must seed a headless auth profile for, else ``None``.
 
-    Tolerant on purpose: its caller runs before :func:`_build_env` fails loud on a typo.
+    In current openclaw releases a per-agent auth-profile store gates the Vertex
+    providers before ADC resolution, so a keyless run fails with ``ProviderAuthError``
+    until ``oc models auth paste-api-key`` registers :data:`_VERTEX_CREDENTIALS_MARKER`.
+    A real key, configured or in the environment, gets no profile: it would be shadowed.
     """
     try:
-        return resolve_provider(config.provider).oc_provider
+        spec = resolve_provider(config.provider)
     except ConfigError:
         return None
-
-
-def _needs_anthropic_vertex_auth_profile(config: AgentConfig) -> bool:
-    """Whether a keyless anthropic-vertex run must register a headless auth profile.
-
-    From openclaw 2026.9.1 a per-agent auth-profile store gates model auth before
-    the plugin's credential hook runs, so the config marker alone fails with
-    ``ProviderAuthError``; ``oc models auth paste-api-key`` registers the entry.
-    """
-    return _oc_provider_or_none(config) == "anthropic-vertex" and not config.api_key
+    if spec.backend != "vertex" or _vertex_key_present(config, spec):
+        return None
+    return spec.oc_provider
 
 
 def _prepend_rules(rules_text: str, prompt: str) -> str:
@@ -362,11 +374,12 @@ def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_b
     """
     quoted_oc = shlex.quote(oc_bin)
     auth_setup = ""
-    if _needs_anthropic_vertex_auth_profile(config):
-        marker = _PROVIDER_TRANSPORT["anthropic-vertex"]["apiKey"]
+    auth_provider = _vertex_auth_profile_provider(config)
+    if auth_provider:
         auth_setup = (
-            f"printf '%s\\n' {shlex.quote(marker)} | {quoted_oc} models auth paste-api-key "
-            f"--provider anthropic-vertex --agent {shlex.quote(agent_name)}; "
+            f"printf '%s\\n' {shlex.quote(_VERTEX_CREDENTIALS_MARKER)} | "
+            f"{quoted_oc} models auth paste-api-key "
+            f"--provider {shlex.quote(auth_provider)} --agent {shlex.quote(agent_name)}; "
         )
     extra_flags_str = (
         " ".join(shlex.quote(f) for f in config.extra_flags) + " " if config.extra_flags else ""
