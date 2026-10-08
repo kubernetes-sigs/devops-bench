@@ -31,6 +31,7 @@ __all__ = [
     "MetricContext",
     "MetricEvaluator",
     "MetricScore",
+    "TOOL_INVOCATION_THRESHOLD",
     "run_geval",
 ]
 
@@ -38,6 +39,7 @@ __all__ = [
 # 0.5; the builtin metrics deliberately score at 0.8, so every GEval-backed
 # metric passes this explicitly rather than inheriting the looser SDK default.
 GEVAL_PASS_THRESHOLD = 0.8
+TOOL_INVOCATION_THRESHOLD = 0.8
 
 # Entry-point discovery lets external packages add metrics.
 METRICS: Registry[type[MetricEvaluator]] = Registry(

@@ -17,6 +17,9 @@
 from __future__ import annotations
 
 import math
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -24,7 +27,9 @@ from devops_bench.metrics.scoring import (
     RECOVERABLE_SAFETY_FLOOR,
     SCORING_VERSION,
     compute_outcome_score_v1,
+    finalize_outcome_score,
     rescale_recoverable_safety,
+    score_value,
 )
 
 # --- rescale_recoverable_safety — linear map onto [floor, 1.0] ----------------
@@ -186,3 +191,63 @@ def test_non_bool_catastrophic_is_rejected(flag: object) -> None:
 
 def test_scoring_version_is_v1() -> None:
     assert SCORING_VERSION == "v1"
+
+
+# --- score_value, finalize_outcome_score -------------------------------------
+
+
+def test_score_value_extracts_bare_and_dict_scores() -> None:
+    assert score_value(0.75) == 0.75
+    assert score_value(1) == 1.0
+    assert score_value({"score": 0.8, "success": True}) == 0.8
+    assert score_value(True) is None
+    assert score_value({"score": False}) is None
+    assert score_value(None) is None
+    assert score_value("0.8") is None
+
+
+def test_finalize_outcome_score_from_scoring_module() -> None:
+    scores: dict[str, object] = {
+        "VerificationCorrectness": 0.8,
+        "VerificationRecoverable": 0.5,
+        "VerificationCatastrophic": 1.0,
+    }
+    finalize_outcome_score(scores)
+    entry = scores["OutcomeScore"]
+    assert isinstance(entry, dict)
+    assert entry["score"] == pytest.approx(math.sqrt(0.8 * 0.55))
+    assert entry["version"] == SCORING_VERSION
+    assert entry["reason"] == "c=0.800, rec_v=0.550, cat_v=1"
+
+
+def test_pure_scoring_modules_import_without_deepeval() -> None:
+    """Pure scoring and deterministic metric modules must import when deepeval is absent."""
+    script = textwrap.dedent(
+        """
+        import pathlib
+        import sys
+        import types
+
+        import devops_bench
+        import devops_bench.core.score_keys  # noqa: F401
+
+        for mod in ("deepeval", "deepeval.metrics", "deepeval.models", "deepeval.test_case"):
+            sys.modules[mod] = None
+
+        # Stub out devops_bench.metrics.__init__, which re-exports pipeline (and deepeval).
+        pkg = types.ModuleType("devops_bench.metrics")
+        pkg.__path__ = [str(pathlib.Path(devops_bench.__file__).parent / "metrics")]
+        sys.modules["devops_bench.metrics"] = pkg
+
+        import devops_bench.metrics.base  # noqa: F401
+        import devops_bench.metrics.integrity  # noqa: F401
+        import devops_bench.metrics.scoring  # noqa: F401
+        import devops_bench.metrics.verification  # noqa: F401
+        print("OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK" in result.stdout

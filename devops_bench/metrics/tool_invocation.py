@@ -26,6 +26,7 @@ from devops_bench.core import get_logger
 from devops_bench.metrics._skills import load_skill_text
 from devops_bench.metrics.base import (
     METRICS,
+    TOOL_INVOCATION_THRESHOLD,
     MetricContext,
     MetricScore,
     run_geval,
@@ -40,7 +41,6 @@ __all__ = [
 ]
 
 TOOL_SKILL_FILENAME = "tool-invocation-skill.md"
-TOOL_INVOCATION_THRESHOLD = 0.8
 
 _log = get_logger("metrics.tool_invocation")
 
