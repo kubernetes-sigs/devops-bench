@@ -76,9 +76,9 @@ Pick one mode:
   key rather than guessing.
 
 **Judge.** The wrapper defaults `JUDGE_PROVIDER=google` and
-`JUDGE_MODEL=gemini-3.1-pro`; on the ambient-credentials backend the default id
-must be overridden to its `-preview` variant
-(`JUDGE_MODEL=gemini-3.1-pro-preview`). If judge calls return 404 or silently
+`JUDGE_MODEL=gemini-3.1-pro-preview`. Model ids are the published ones: the
+suffix is part of the model's name (Gemini 3.1 Pro carries `-preview`, the Flash
+models do not), not a per-backend variant. If judge calls return 404 or silently
 fail, work the `404 Publisher model` row in
 [known_issues.md](../../docs/appendix/known_issues.md) — it carries the full
 fix (the location and model-id requirements).
@@ -173,7 +173,7 @@ run is isolated by `RunEnv` (`devops_bench/core/run_env.py`):
 | Variable | Meaning |
 |---|---|
 | `MATRIX_TASKS` | Space-separated `task.yaml` paths, or `ALL` to enumerate every task. Default `tasks/common/opa-remediation/task.yaml`. |
-| `MATRIX_MODELS` | Space-separated model ids. Default `gemini-3.1-pro`. |
+| `MATRIX_MODELS` | Space-separated model ids. Default `gemini-3.1-pro-preview`. |
 | `MATRIX_AGENT_CONFIGS` | Each `oc\|gcli` `[+mcp][+skills]`, where `oc` is the config token for the OpenClaw agent and `gcli` for the Gemini CLI agent (e.g. `gcli+mcp+skills`). Default `oc+mcp+skills`. |
 | `MAX_PARALLEL` | Max combos running at once (default `3`). Each combo is its own cluster — mind quota. |
 | `PROJECT_ID` | Cloud project for the run. **Required** unless `DRY_RUN=1`. |

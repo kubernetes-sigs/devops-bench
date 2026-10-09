@@ -223,8 +223,8 @@ PY
 
 if [ ! -f "${ENV_FILE}" ]; then
   echo "==> writing ${ENV_FILE} template (fill in values, then 'source ~/bench.env')"
-  # Mode 600 before the write: the template invites provider API keys and
-  # JUDGE_API_KEY, which the default umask would leave world-readable.
+  # Mode 600 before the write: the template invites provider API keys, which
+  # the default umask would leave world-readable.
   install -m 600 /dev/null "${ENV_FILE}"
   cat > "${ENV_FILE}" <<'EOF'
 # DevOps Bench harness environment. Fill in, then: source ~/bench.env
@@ -247,10 +247,13 @@ export AGENT_MODEL="gemini-3.1-pro-preview"
 # set it here too (e.g. GEMINI_API_KEY / ANTHROPIC_API_KEY).
 # export GEMINI_API_KEY=""
 
-# --- Judge ---
+# --- Judge (must match _matrix_lib.sh) ---
 export JUDGE_PROVIDER="google"
 export JUDGE_MODEL="gemini-3.1-pro-preview"
-export JUDGE_API_KEY=""
+
+# --- Chaos driver (unset, it falls back to AGENT_MODEL) ---
+export CHAOS_PROVIDER="google"
+export CHAOS_MODEL="gemini-3.1-pro-preview"
 EOF
 else
   echo "==> ${ENV_FILE} already exists; leaving it untouched"
