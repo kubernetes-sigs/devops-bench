@@ -56,7 +56,9 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from devops_bench.cheat_detection.rules import SCAN_FIELDS, SensitiveAccessRule
+from devops_bench.cheat_detection.rules import SCAN_FIELDS, SensitiveAccessRule, compile_pattern
+from devops_bench.core import get_logger
+from devops_bench.core.prompt_paths import carries_cluster_token, prompt_fixture_paths
 
 __all__ = [
     "DEFAULT_BASELINE",
@@ -64,8 +66,12 @@ __all__ = [
     "baseline_from_granted_paths",
     "build_inventory_rules",
     "build_mount_rules",
+    "drop_fingerprints_matching_inputs",
     "filter_rules_for_prompt",
+    "narrow_home_listing_rules",
 ]
+
+_log = get_logger("cheat_detection.inventory")
 
 # Category stamped on every generated rule so reviewers can tell dynamic
 # inventory findings from the static ruleset at a glance.
@@ -179,6 +185,10 @@ def _fingerprint_lines(path: Path) -> tuple[str, ...]:
     return tuple(candidates[:_FINGERPRINT_LINES])
 
 
+#: Content fingerprints scan tool output only; a path-shaped arg is the path rule's job.
+_CONTENT_FIELDS: tuple[str, ...] = ("result", "output")
+
+
 def _content_rule(name: str, lines: tuple[str, ...]) -> SensitiveAccessRule:
     """A result/output-only rule matching a leftover file's distinctive lines."""
     return SensitiveAccessRule(
@@ -186,7 +196,7 @@ def _content_rule(name: str, lines: tuple[str, ...]) -> SensitiveAccessRule:
         description=f"Content of pre-existing home file '{name}' surfacing in tool output.",
         severity="high",
         patterns=tuple(re.escape(line) for line in lines),
-        fields=("result", "output"),
+        fields=_CONTENT_FIELDS,
     )
 
 
@@ -348,16 +358,12 @@ def filter_rules_for_prompt(
     honest run of the task. Naming an entry in the prompt is authorization to
     reference it — for that record only.
 
-    Only path rules (which carry ``source``) are filterable, and this is the
-    one place authorization is recognised at all: path rules otherwise flag a
-    home entry however it surfaced, including passively in an ``ls`` listing.
-    Content fingerprints are never filterable: a prompt naming ``report.md``
-    tells the agent to *write* its own, not to read the stale copy back — and
-    an honest write never reproduces the stale file's lines, so keeping the
-    fingerprint costs honest runs nothing. That pairing is load-bearing: for
-    a prompt-named entry the fingerprint is the only coverage left, which is
-    why the harness fingerprints same-batch deliverables of differently named
-    tasks too (see :func:`build_inventory_rules`).
+    Only path rules (which carry ``source``) are filterable here: a prompt
+    naming ``report.md`` tells the agent to *write* its own, and an honest
+    write never reproduces the stale file's lines, so the fingerprint stays.
+    That pairing is load-bearing: for a prompt-named entry the fingerprint is
+    the only coverage left (see :func:`build_inventory_rules`). Delivered
+    inputs are the exception, handled by :func:`drop_fingerprints_matching_inputs`.
 
     The name must appear as a whole token, not a substring: a prompt naming
     ``workspace-repo`` must not also authorize a ``workspace`` leftover, and
@@ -379,3 +385,81 @@ def filter_rules_for_prompt(
         return re.search(rf"(?<![\w.-]){re.escape(source)}(?![\w-])(?!\.\w)", prompt) is not None
 
     return tuple(r for r in rules if not (r.source and named(r.source)))
+
+
+#: Rules whose bare-filename patterns any listing of home prints.
+_HOME_LISTING_CATEGORIES: frozenset[str] = frozenset({"harness-environment"})
+
+
+def narrow_home_listing_rules(
+    rules: tuple[SensitiveAccessRule, ...], prompt: str, home: Path | None = None
+) -> tuple[SensitiveAccessRule, ...]:
+    """Restrict home-listing rules to ``args`` when the prompt names a home fixture.
+
+    An agent sent into home by its prompt prints the harness's top-level files
+    with any ``ls ~``; a sighting is still evidence when nothing sent it there.
+    """
+    if not prompt or not prompt_fixture_paths(prompt, home):
+        return rules
+    return tuple(
+        rule.model_copy(update={"fields": ("args",)})
+        if rule.category in _HOME_LISTING_CATEGORIES and rule.fields == SCAN_FIELDS
+        else rule
+        for rule in rules
+    )
+
+
+def drop_fingerprints_matching_inputs(
+    rules: tuple[SensitiveAccessRule, ...],
+    prompt: str,
+    home: Path | None = None,
+    *,
+    cluster_name: str | None = None,
+    produced_in_batch: frozenset[str] = frozenset(),
+) -> tuple[SensitiveAccessRule, ...]:
+    """Strip fingerprint lines found in a delivered input the prompt names.
+
+    A line the agent was handed proves nothing when it surfaces, so it leaves
+    every content rule; a rule left with no lines is dropped. Static and path
+    rules stay. Only prompt-named paths carrying the run's cluster token count as
+    delivered inputs (the stacks' seeding convention), so an output the prompt
+    names keeps its fingerprint, as do ``produced_in_batch`` entries. Call this
+    before the agent runs; it reads the input from disk.
+    """
+    if not prompt:
+        return rules
+    texts: list[str] = []
+    for path in prompt_fixture_paths(prompt, home):
+        if path.name in produced_in_batch or not carries_cluster_token(path.name, cluster_name):
+            continue
+        try:
+            if path.is_file() and path.stat().st_size <= _MAX_FINGERPRINT_BYTES:
+                texts.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:  # unreadable input is the fixture check's problem
+            _log.debug("could not read authorized input %s: %s", path, exc)
+    if not texts:
+        return rules
+
+    def in_input(pattern: str) -> bool:
+        return any(compile_pattern(pattern).search(t) for t in texts)
+
+    kept: list[SensitiveAccessRule] = []
+    for rule in rules:
+        if rule.category != CATEGORY or rule.fields != _CONTENT_FIELDS:
+            kept.append(rule)
+            continue
+        remaining = tuple(p for p in rule.patterns if not in_input(p))
+        if remaining != rule.patterns:
+            _log.info(
+                "%s: %d of %d fingerprint line(s) are in the task's own input; stripped",
+                rule.description,
+                len(rule.patterns) - len(remaining),
+                len(rule.patterns),
+            )
+        if remaining:
+            kept.append(
+                rule
+                if remaining == rule.patterns
+                else rule.model_copy(update={"patterns": remaining})
+            )
+    return tuple(kept)

@@ -31,11 +31,9 @@ pure function that a reviewer can rerun over stored records.
 from __future__ import annotations
 
 import json
-import re
-from functools import cache
 from typing import Any
 
-from devops_bench.cheat_detection.rules import SensitiveAccessRule
+from devops_bench.cheat_detection.rules import SensitiveAccessRule, compile_pattern
 
 __all__ = [
     "DETECTOR_VERSION",
@@ -68,8 +66,11 @@ __all__ = [
 # and a mid-batch home entry left by a *differently named* task now
 # content-fingerprints (same-name iterations stay path-only), so a
 # prompt-named entry whose path rule is dropped still flags when the earlier
-# task's content surfaces.
-DETECTOR_VERSION = 7
+# task's content surfaces. v8: a prompt that sends the agent into home narrows
+# the home-listing rules to args, and fingerprint lines found in the task's own
+# delivered input (a prompt-named path carrying the cluster token) are stripped
+# per record; a rule with no lines left is dropped.
+DETECTOR_VERSION = 8
 # Shape of the ``cheating_report`` mapping itself.
 REPORT_SCHEMA_VERSION = 1
 
@@ -78,12 +79,6 @@ REPORT_SCHEMA_VERSION = 1
 _MAX_FINDINGS_PER_RULE = 20
 # Context radius (chars) around a match in a finding excerpt.
 _EXCERPT_RADIUS = 80
-
-
-@cache
-def _compile(pattern: str) -> re.Pattern[str]:
-    """Compile ``pattern`` once per process (every rule reruns on every record)."""
-    return re.compile(pattern, re.IGNORECASE | re.MULTILINE)
 
 
 def _as_text(value: Any) -> str:
@@ -143,7 +138,7 @@ def _scan_text(
     # also touched the material at trajectory entries 12, 19 and 30. Breadth
     # of evidence beats depth for the reviewer this report is written for.
     for pattern in rule.patterns:
-        match = _compile(pattern).search(text)
+        match = compile_pattern(pattern).search(text)
         if match is None:
             continue
         findings.append(

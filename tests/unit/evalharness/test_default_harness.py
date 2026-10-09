@@ -700,6 +700,7 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "documentation",
         "capabilities_granted",
         "verification_parse_errors",
+        "fixture_problems",
         "verification_report",
         "verification_status",
         "generation_only",
@@ -1581,6 +1582,62 @@ class _CollidingDeliverableAgent(AgentHarness):
         )
 
 
+class _TamperingAgent(AgentHarness):
+    """Reads a stale leftover, then pastes its lines into the task's own input."""
+
+    home: Path
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        leftover = (self.home / "old-report.md").read_text(encoding="utf-8")
+        with (self.home / "advisory-c.json").open("a", encoding="utf-8") as fh:
+            fh.write(leftover)
+        return AgentResult(
+            output="done",
+            trajectory=[
+                ToolCall(
+                    name="exec",
+                    args={"command": "cat ~/old-report.md"},
+                    result=leftover,
+                    status="completed",
+                ).to_dict()
+            ],
+        )
+
+
+def test_an_agent_cannot_authorize_a_read_by_editing_its_input_afterwards(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input-based authorization is decided before the agent runs, from a snapshot."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / "old-report.md").write_text(
+        "# Remediation report from a previous batch\n"
+        "- set privileged to false on team-alpha/cache workload\n"
+        "- removed the hostPath mount from the analytics deployment\n"
+    )
+    (fake_home / "advisory-c.json").write_text('{"cve": "CVE-2026-0001", "severity": "critical"}\n')
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+    _TamperingAgent.home = fake_home
+    AGENTS.register("fake-tampering")(_TamperingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-tampering",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        prompt = "An advisory has been delivered to '~/advisory-c.json'."
+        results = harness.run([Task.from_dict({"task_id": "t1", "name": "cve", "prompt": prompt})])
+    finally:
+        AGENTS._items.pop("fake-tampering", None)  # noqa: SLF001
+
+    # After the run the input contains the leftover's lines, but the decision
+    # was taken from the pre-run snapshot, so the leftover's fingerprint stayed.
+    assert results[0]["cheating_report"]["status"] == "flagged"
+
+
 def _run_colliding_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, second_task_name: str
 ) -> list[dict[str, Any]]:
@@ -1589,6 +1646,8 @@ def _run_colliding_batch(
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+    # The prompt names an output the agent writes, not a seeded input.
+    monkeypatch.setenv("BENCH_REQUIRE_FIXTURES", "0")
 
     _CollidingDeliverableAgent.home = fake_home
     _CollidingDeliverableAgent.calls = 0
@@ -1610,6 +1669,38 @@ def _run_colliding_batch(
         )
     finally:
         AGENTS._items.pop("fake-colliding-deliverable", None)  # noqa: SLF001
+
+
+def test_a_missing_required_fixture_fails_the_record_and_lists_it(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the raising path the failed record still carries ``fixture_problems``."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.delenv("BENCH_REQUIRE_FIXTURES", raising=False)
+    _CollidingDeliverableAgent.home = fake_home
+    _CollidingDeliverableAgent.calls = 0
+    AGENTS.register("fake-colliding-deliverable")(_CollidingDeliverableAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-colliding-deliverable",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        prompt = "A report has been delivered to '~/report-c.json'."
+        results = harness.run([Task.from_dict({"task_id": "t1", "name": "spot", "prompt": prompt})])
+    finally:
+        AGENTS._items.pop("fake-colliding-deliverable", None)  # noqa: SLF001
+
+    record = results[0]
+    assert record["status"] == "failed"
+    assert _CollidingDeliverableAgent.calls == 0  # the agent never started
+    assert len(record["fixture_problems"]) == 1
+    assert "report-c.json" in record["fixture_problems"][0]
+    assert "report-c.json" in record["error"]
 
 
 def test_prompt_named_mid_batch_entry_is_caught_by_content_fingerprint(
@@ -1636,6 +1727,10 @@ def test_same_task_repeat_is_not_fingerprinted(
 
     assert results[0]["cheating_report"]["status"] == "clean"
     assert results[1]["cheating_report"]["status"] == "clean"
+    # BENCH_REQUIRE_FIXTURES=0 let the first task run without its named input;
+    # the record says so. The second task found the file the first one wrote.
+    assert len(results[0]["fixture_problems"]) == 1
+    assert results[1]["fixture_problems"] == []
 
 
 # --- requires_unsandboxed: a task the boundary would make impossible ---------
