@@ -1,0 +1,209 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-processor
+  namespace: fulfillment
+  labels:
+    app: order-processor
+    owner: fulfillment-team
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: order-processor
+  template:
+    metadata:
+      labels:
+        app: order-processor
+        owner: fulfillment-team
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 80
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: order-processor
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: app
+        image: hashicorp/http-echo:1.0
+        args:
+        - -listen=:8080
+        - -text=order-ok
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 200m
+            memory: 128Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-processor-svc
+  namespace: fulfillment
+  labels:
+    app: order-processor
+spec:
+  selector:
+    app: order-processor
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-processor-pdb
+  namespace: fulfillment
+  labels:
+    app: order-processor
+  annotations:
+    devops-bench.io/original-uid: "PLACEHOLDER"
+    devops-bench.io/original-creation-timestamp: "PLACEHOLDER"
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: order-processor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping-tracker
+  namespace: fulfillment
+  labels:
+    app: shipping-tracker
+    owner: fulfillment-team
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shipping-tracker
+  template:
+    metadata:
+      labels:
+        app: shipping-tracker
+        owner: fulfillment-team
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:1.0
+        args:
+        - -listen=:8081
+        - -text=shipping-ok
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8081
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shipping-tracker-svc
+  namespace: fulfillment
+  labels:
+    app: shipping-tracker
+spec:
+  selector:
+    app: shipping-tracker
+  ports:
+  - port: 80
+    targetPort: 8081
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shipping-tracker-pdb
+  namespace: fulfillment
+  labels:
+    app: shipping-tracker
+  annotations:
+    devops-bench.io/original-uid: "PLACEHOLDER"
+    devops-bench.io/original-creation-timestamp: "PLACEHOLDER"
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: shipping-tracker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+  namespace: payments
+  labels:
+    app: payment-gateway
+    owner: payments-team
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+        owner: payments-team
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:1.0
+        args:
+        - -listen=:8082
+        - -text=payment-ok
+        ports:
+        - containerPort: 8082
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8082
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-gateway-svc
+  namespace: payments
+  labels:
+    app: payment-gateway
+spec:
+  selector:
+    app: payment-gateway
+  ports:
+  - port: 80
+    targetPort: 8082
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment-gateway-pdb
+  namespace: payments
+  labels:
+    app: payment-gateway
+  annotations:
+    devops-bench.io/original-uid: "PLACEHOLDER"
+    devops-bench.io/original-creation-timestamp: "PLACEHOLDER"
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: payment-gateway
