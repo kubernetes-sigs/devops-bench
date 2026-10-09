@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -409,6 +410,63 @@ def test_run_one_ambient_home_writes_are_collected_once(isolated_env: None, tmp_
         assert not (run_dir / "generated_files" / "report.md").exists()
     finally:
         AGENTS._items.pop("fake-ambient-home-writer", None)  # noqa: SLF001
+
+
+class _WorkspaceRecordingAgent(AgentHarness):
+    """Stand-in agent that records the workspace it was handed."""
+
+    seen: list[Path] = []
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        assert workspace_path is not None
+        _WorkspaceRecordingAgent.seen.append(workspace_path)
+        (workspace_path / "output.txt").write_text("agent wrote this")
+        return AgentResult(output="wrote a file", trajectory=[])
+
+
+def _run_once_recording_the_workspace(tmp_path: Path, agent_name: str) -> Path:
+    """Run one task with the recording agent and return its workspace path."""
+    _WorkspaceRecordingAgent.seen = []
+    AGENTS.register(agent_name)(_WorkspaceRecordingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p", cluster_name="c", agent_type=agent_name, no_infra=True
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+        record, _ = harness._run_one(task, run_dir)  # noqa: SLF001
+        assert record["status"] == "success"
+    finally:
+        AGENTS._items.pop(agent_name, None)  # noqa: SLF001
+    assert len(_WorkspaceRecordingAgent.seen) == 1
+    return _WorkspaceRecordingAgent.seen[0]
+
+
+def test_run_one_deletes_the_agent_workspace_by_default(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The workspace is a mkdtemp outside the run directory, so nothing else
+    # ever reclaims it: a matrix leaves one per combination behind, each holding
+    # whatever the agent copied in.
+    monkeypatch.delenv("BENCH_KEEP_WORKSPACE", raising=False)
+
+    workspace = _run_once_recording_the_workspace(tmp_path, "fake-workspace-recorder")
+
+    assert not workspace.exists()
+    # The artifacts survive the deletion — they were collected into the run dir.
+    assert (tmp_path / "run_1" / "generated_files" / "output.txt").exists()
+
+
+def test_run_one_keeps_the_agent_workspace_when_asked(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BENCH_KEEP_WORKSPACE", "true")
+
+    workspace = _run_once_recording_the_workspace(tmp_path, "fake-workspace-recorder-keep")
+
+    assert (workspace / "output.txt").read_text() == "agent wrote this"
+    shutil.rmtree(workspace, ignore_errors=True)
 
 
 def test_run_one_warns_when_a_verification_entry_fails_to_parse(

@@ -1172,7 +1172,17 @@ class DefaultEvalHarness(Harness):
             if deployer is not None:
                 self._teardown(deployer, infra_config, task.name)
             if workspace_path is not None:
-                shutil.rmtree(workspace_path, ignore_errors=True)
+                if get_bool("BENCH_KEEP_WORKSPACE"):
+                    # Opt-in only. The workspace holds whatever the agent wrote,
+                    # including credentials it copied in, so keeping it is a
+                    # debugging choice an operator makes deliberately — never a
+                    # default, and never something a failed run leaves behind.
+                    _log.info(
+                        "BENCH_KEEP_WORKSPACE set: leaving the agent workspace at %s",
+                        workspace_path,
+                    )
+                else:
+                    shutil.rmtree(workspace_path, ignore_errors=True)
             if creds_dir is not None:
                 shutil.rmtree(creds_dir, ignore_errors=True)
 
