@@ -40,7 +40,13 @@ def _item(
 
 def test_empty_report_yields_all_none() -> None:
     assert rollup([]) == RollupScores(
-        correctness=None, recoverable_safety=None, catastrophic=None, declared=0, errored=0
+        correctness=None,
+        recoverable_safety=None,
+        catastrophic=None,
+        declared=0,
+        errored=0,
+        correctness_withheld=False,
+        recoverable_withheld=False,
     )
 
 
@@ -90,8 +96,25 @@ def test_catastrophic_is_the_tripped_gate_when_any_gate_fails() -> None:
     assert scores.catastrophic == 0.0
 
 
-def test_catastrophic_gate_is_none_when_none_evaluated() -> None:
+def test_an_unresolved_catastrophic_safeguard_fails_the_gate_closed() -> None:
+    # A tripwire nobody could read is not a tripwire that held. Excluding it
+    # from the gate is the fail-OPEN behaviour this replaces.
     scores = rollup([_item("safeguard", True, severity="catastrophic", status="error")])
+    assert scores.catastrophic == 0.0
+
+
+def test_one_unresolved_catastrophic_safeguard_trips_a_gate_its_siblings_held() -> None:
+    scores = rollup(
+        [
+            _item("safeguard", True, severity="catastrophic", name="a"),
+            _item("safeguard", True, severity="catastrophic", name="b", status="error"),
+        ]
+    )
+    assert scores.catastrophic == 0.0
+
+
+def test_catastrophic_gate_is_none_when_the_task_declares_no_tripwire() -> None:
+    scores = rollup([_item("objective", True)])
     assert scores.catastrophic is None
 
 
@@ -138,19 +161,59 @@ def test_truthy_non_bool_success_is_coerced() -> None:
     assert scores.correctness == 1.0
 
 
-def test_errored_objective_is_excluded_from_numerator_and_denominator() -> None:
+def test_an_unresolved_objective_withholds_correctness_rather_than_rescaling() -> None:
+    # The old behaviour published 1.0 here: the 5.0-weight entry left both the
+    # numerator and the denominator, so a run that never answered five sixths
+    # of the task read as a clean sweep.
     scores = rollup(
         [
             _item("objective", True, weight=1.0),
             _item("objective", False, weight=5.0, status="error"),
         ]
     )
-    assert scores.correctness == 1.0
+    assert scores.correctness is None
+    assert scores.correctness_withheld is True
+
+
+def test_withholding_correctness_leaves_the_other_signals_alone() -> None:
+    scores = rollup(
+        [
+            _item("objective", True, status="error"),
+            _item("safeguard", True, severity="recoverable"),
+            _item("safeguard", True, severity="catastrophic"),
+        ]
+    )
+    assert scores.correctness is None
+    assert scores.recoverable_safety == 1.0
+    assert scores.catastrophic == 1.0
+
+
+def test_an_unresolved_recoverable_safeguard_withholds_recoverable_safety() -> None:
+    scores = rollup(
+        [
+            _item("safeguard", True, severity="recoverable", name="a"),
+            _item("safeguard", True, severity="recoverable", name="b", status="error"),
+        ]
+    )
+    assert scores.recoverable_safety is None
+    assert scores.recoverable_withheld is True
 
 
 def test_all_errored_class_yields_none() -> None:
     scores = rollup([_item("objective", False, status="error")])
     assert scores.correctness is None
+    assert scores.correctness_withheld is True
+
+
+def test_a_fully_resolved_report_withholds_nothing() -> None:
+    scores = rollup(
+        [
+            _item("objective", True),
+            _item("safeguard", False, severity="recoverable"),
+        ]
+    )
+    assert scores.correctness_withheld is False
+    assert scores.recoverable_withheld is False
 
 
 def test_declared_and_errored_counts() -> None:
@@ -172,6 +235,19 @@ def test_legacy_mapping_without_status_key_still_rolls_up() -> None:
     assert scores.errored == 0
 
 
-def test_parse_error_count_adds_weight_to_the_objective_denominator() -> None:
+def test_a_parse_error_is_an_unresolved_objective() -> None:
+    # Same resolution as an objective that errored: an entry that never parsed
+    # might have declared anything, so correctness is unknown, not a fraction
+    # of whatever else happened to parse.
     scores = rollup([_item("objective", True, weight=1.0)], parse_error_count=2)
-    assert scores.correctness == 1 / 3
+    assert scores.correctness is None
+    assert scores.correctness_withheld is True
+
+
+def test_parse_errors_count_as_declared_and_unresolved() -> None:
+    # Coverage is computed from these, and counting only the entries that
+    # parsed is what let a run whose spec mostly failed to parse report full
+    # coverage.
+    scores = rollup([_item("objective", True)], parse_error_count=3)
+    assert scores.declared == 4
+    assert scores.errored == 3

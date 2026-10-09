@@ -319,6 +319,27 @@ def test_build_rows_correctness_falls_back_to_outcome_validity() -> None:
     assert d["correctnessScore"] == 0.7
 
 
+def test_build_rows_leaves_a_withheld_correctness_null_on_the_row() -> None:
+    # The row's components must name the same signals the headline was built
+    # from. A deterministic objective that never resolved withholds
+    # correctness, so the judged reading must not fill the column back in.
+    record = {
+        "name": "Unresolved objective",
+        "folder": "task_z",
+        "status": "success",
+        "scores": {
+            "VerificationCorrectnessWithheld": 1.0,
+            "ChecklistScore": {"score": 0.9, "success": True},
+            "VerificationCoverage": 0.5,
+        },
+    }
+
+    d = build_rows([record], _manifest())[0].to_dict()
+
+    assert d["correctnessScore"] is None
+    assert d["outcomeScore"] is None
+
+
 def test_build_rows_failed_record_has_null_scores_and_tokens():
     record = {
         "name": "Broken Task",
