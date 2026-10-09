@@ -1162,7 +1162,17 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
         kubectl_context="kind-c1",
     )
     kubeconfig = tmp_path / "creds" / "kubeconfig"
-    provider = object()
+
+    cloud_requests: list[tuple[str, int | None]] = []
+
+    class _StubProvider:
+        def sandbox_cloud_credential_env(
+            self, cluster_info: ClusterInfo, *, lifetime_sec: int | None = None
+        ) -> dict[str, str]:
+            cloud_requests.append((cluster_info.name, lifetime_sec))
+            return {"CLOUDSDK_AUTH_ACCESS_TOKEN": "tok"}
+
+    provider = _StubProvider()
 
     def fake_provision(
         got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str
@@ -1210,6 +1220,10 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     # The run's own provider and cluster build the plan (and through it the
     # kubeconfig), never the ambient current-context.
     assert plan_requests == [(provider, "c1")]
+    # The provider's minted cloud credential lands on the spec, keyed to this
+    # run's cluster and sized to the same budget as the cluster token.
+    assert cloud_requests == [("c1", 1500)]
+    assert spec.cloud_credential_env == {"CLOUDSDK_AUTH_ACCESS_TOKEN": "tok"}
 
 
 def test_prepare_sandbox_spec_tears_down_when_completion_fails(
@@ -1687,6 +1701,49 @@ def test_sandbox_exempt_task_gets_the_ambient_inventory(
     assert "prior-run-artifact" in report["categories"]
 
 
+def test_sandbox_exempt_task_warns_when_its_stack_also_names_a_cloud_identity(
+    isolated_env: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The identity goes unused on an exempt task; say so instead of minting nothing silently."""
+    from devops_bench.core import ClusterInfo
+
+    monkeypatch.delenv("BENCH_PARALLEL", raising=False)
+    monkeypatch.setattr(harness_default.agent_sandbox, "sweep_stray_containers", lambda **kw: None)
+    real_get_deployer = harness_default.get_deployer
+
+    def _with_identity(*args: Any, **kwargs: Any) -> Any:
+        deployer = real_get_deployer(*args, **kwargs)
+        monkeypatch.setattr(
+            deployer,
+            "get_cluster_info",
+            lambda: ClusterInfo(name="c", agent_cloud_identity="rot-x@p.iam.gserviceaccount.com"),
+        )
+        return deployer
+
+    monkeypatch.setattr(harness_default, "get_deployer", _with_identity)
+
+    class _SandboxAwareWriter(_WorkspaceWritingAgent):
+        supports_sandbox = True
+
+    AGENTS.register("fake-exempt-writer")(_SandboxAwareWriter)
+    try:
+        harness = _sandboxed_harness(
+            monkeypatch, tmp_path, agent_type="fake-exempt-writer", no_infra=True
+        )
+        task = Task.from_dict(
+            {"task_id": "t", "name": "demo", "prompt": "p", "requires_unsandboxed": True}
+        )
+        with caplog.at_level(logging.WARNING):
+            harness.run([task])
+    finally:
+        AGENTS._items.pop("fake-exempt-writer", None)  # noqa: SLF001
+
+    assert "also names agent_cloud_identity rot-x@p.iam.gserviceaccount.com" in caplog.text
+
+
 def test_build_agent_config_rejects_a_spec_together_with_exempt(isolated_env: None) -> None:
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -1695,27 +1752,17 @@ def test_build_agent_config_rejects_a_spec_together_with_exempt(isolated_env: No
         )
 
 
-def test_secret_rotation_declares_requires_unsandboxed() -> None:
-    """Checked through the real loader: ``Task`` drops unknown keys silently, so a
-    raw-YAML assertion alone would stay green while the harness saw ``False``."""
-    import pathlib
-
-    import yaml as _yaml
-
+def test_secret_rotation_runs_sandboxed() -> None:
+    """Its cloud credential crosses by value; checked through the real loader, not raw YAML."""
     from devops_bench.tasks.loader import FileSystemTaskLoader
 
     tasks = FileSystemTaskLoader().load_tasks("tasks/gcp/secret-rotation/task.yaml")
     assert len(tasks) == 1
-    assert tasks[0].requires_unsandboxed is True
-
-    spec = _yaml.safe_load(
-        pathlib.Path("tasks/gcp/secret-rotation/task.yaml").read_text(encoding="utf-8")
-    )
-    assert spec.get("requires_unsandboxed") is True
+    assert tasks[0].requires_unsandboxed is False
 
 
-def test_no_other_task_opts_out_of_the_sandbox() -> None:
-    """Exactly one exemption; a second would need its own justification."""
+def test_no_task_opts_out_of_the_sandbox() -> None:
+    """No exemptions in tree; a new one would need its own justification."""
     import pathlib
 
     import yaml as _yaml
@@ -1725,4 +1772,4 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         for p in sorted(pathlib.Path("tasks").glob("*/*/task.yaml"))
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
-    assert exempt == ["secret-rotation"]
+    assert exempt == []

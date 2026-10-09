@@ -538,21 +538,14 @@ installs, and the supplement grants only `get`/`list`/`watch` on
 gets on a given CRD is therefore whatever that operator chose to aggregate into
 `edit`, which is usually nothing.
 
-`opa-remediation` is an example. Kyverno v1.12.7 ships
-`kyverno:rbac:view:policies` labelled `aggregate-to-view` and
-`kyverno:rbac:admin:policies` labelled `aggregate-to-admin`, with no
-`aggregate-to-edit` on either. Aggregation flows view into edit and edit into
-admin, so the agent can read `ClusterPolicy` objects and cannot write them. Two
-of that task's objectives ask it to flip both policies from `Audit` to
-`Enforce`, so **the task cannot be fully passed under the default scope** — one
-of its three deterministic objective groups is unreachable. Sandboxed and
-ambient scores are not comparable for it.
-
-Nothing in a trajectory says so. Neither agent that ran the task attempted the
-flip, so the run logs carry no `forbidden` — the objective simply goes
-unattempted and reads as an agent miss. Anything that grades sandboxed runs
-against ambient ones has to account for this class of gap explicitly rather
-than infer it from failures.
+A task whose objective writes an operator's CRD must grant that in its own
+stack. Kyverno, for example, aggregates its policy roles into `view` and
+`admin` only, so `opa-remediation` applies a `kyverno-policy-editor`
+ClusterRole labelled `aggregate-to-edit` with `update`/`patch` on `kyverno.io`
+policies (`tf/prebuilt/opa-remediation/manifests/rbac/`). Grant the task's
+minimum there rather than widening the harness supplement for every task; an
+objective the scope cannot reach fails silently, since agents rarely attempt a
+write they expect to be denied.
 
 ### Model credentials
 
@@ -617,6 +610,25 @@ host processes with the operator's own ADC.
 > host-side `GEMINI_API_KEY` is simply absent and the CLI exits reporting that no
 > auth method is set — naming the very variable you exported. Export
 > `AGENT_API_KEY` and the sandboxed run routes it onward for you.
+
+### Task cloud credentials
+
+A task whose work includes cloud API calls beyond `kubectl` can have its stack
+provision a run-unique cloud identity holding only the roles it needs, and
+name it in an `agent_cloud_identity` output. On a sandboxed run the provider
+mints a short-lived credential for that identity host-side and injects it into
+the container; the operator's own credentials never cross. On GCP this is an
+impersonated access token (`CLOUDSDK_AUTH_ACCESS_TOKEN` /
+`GOOGLE_OAUTH_ACCESS_TOKEN`, with `CLOUDSDK_CORE_PROJECT` pinned to the task's
+project), sized to the same budget as the cluster token above and not
+refreshed. A budget past an hour needs the organization policy that allows
+service-account credential lifetime extension; without it the mint falls back
+to an hour and warns that the credential expires before the agent's timeout.
+A mint failure, a hung `gcloud`, or a provider that cannot mint for a named
+identity fails the run rather than letting the agent run without the
+credential its task depends on. A task that also declares
+`requires_unsandboxed` runs ambient and the identity goes unused, with a
+warning. Tasks with no such output are unaffected.
 
 ## Adding your own harness
 

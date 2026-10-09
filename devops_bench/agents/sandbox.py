@@ -33,6 +33,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -137,6 +138,8 @@ class SandboxSpec:
     the rest per task. ``fixture_mounts`` maps host path -> container path (RW);
     ``env_allowlist`` lets named vars cross despite a deny rule; ``owner`` scopes
     container names and the stray sweep to one attempt.
+    ``cloud_credential_env`` is the harness-minted, task-scoped cloud credential
+    (allowlisted by name; empty for kubectl-only tasks).
     """
 
     image: str = ""
@@ -146,6 +149,7 @@ class SandboxSpec:
     fixture_mounts: Mapping[str, str] = field(default_factory=dict)
     env_allowlist: tuple[str, ...] = ()
     owner: str = ""
+    cloud_credential_env: Mapping[str, str] = field(default_factory=dict, repr=False)
 
 
 def spec_from_env(env: Mapping[str, str] | None = None) -> SandboxSpec | None:
@@ -455,6 +459,12 @@ class SandboxExecutor:
                 " ".join(argv),
             )
 
+    @cached_property
+    def _credential_env(self) -> dict[str, str]:
+        """The spec's minted cloud credential, allowlisted by name; filtered once per run."""
+        names = tuple(self.spec.cloud_credential_env)
+        return filter_boundary_env(self.spec.cloud_credential_env, names)
+
     def wrap_argv(
         self,
         cmd: Sequence[str | os.PathLike[str]],
@@ -468,8 +478,9 @@ class SandboxExecutor:
         ``--cap-drop=ALL`` and ``no-new-privileges``; the network plan and
         ``host.docker.internal:host-gateway``; ``--user`` on Linux so workspace
         files stay operator-owned; workspace RW, kubeconfig RO, fixtures RW;
-        overlay env as name-only ``-e`` (values ride the client env, never the
-        argv); ``HOME``/``KUBECONFIG`` last so they win; no ``-i``.
+        overlay env, then the minted cloud credential, as name-only ``-e`` (values
+        ride the client env, never the argv); ``HOME``/``KUBECONFIG`` last so they
+        win; no ``-i``.
         """
         spec = self.spec
         argv: list[str] = [CONTAINER_RUNTIME, "run", "--rm", "--name", self.container_name]
@@ -489,6 +500,8 @@ class SandboxExecutor:
         for host_path, container_path in spec.fixture_mounts.items():
             argv += ["-v", f"{host_path}:{container_path}"]
         for name in filter_boundary_env(extra_env, spec.env_allowlist):
+            argv += ["-e", name]
+        for name in self._credential_env:
             argv += ["-e", name]
         argv += ["-e", f"HOME={CONTAINER_HOME}", "-e", f"KUBECONFIG={CONTAINER_KUBECONFIG}"]
         argv += ["-w", self.map_host_path(cwd) if cwd is not None else CONTAINER_WORKSPACE]
@@ -535,6 +548,12 @@ class SandboxExecutor:
             )
         # Filter once so the client env matches the names wrap_argv emits.
         crossing = filter_boundary_env(extra_env, self.spec.env_allowlist)
+        if clash := sorted(set(crossing) & set(self._credential_env)):
+            # Neither side may silently win: the overlay routes the model, the credential the task.
+            raise SandboxError(
+                f"the agent env overlay and the minted cloud credential both set {clash}; "
+                "refusing to let one silently override the other"
+            )
         wrapped = self.wrap_argv(cmd, cwd=cwd, extra_env=crossing)
         remap = self._needs_id_remap()
         try:
@@ -544,7 +563,7 @@ class SandboxExecutor:
             try:
                 completed = run(
                     wrapped,
-                    extra_env=crossing,
+                    extra_env={**crossing, **self._credential_env},
                     check=check,
                     capture=capture,
                     text=text,
