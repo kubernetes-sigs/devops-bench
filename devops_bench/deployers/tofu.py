@@ -260,15 +260,41 @@ class TFDeployer(Deployer):
         self.provider.ensure_account_credentials()
         run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
 
+        state_flags = self._state_flags()
         cmd = [
             "tofu",
             "apply",
             "-auto-approve",
             "-input=false",
-            *self._state_flags(),
+            *state_flags,
             *self._var_flags(),
         ]
-        run(cmd, cwd=self.work_dir, capture=False)
+        state_path = self._state_path(state_flags)
+        self._protect_state(state_path)
+        try:
+            run(cmd, cwd=self.work_dir, capture=False)
+        finally:
+            self._protect_state(state_path)
+
+    def _state_path(self, state_flags: list[str]) -> Path:
+        """The state file tofu writes: the ``-state`` target, else the work dir's default."""
+        if len(state_flags) >= 2:
+            return Path(state_flags[1])
+        return Path(self.work_dir) / "terraform.tfstate"
+
+    @staticmethod
+    def _protect_state(state_path: Path) -> None:
+        """Hold state and its backup at 0600; both carry local_file fixture content verbatim.
+
+        tofu writes in place and keeps the inode's mode, so pre-creating them private
+        covers the command itself; the chmod after covers a pre-existing file. Best effort.
+        """
+        for path in (state_path, state_path.with_name(f"{state_path.name}.backup")):
+            try:
+                path.touch(mode=0o600, exist_ok=True)
+                path.chmod(0o600)
+            except OSError as exc:
+                _log.warning("could not restrict permissions on %s: %s", path, exc)
 
     def down(self) -> None:
         """Tear down the OpenTofu stack and run provider cleanup.
@@ -302,15 +328,22 @@ class TFDeployer(Deployer):
             self.provider.ensure_account_credentials()
             run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
 
+            state_flags = self._state_flags()
             cmd = [
                 "tofu",
                 "destroy",
                 "-auto-approve",
                 "-input=false",
-                *self._state_flags(),
+                *state_flags,
                 *self._var_flags(),
             ]
-            run(cmd, cwd=self.work_dir, capture=False)
+            # destroy writes terraform.tfstate.backup with the full pre-destroy state.
+            state_path = self._state_path(state_flags)
+            self._protect_state(state_path)
+            try:
+                run(cmd, cwd=self.work_dir, capture=False)
+            finally:
+                self._protect_state(state_path)
             destroy_success = True
         finally:
             self.provider.cleanup(cluster_info, variables=self.variables, success=destroy_success)

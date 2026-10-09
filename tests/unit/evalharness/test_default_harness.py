@@ -700,6 +700,7 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "documentation",
         "capabilities_granted",
         "verification_parse_errors",
+        "fixture_problems",
         "verification_report",
         "verification_status",
         "generation_only",
@@ -1589,6 +1590,8 @@ def _run_colliding_batch(
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     monkeypatch.setenv("BENCH_CHEAT_INVENTORY", "1")
+    # The prompt names an output the agent writes, not a seeded input.
+    monkeypatch.setenv("BENCH_REQUIRE_FIXTURES", "0")
 
     _CollidingDeliverableAgent.home = fake_home
     _CollidingDeliverableAgent.calls = 0
@@ -1610,6 +1613,38 @@ def _run_colliding_batch(
         )
     finally:
         AGENTS._items.pop("fake-colliding-deliverable", None)  # noqa: SLF001
+
+
+def test_a_missing_required_fixture_fails_the_record_and_lists_it(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the raising path the failed record still carries ``fixture_problems``."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.delenv("BENCH_REQUIRE_FIXTURES", raising=False)
+    _CollidingDeliverableAgent.home = fake_home
+    _CollidingDeliverableAgent.calls = 0
+    AGENTS.register("fake-colliding-deliverable")(_CollidingDeliverableAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-colliding-deliverable",
+            no_infra=True,
+            results_root=str(tmp_path / "results"),
+        )
+        prompt = "A report has been delivered to '~/report-c.json'."
+        results = harness.run([Task.from_dict({"task_id": "t1", "name": "spot", "prompt": prompt})])
+    finally:
+        AGENTS._items.pop("fake-colliding-deliverable", None)  # noqa: SLF001
+
+    record = results[0]
+    assert record["status"] == "failed"
+    assert _CollidingDeliverableAgent.calls == 0  # the agent never started
+    assert len(record["fixture_problems"]) == 1
+    assert "report-c.json" in record["fixture_problems"][0]
+    assert "report-c.json" in record["error"]
 
 
 def test_prompt_named_mid_batch_entry_is_caught_by_content_fingerprint(
@@ -1636,6 +1671,10 @@ def test_same_task_repeat_is_not_fingerprinted(
 
     assert results[0]["cheating_report"]["status"] == "clean"
     assert results[1]["cheating_report"]["status"] == "clean"
+    # BENCH_REQUIRE_FIXTURES=0 let the first task run without its named input;
+    # the record says so. The second task found the file the first one wrote.
+    assert len(results[0]["fixture_problems"]) == 1
+    assert results[1]["fixture_problems"] == []
 
 
 # --- requires_unsandboxed: a task the boundary would make impossible ---------
