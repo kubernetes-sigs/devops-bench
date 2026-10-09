@@ -20,6 +20,7 @@ import importlib
 import logging
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -699,6 +700,8 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "cheating_report",
         "documentation",
         "capabilities_granted",
+        "judge",
+        "chaos_driver",
         "verification_parse_errors",
         "verification_report",
         "verification_status",
@@ -745,6 +748,97 @@ def _stub_agent_result() -> AgentResult:
         tokens={"input": 10, "output": 5},
         latency=1.5,
     )
+
+
+def test_records_carry_judge_and_chaos_driver_identity(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``chaos_driver`` comes from the chaos report; ``_score`` stamps the judge it used."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={"status": "success", "driver": {"provider": "google", "model": "chaos-x"}},
+        perf_report={},
+    )
+    assert record["chaos_driver"] == {"provider": "google", "model": "chaos-x"}
+    assert record["judge"] == {}
+    # A fault that never built its driver leaves the field empty, chaos_spec or not.
+    undriven = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={"status": "failed", "error": "port-forward failed"},
+        perf_report={},
+    )
+    assert undriven["chaos_driver"] == {}
+
+    judge = SimpleNamespace(provider="anthropic", client=SimpleNamespace(model_name="judge-x"))
+    failed = {"status": "failed"}
+    with (
+        patch("devops_bench.metrics.get_judge_model", return_value=judge),
+        patch("devops_bench.metrics.evaluate_metrics_batch") as batch,
+    ):
+        harness._score([record, failed])  # noqa: SLF001
+    assert record["judge"] == {"provider": "anthropic", "model": "judge-x"}
+    assert "judge" not in failed
+    batch.assert_called_once()
+
+
+def test_harness_warns_at_init_with_the_configured_judge(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("AGENT_PROVIDER", "gemini")
+    monkeypatch.setenv("AGENT_MODEL", "arm-model")
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    assert "JUDGE_MODEL unset; the judge is configured as google/arm-model" in caplog.text
+
+
+def test_harness_init_names_the_adapter_default_when_no_model_is_set(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_PROVIDER", "gemini")
+
+    with caplog.at_level(logging.WARNING):
+        DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    assert (
+        "JUDGE_MODEL and AGENT_MODEL unset; the judge uses the google adapter's default model"
+        in caplog.text
+    )
+    assert "None" not in caplog.text
+    assert "AGENT_MODEL fallback" not in caplog.text
+
+
+def test_harness_is_quiet_at_init_when_the_judge_is_pinned_or_injected(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        DefaultEvalHarness(project_id="p", cluster_name="c", judge_model=object())
+        monkeypatch.setenv("JUDGE_MODEL", "judge-x")
+        DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    assert "JUDGE_MODEL unset" not in caplog.text
+
+
+def test_judge_identity_is_empty_when_the_judge_cannot_be_built(isolated_env: None) -> None:
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    record = {"status": "success", "judge": {"stale": "x"}}
+    with (
+        patch("devops_bench.metrics.get_judge_model", side_effect=ConfigError("no judge")),
+        patch("devops_bench.metrics.evaluate_metrics_batch"),
+    ):
+        harness._score([record])  # noqa: SLF001
+    assert record["judge"] == {}
 
 
 def test_success_record_keys_match_golden(isolated_env: None) -> None:

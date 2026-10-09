@@ -643,3 +643,15 @@ def _no_real_kubectl(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("test attempted to spawn a real kubectl process")
 
     monkeypatch.setattr("devops_bench.k8s.kubectl.subprocess.Popen", _boom)
+
+
+def test_chaos_report_carries_the_driver_only_when_one_ran() -> None:
+    spec = SimpleNamespace(name="n")
+    driven = ChaosResult(
+        success=True, injected_fault="x", driver={"provider": "google", "model": "m"}
+    )
+    report = ScenarioManager._chaos_report_from_result(spec, driven)  # noqa: SLF001
+    assert report["driver"] == {"provider": "google", "model": "m"}
+
+    undriven = ChaosResult(success=False, injected_fault="x", error="port-forward failed")
+    assert "driver" not in ScenarioManager._chaos_report_from_result(spec, undriven)  # noqa: SLF001

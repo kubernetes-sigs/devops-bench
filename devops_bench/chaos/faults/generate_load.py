@@ -324,6 +324,8 @@ class GenerateLoadFault(Fault):
         # Populated by ``run_chaos_command`` with the spike's real exit status so
         # the fault can fail closed when load never reached the workload.
         load_result: dict[str, Any] = {}
+        # Filled by ``_run_agent_loop`` once the chaos agent exists.
+        driver: dict[str, str | None] = {}
         try:
             # Parallel runs pass a free local port so two concurrent forwards do
             # not contend; the remote (workload) side stays ``_LOCAL_PORT``.
@@ -366,7 +368,7 @@ class GenerateLoadFault(Fault):
                 local_url = None
 
             with forward:
-                output = self._run_agent_loop(local_url, chaos_active_event, load_result)
+                output = self._run_agent_loop(local_url, chaos_active_event, load_result, driver)
         except Exception as exc:  # noqa: BLE001 - one fault must never abort the run
             elapsed = time.monotonic() - start
             _log.exception("generate_load fault crashed")
@@ -376,6 +378,7 @@ class GenerateLoadFault(Fault):
                 output="",
                 elapsed_time=elapsed,
                 error=f"{type(exc).__name__}: {exc}",
+                driver=driver,
             )
         elapsed = time.monotonic() - start
 
@@ -389,6 +392,7 @@ class GenerateLoadFault(Fault):
                 output=output,
                 elapsed_time=elapsed,
                 error="no fortio load command was executed",
+                driver=driver,
             )
         if not load_result.get("ok"):
             rc = load_result.get("returncode")
@@ -399,12 +403,14 @@ class GenerateLoadFault(Fault):
                 output=output,
                 elapsed_time=elapsed,
                 error=f"load did not reach the workload: {detail}",
+                driver=driver,
             )
         return ChaosResult(
             success=True,
             injected_fault=self.type,
             output=output,
             elapsed_time=elapsed,
+            driver=driver,
         )
 
     def _run_agent_loop(
@@ -412,6 +418,7 @@ class GenerateLoadFault(Fault):
         local_url: str | None,
         chaos_active_event: threading.Event | None,
         load_result: dict[str, Any],
+        driver: dict[str, str | None] | None = None,
     ) -> str:
         """Drive the chaos agent against the effective target URL.
 
@@ -428,6 +435,7 @@ class GenerateLoadFault(Fault):
             chaos_active_event: Optional event signaled when load goes active.
             load_result: Mutable dict the tool handler records the spike's exit
                 status into, so the caller can fail closed.
+            driver: Mutable dict filled with the built agent's ``identity``.
 
         Returns:
             The agent's final summary string.
@@ -453,6 +461,8 @@ class GenerateLoadFault(Fault):
                 tool_handler=tool_handler,
                 chaos_active_event=chaos_active_event,
             )
+            if driver is not None:
+                driver.update(getattr(agent, "identity", None) or {})
             return agent.run(self.goal())
         finally:
             self.target.service_url = original_url

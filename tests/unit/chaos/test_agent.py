@@ -22,11 +22,16 @@ error string; and retain the model's final text across the turn cap.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+from pytest_mock import MockerFixture
+
+from devops_bench.chaos import agent as chaos_agent
 from devops_bench.chaos.agent import ChaosAgent
 from devops_bench.models.base import LLMClient
 
@@ -78,6 +83,44 @@ def _handler_returning(
         return text
 
     return _handler, seen
+
+
+def test_agent_warns_when_chaos_model_falls_back_to_agent_model(
+    mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("CHAOS_MODEL", raising=False)
+    monkeypatch.setenv("AGENT_MODEL", "arm-model")
+    get_model = mocker.patch.object(chaos_agent, "get_model", return_value=_ScriptedClient([]))
+    handler, _ = _handler_returning("unused")
+
+    with caplog.at_level(logging.WARNING):
+        ChaosAgent(system_instruction="s", tool=_TOOL, tool_handler=handler)
+
+    assert "CHAOS_MODEL unset; the chaos driver resolved to" in caplog.text
+    assert get_model.call_args.kwargs["model_name"] == "arm-model"
+
+
+def test_agent_identity_reads_the_built_client() -> None:
+    client = _ScriptedClient([])
+    client.provider, client.model_name = "google", "gemini-3.1-pro-preview"
+    handler, _ = _handler_returning("unused")
+
+    agent = ChaosAgent(system_instruction="s", tool=_TOOL, tool_handler=handler, client=client)
+
+    assert agent.identity == {"provider": "google", "model": "gemini-3.1-pro-preview"}
+
+
+def test_agent_is_quiet_when_chaos_model_is_pinned(
+    mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("CHAOS_MODEL", "pinned")
+    mocker.patch.object(chaos_agent, "get_model", return_value=_ScriptedClient([]))
+    handler, _ = _handler_returning("unused")
+
+    with caplog.at_level(logging.WARNING):
+        ChaosAgent(system_instruction="s", tool=_TOOL, tool_handler=handler)
+
+    assert "CHAOS_MODEL unset" not in caplog.text
 
 
 def test_agent_runs_one_turn_when_model_emits_no_tool_calls() -> None:

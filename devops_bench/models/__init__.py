@@ -22,6 +22,6 @@ construction time, not on import.
 
 from __future__ import annotations
 
-from devops_bench.models.base import MODELS, LLMClient, get_model
+from devops_bench.models.base import MODELS, LLMClient, describe_client, get_model
 
-__all__ = ["LLMClient", "MODELS", "get_model"]
+__all__ = ["LLMClient", "MODELS", "describe_client", "get_model"]

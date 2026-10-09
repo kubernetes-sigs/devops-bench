@@ -16,16 +16,21 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from pytest_mock import MockerFixture
+
 from devops_bench.metrics import geval
-from devops_bench.metrics.geval import ModelLayerJudge
+from devops_bench.metrics.geval import ModelLayerJudge, describe_judge
 
 
-def _fake_client(text="judged", model_name="judge-model"):
+def _fake_client(text="judged", model_name="judge-model", provider=None):
     client = MagicMock()
     client.model_name = model_name
+    client.provider = provider  # get_model stamps this on a real client
     client.generate_content = AsyncMock(return_value="raw-response")
     client.get_text_content = MagicMock(return_value=text)
     return client
@@ -40,6 +45,138 @@ def test_wraps_supplied_client_without_get_model(mocker):
     get_model.assert_not_called()
     assert judge.load_model() is client
     assert judge.get_model_name() == "explicit"
+
+
+def test_warns_and_records_provider_when_judge_model_unset(
+    mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    built = _fake_client(model_name="arm-model", provider="anthropic")
+    mocker.patch.object(geval, "get_model", return_value=built)
+    mocker.patch.dict(
+        os.environ, {"AGENT_PROVIDER": "anthropic", "AGENT_MODEL": "arm-model"}, clear=True
+    )
+
+    with caplog.at_level(logging.WARNING):
+        judge = ModelLayerJudge()
+
+    assert "JUDGE_MODEL unset; the judge resolved to anthropic/arm-model" in caplog.text
+    assert "(agent: anthropic/arm-model)" in caplog.text
+    assert describe_judge(judge) == {"provider": "anthropic", "model": "arm-model"}
+
+
+def test_warning_names_a_cross_provider_fallback(
+    mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """JUDGE_PROVIDER set, JUDGE_MODEL unset: the other provider gets the agent's model id."""
+    built = _fake_client(model_name="gemini-x", provider="ollama")
+    mocker.patch.object(geval, "get_model", return_value=built)
+    mocker.patch.dict(
+        os.environ,
+        {"JUDGE_PROVIDER": "ollama", "AGENT_PROVIDER": "google", "AGENT_MODEL": "gemini-x"},
+        clear=True,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ModelLayerJudge()
+
+    assert "the judge resolved to ollama/gemini-x (agent: google/gemini-x)" in caplog.text
+
+
+def test_warning_survives_an_unknown_agent_provider(
+    mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bogus AGENT_PROVIDER must not turn the log line into a judge-construction failure."""
+    built = _fake_client(model_name="judge-x", provider="ollama")
+    mocker.patch.object(geval, "get_model", return_value=built)
+    mocker.patch.dict(
+        os.environ, {"JUDGE_PROVIDER": "ollama", "AGENT_PROVIDER": "no-such-provider"}, clear=True
+    )
+
+    with caplog.at_level(logging.WARNING):
+        judge = ModelLayerJudge()
+
+    assert "(agent: no-such-provider/None)" in caplog.text
+    assert judge.provider == "ollama"
+
+
+def test_explicit_arguments_win_over_a_supplied_client(mocker: MockerFixture) -> None:
+    """Label and record agree, and both take the caller's provider and model."""
+    get_model = mocker.patch.object(geval, "get_model")
+    client = _fake_client(model_name="client-model", provider="anthropic")
+
+    judge = ModelLayerJudge(client=client, provider="gemini", model_name="explicit")
+
+    get_model.assert_not_called()
+    assert judge.get_model_name() == "explicit"
+    assert judge.identity == {"provider": "google", "model": "explicit"}
+    assert describe_judge(judge) == judge.identity
+
+
+def test_a_supplied_client_supplies_what_the_caller_omits(mocker: MockerFixture) -> None:
+    mocker.patch.object(geval, "get_model")
+    client = _fake_client(model_name="client-model", provider="anthropic")
+
+    assert describe_judge(ModelLayerJudge(client=client)) == {
+        "provider": "anthropic",
+        "model": "client-model",
+    }
+
+
+def test_build_path_resolves_through_judge_identity(mocker: MockerFixture) -> None:
+    """JUDGE_* unset: the client is built from the AGENT_* fallback, passed explicitly."""
+    get_model = mocker.patch.object(
+        geval, "get_model", return_value=_fake_client(model_name="arm", provider="anthropic")
+    )
+    mocker.patch.dict(os.environ, {"AGENT_PROVIDER": "anthropic", "AGENT_MODEL": "arm"}, clear=True)
+
+    ModelLayerJudge()
+
+    get_model.assert_called_once_with(provider="anthropic", model_name="arm")
+
+
+def test_explicit_model_argument_does_not_warn(
+    mocker: MockerFixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    mocker.patch.object(geval, "get_model", return_value=_fake_client(provider="google"))
+    mocker.patch.dict(os.environ, {}, clear=True)
+
+    with caplog.at_level(logging.WARNING):
+        ModelLayerJudge(model_name="judge-x")
+
+    assert "JUDGE_MODEL unset" not in caplog.text
+
+
+def test_supplied_client_provider_alias_is_canonicalized(mocker: MockerFixture) -> None:
+    get_model = mocker.patch.object(geval, "get_model")
+
+    judge = ModelLayerJudge(client=_fake_client(), provider="gemini")
+
+    get_model.assert_not_called()
+    assert judge.provider == "google"
+    assert describe_judge(judge)["provider"] == "google"
+
+
+def test_describe_judge_never_reports_the_placeholder_name() -> None:
+    judge = ModelLayerJudge(client=_fake_client(model_name=None))
+
+    assert judge.get_model_name() == "judge"
+    assert describe_judge(judge) == {"provider": None, "model": None}
+
+
+def test_describe_judge_uses_judge_env_when_set(mocker: MockerFixture) -> None:
+    built = _fake_client(model_name="judge-x", provider="google")
+    mocker.patch.object(geval, "get_model", return_value=built)
+    mocker.patch.dict(
+        os.environ,
+        {"AGENT_PROVIDER": "anthropic", "JUDGE_PROVIDER": "gemini", "JUDGE_MODEL": "judge-x"},
+        clear=True,
+    )
+
+    assert describe_judge(ModelLayerJudge()) == {"provider": "google", "model": "judge-x"}
+
+
+def test_describe_judge_tolerates_a_foreign_judge() -> None:
+    assert describe_judge(object()) == {"provider": None, "model": None}
 
 
 def test_builds_client_from_config(mocker):

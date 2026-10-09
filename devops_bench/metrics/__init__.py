@@ -31,7 +31,7 @@ from devops_bench.metrics.base import (
     run_geval,
 )
 from devops_bench.metrics.chaos_metrics import evaluate_chaos_metrics
-from devops_bench.metrics.geval import ModelLayerJudge, get_judge_model
+from devops_bench.metrics.geval import ModelLayerJudge, describe_judge, get_judge_model
 from devops_bench.metrics.grounding import (
     calculate_doc_retrieval_rate,
     evaluate_documentation_grounding,
@@ -66,6 +66,7 @@ __all__ = [
     "build_outcome_validity_metric",
     "build_tool_invocation_metric",
     "calculate_doc_retrieval_rate",
+    "describe_judge",
     "compute_outcome_score_v1",
     "evaluate_chaos_metrics",
     "evaluate_documentation_grounding",

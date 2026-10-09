@@ -130,6 +130,26 @@ def test_inject_returns_chaos_result_on_success() -> None:
     assert result.output == "spike complete"
     assert result.elapsed_time >= 0.0
     assert result.error is None
+    assert result.driver == {}, "a stub with no identity leaves the driver empty"
+
+
+def test_inject_records_the_driver_that_ran() -> None:
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://localhost:8080", qps=50))
+
+    class _NamedAgent:
+        identity = {"provider": "google", "model": "gemini-3.1-pro-preview"}
+
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def run(self, goal: str) -> str:
+            _drive_load(self.kwargs)
+            return "spike complete"
+
+    with patch("devops_bench.chaos.agent.ChaosAgent", _NamedAgent):
+        result = fault.inject(_make_ctx())
+
+    assert result.driver == {"provider": "google", "model": "gemini-3.1-pro-preview"}
 
 
 def test_inject_fails_closed_when_no_load_command_ran() -> None:
