@@ -19,12 +19,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__: list[str] = ["AgentResult", "TOKEN_BUCKETS", "ToolCall", "empty_tokens"]
+__all__: list[str] = [
+    "ROOT_ACTOR",
+    "SUBAGENT_ACTOR",
+    "AgentResult",
+    "TOKEN_BUCKETS",
+    "ToolCall",
+    "empty_tokens",
+]
 
 # Canonical token buckets every harness maps onto: ``input`` is the non-cached
 # prompt, ``cached`` is cache-read only (cache writes go in ``cache_write``),
 # ``output`` excludes ``reasoning``, and ``total`` is the sum of all buckets.
 TOKEN_BUCKETS: tuple[str, ...] = ("input", "cached", "cache_write", "reasoning", "output", "total")
+
+#: :attr:`ToolCall.actor` value for a call the top-level agent made itself.
+ROOT_ACTOR = "root"
+
+#: :attr:`ToolCall.actor` fallback for a call made by a delegated agent the
+#: harness could not name (the spawning call carried no recognizable label).
+SUBAGENT_ACTOR = "subagent"
 
 
 def empty_tokens() -> dict[str, int | None]:
@@ -36,6 +50,13 @@ def empty_tokens() -> dict[str, int | None]:
 class ToolCall:
     """Canonical trajectory entry emitted by every agent.
 
+    The three attribution fields (``actor`` / ``call_id`` / ``parent_id``) carry
+    *which* agent in a fleet made the call. A single-agent harness leaves them
+    unset and they are omitted from :meth:`to_dict`, so its trajectory
+    serializes exactly as it did before the fields existed — the metrics layer
+    re-serializes the trajectory into judge prompts, so a key that appeared on
+    every entry would perturb the scores of runs that have no fleet at all.
+
     Attributes:
         name: Tool name as advertised by the agent (e.g. an MCP tool name).
         args: Tool arguments as a JSON-serializable mapping.
@@ -43,21 +64,44 @@ class ToolCall:
         status: Lifecycle marker — ``"called"`` when first emitted,
             ``"completed"`` once the result is folded in, ``"error"`` when the
             tool failed.
+        actor: Label for the agent that made the call — :data:`ROOT_ACTOR` for
+            the top-level agent, otherwise the delegated agent's role name (a
+            harness-defined string, e.g. ``"cluster"``). ``None`` when the
+            harness reports no delegation.
+        call_id: The agent's own id for this call, when it exposes one. Lets a
+            child's :attr:`parent_id` resolve back to the call that spawned it.
+        parent_id: :attr:`call_id` of the delegating call this one was made
+            *inside*. ``None`` for a top-level call.
     """
 
     name: str
     args: dict[str, Any]
     result: str | None = None
     status: str = "called"
+    actor: str | None = None
+    call_id: str | None = None
+    parent_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-serializable mapping the harness writes to disk."""
-        return {
+        """Return the JSON-serializable mapping the harness writes to disk.
+
+        Unset attribution fields are omitted rather than written as ``None``;
+        see the class docstring for why.
+        """
+        entry: dict[str, Any] = {
             "name": self.name,
             "args": self.args,
             "result": self.result,
             "status": self.status,
         }
+        for key, value in (
+            ("actor", self.actor),
+            ("call_id", self.call_id),
+            ("parent_id", self.parent_id),
+        ):
+            if value is not None:
+                entry[key] = value
+        return entry
 
 
 @dataclass
