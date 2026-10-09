@@ -28,6 +28,7 @@ rather than running ambient. Host reachability is the host setup's
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import sys
@@ -55,6 +56,7 @@ __all__ = [
     "discover_fixture_mounts",
     "filter_boundary_env",
     "container_name_for_workspace",
+    "image_digest",
     "kill_container",
     "sweep_stray_containers",
 ]
@@ -146,6 +148,13 @@ class SandboxSpec:
     fixture_mounts: Mapping[str, str] = field(default_factory=dict)
     env_allowlist: tuple[str, ...] = ()
     owner: str = ""
+    # Pinned by the harness at batch start, before the first container runs.
+    image_digest: str | None = None
+
+    @property
+    def launch_image(self) -> str:
+        """The reference ``docker run`` gets: the pinned digest, else the tag."""
+        return self.image_digest or self.image
 
 
 def spec_from_env(env: Mapping[str, str] | None = None) -> SandboxSpec | None:
@@ -419,7 +428,14 @@ class SandboxExecutor:
         for host_path, mount_path in self._remap_mounts():
             argv += ["-v", f"{host_path}:{mount_path}"]
             targets.append(mount_path)
-        argv += [self.spec.image, "chown", "-R", f"--from={from_uid}", f"{uid}:{gid}", *targets]
+        argv += [
+            self.spec.launch_image,
+            "chown",
+            "-R",
+            f"--from={from_uid}",
+            f"{uid}:{gid}",
+            *targets,
+        ]
         return argv
 
     def _chown_before_remap(self) -> None:
@@ -492,7 +508,8 @@ class SandboxExecutor:
             argv += ["-e", name]
         argv += ["-e", f"HOME={CONTAINER_HOME}", "-e", f"KUBECONFIG={CONTAINER_KUBECONFIG}"]
         argv += ["-w", self.map_host_path(cwd) if cwd is not None else CONTAINER_WORKSPACE]
-        argv.append(spec.image)
+        # The digest the manifest records is the image that runs, even if the tag moves mid-batch.
+        argv.append(spec.launch_image)
         argv.extend(str(part) for part in cmd)
         return argv
 
@@ -583,6 +600,40 @@ def container_name_for_workspace(workspace: Path, owner: str = "") -> str:
     ``owner`` (:attr:`SandboxSpec.owner`) adds a segment scoping the name to one attempt.
     """
     return f"{_CONTAINER_NAME_PREFIX}{owner + '-' if owner else ''}{workspace.name}"
+
+
+def image_digest(image: str) -> str | None:
+    """Resolve ``image`` to a content digest for the run manifest; never raises.
+
+    Prefers the registry-anchored ``RepoDigests`` entry, else the local image ID;
+    any failure logs and returns ``None`` so provenance cannot sink a finished run.
+    """
+    try:
+        completed = run(
+            [CONTAINER_RUNTIME, "image", "inspect", image],
+            check=False,
+            timeout=_HOUSEKEEPING_TIMEOUT_SEC,
+        )
+    except (OSError, SubprocessError) as exc:
+        _log.warning("could not resolve a digest for sandbox image %s (%s)", image, exc)
+        return None
+    if completed.returncode != 0:
+        _log.warning(
+            "could not resolve a digest for sandbox image %s; the manifest will "
+            "carry the tag only (%s)",
+            image,
+            (completed.stderr or "").strip() or "docker image inspect failed",
+        )
+        return None
+    try:
+        inspected = json.loads(completed.stdout or "[]")
+        first = inspected[0]
+        repo_digests = first.get("RepoDigests") or []
+        digest = repo_digests[0] if repo_digests else first.get("Id")
+    except (json.JSONDecodeError, IndexError, AttributeError, TypeError):
+        _log.warning("unexpected docker inspect output for sandbox image %s", image)
+        return None
+    return digest or None
 
 
 def kill_container(name: str) -> None:

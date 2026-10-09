@@ -15,6 +15,7 @@
 """Tests for combining per-task parallel runs into one batch run."""
 
 import json
+from pathlib import Path
 
 from devops_bench.results import (
     aggregate,
@@ -109,6 +110,61 @@ def test_build_manifests_one_per_setup():
     manifests = build_manifests(rows, run_id="run_x", t="2026-06-01T12:00:00Z")
     assert [m.setup_id for m in manifests] == ["m-h-mcp", "m-h"]
     assert all(m.run_id == "run_x" and m.t == "2026-06-01T12:00:00Z" for m in manifests)
+
+
+def _write_manifest(path: Path, **overrides: object) -> None:
+    base = dict(
+        schemaVersion=1,
+        runId="run_a",
+        t="2026-06-01T00:00:01Z",
+        setupId="m-h-mcp",
+        model="m",
+        harness="h",
+        augmentation=["mcp"],
+        sandboxImage="agent-sandbox:dev",
+        sandboxImageDigest="sha256:aaaa",
+    )
+    base.update(overrides)
+    path.write_text(json.dumps(base), encoding="utf-8")
+
+
+def test_aggregate_carries_sandbox_provenance_from_per_task_manifests(tmp_path: Path) -> None:
+    """Rows do not carry the image; the sibling manifest.json does, and it must survive."""
+    for name in ("run_1", "run_2"):
+        _write_rows(tmp_path / name / "rows.json", [_row(taskFolder=name, taskName=name)])
+        _write_manifest(tmp_path / name / "manifest.json")
+    _write_rows(tmp_path / "run_3" / "rows.json", [_row(setupId="m-h", augmentation=[])])
+
+    _, manifests = aggregate(discover_row_files(tmp_path), run_id="run_x", t="2026-06-01T12:00:00Z")
+    by_setup = {m["setupId"]: m for m in manifests}
+    assert by_setup["m-h-mcp"]["sandboxImage"] == "agent-sandbox:dev"
+    assert by_setup["m-h-mcp"]["sandboxImageDigest"] == "sha256:aaaa"
+    assert by_setup["m-h"]["sandboxImageDigest"] is None  # no sibling manifest
+
+
+def test_aggregate_blanks_a_digest_the_batch_disagrees_on(tmp_path: Path) -> None:
+    """Two digests under one setup is not one image; the combined manifest must not claim it is."""
+    _write_rows(tmp_path / "run_1" / "rows.json", [_row(taskFolder="a", taskName="a")])
+    _write_manifest(tmp_path / "run_1" / "manifest.json")
+    _write_rows(tmp_path / "run_2" / "rows.json", [_row(taskFolder="b", taskName="b")])
+    _write_manifest(tmp_path / "run_2" / "manifest.json", sandboxImageDigest="sha256:bbbb")
+
+    _, manifests = aggregate(discover_row_files(tmp_path), run_id="run_x", t="2026-06-01T12:00:00Z")
+    assert manifests[0]["sandboxImage"] == "agent-sandbox:dev"
+    assert manifests[0]["sandboxImageDigest"] is None
+
+
+def test_aggregate_leaves_provenance_unknown_when_a_rows_file_has_no_manifest(
+    tmp_path: Path,
+) -> None:
+    """A setup is only as provable as its least-documented rows file."""
+    _write_rows(tmp_path / "run_1" / "rows.json", [_row(taskFolder="a", taskName="a")])
+    _write_manifest(tmp_path / "run_1" / "manifest.json")
+    _write_rows(tmp_path / "run_2" / "rows.json", [_row(taskFolder="b", taskName="b")])
+
+    _, manifests = aggregate(discover_row_files(tmp_path), run_id="run_x", t="2026-06-01T12:00:00Z")
+    assert manifests[0]["sandboxImage"] is None
+    assert manifests[0]["sandboxImageDigest"] is None
 
 
 def test_aggregate_collapses_per_task_runs_into_one_run(tmp_path):

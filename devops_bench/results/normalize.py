@@ -138,11 +138,14 @@ def derive_augmentation(capabilities_granted: Mapping[str, Any] | None) -> list[
     """Map a record's ``capabilities_granted`` to sorted augmentation tokens.
 
     ``use_mcp`` contributes ``"mcp"``; a non-empty ``skills`` list contributes
-    ``"skills"``. An arm with neither yields ``[]`` (baseline).
+    ``"skills"``; a truthy ``sandboxed`` contributes ``"sandboxed"``. An arm
+    with none of them yields ``[]`` (baseline).
+
+    ``sandboxed`` is a token so a sandboxed arm gets its own setup id and A/B is a group-by.
 
     Args:
-        capabilities_granted: The record's ``capabilities_granted`` mapping
-            (``{"use_mcp": bool, "skills": list}``), or ``None``.
+        capabilities_granted: ``{"use_mcp": bool, "skills": list, "sandboxed": bool}`` or
+            ``None``; ``sandboxed`` is the arm flag the harness passes, not a record field.
 
     Returns:
         Sorted, de-duplicated capability tokens.
@@ -153,6 +156,8 @@ def derive_augmentation(capabilities_granted: Mapping[str, Any] | None) -> list[
         tokens.add("mcp")
     if caps.get("skills"):
         tokens.add("skills")
+    if caps.get("sandboxed"):
+        tokens.add("sandboxed")
     return sorted(tokens)
 
 
@@ -404,6 +409,9 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
         tokens = normalize_tokens(record.get("tokens"))
         correctness = _first_score(scores, _CORRECTNESS_KEYS)
         catastrophic_kinds = [k for k in _CATASTROPHIC_KEYS if extract_score(scores, k) == 0.0]
+        # Per-record: an exempt task in a sandboxed arm reads False; absent or null stays None.
+        raw_sandboxed = record.get("sandboxed")
+        sandboxed = raw_sandboxed if isinstance(raw_sandboxed, bool) else None
         task_meta = record.get("task_metadata")
         if not isinstance(task_meta, Mapping):
             task_meta = {}
@@ -444,6 +452,7 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 total_tokens=tokens.total,
                 status=record.get("status", "") or "",
                 validated=bool(record.get("validated", False)),
+                sandboxed=sandboxed,
             )
         )
     return rows

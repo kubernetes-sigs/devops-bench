@@ -798,6 +798,7 @@ class DefaultEvalHarness(Harness):
                 )
             except Exception:  # noqa: BLE001 - a sweep failure must not block the run
                 _log.exception("stray sandbox container sweep failed; continuing")
+            self._pin_sandbox_image()
 
         run_dir = self.reporter.new_run_dir()
 
@@ -880,8 +881,14 @@ class DefaultEvalHarness(Harness):
         )
         from devops_bench.results import setup_id as results_setup_id
 
+        # Arm-level: the token lands in the setup id so A/B is a group-by; rows hold per-task truth.
+        sandbox = self._agent_config.sandbox
         augmentation = derive_augmentation(
-            {"use_mcp": self.use_mcp, "skills": list(self._granted_skill_paths)}
+            {
+                "use_mcp": self.use_mcp,
+                "skills": list(self._granted_skill_paths),
+                "sandboxed": sandbox is not None,
+            }
         )
         # Canonical key, so an alias aggregates with it instead of as a second setup.
         harness = _canonical_agent_type(self.agent_type)
@@ -894,10 +901,29 @@ class DefaultEvalHarness(Harness):
             model=model,
             harness=harness,
             augmentation=augmentation,
+            # Pinned at batch start; a mutable tag alone is not provenance.
+            sandbox_image=sandbox.image if sandbox is not None else None,
+            sandbox_image_digest=sandbox.image_digest if sandbox is not None else None,
         )
         rows = build_rows(detailed_results, manifest)
         self.reporter.write_rows(run_dir, [row.to_dict() for row in rows])
         self.reporter.write_manifest(run_dir, manifest.to_dict())
+
+    def _pin_sandbox_image(self) -> None:
+        """Resolve the image digest once, before the first container; a tag can move mid-batch."""
+        spec = self._agent_config.sandbox
+        if spec is None or spec.image_digest is not None:
+            return
+        pinned = replace(spec, image_digest=agent_sandbox.image_digest(spec.image))
+        self._agent_config = replace(self._agent_config, sandbox=pinned)
+
+    def _sandboxed_outcome(
+        self, task: Task, completed_spec: agent_sandbox.SandboxSpec | None, agent_started: bool
+    ) -> bool | None:
+        """Per-record ``sandboxed`` for a failed run; ``None`` unless the agent ran in the boundary."""
+        if self._agent_config.sandbox is None or task.requires_unsandboxed:
+            return False
+        return True if completed_spec is not None and agent_started else None
 
     def _ambient_inventory_rules(
         self,
@@ -961,6 +987,7 @@ class DefaultEvalHarness(Harness):
         completed_spec: agent_sandbox.SandboxSpec | None = None
         sandbox_rules: tuple[SensitiveAccessRule, ...] = ()
         sandbox_exempt = False
+        agent_started = False
         verification_parse_errors: list[dict[str, str]] = []
         entries: list[VerificationEntry] = []
         # Tracked as computed so a failed record carries the same resolved strings.
@@ -1075,6 +1102,7 @@ class DefaultEvalHarness(Harness):
             # inside it; diff it separately (ambient runs collect home/ whole).
             home_dir = workspace_path / "home"
             before_home = snapshot_dir(home_dir) if completed_spec is not None else set()
+            agent_started = True
             agent_res = self.execute_agent(
                 prompt, context, sandbox_spec=completed_spec, sandbox_exempt=sandbox_exempt
             )
@@ -1111,6 +1139,7 @@ class DefaultEvalHarness(Harness):
 
             result = self._build_success_record(
                 task=task,
+                sandboxed=completed_spec is not None,
                 prompt=prompt,
                 expected_output=expected_output,
                 agent_res=agent_res,
@@ -1151,6 +1180,7 @@ class DefaultEvalHarness(Harness):
             result = self._build_failed_record(
                 task,
                 exc,
+                sandboxed=self._sandboxed_outcome(task, completed_spec, agent_started),
                 prompt=prompt,
                 expected_output=expected_output,
                 recoverable_safety=recoverable_safety,
@@ -1280,6 +1310,7 @@ class DefaultEvalHarness(Harness):
     def _build_success_record(
         self,
         *,
+        sandboxed: bool = False,
         task: Task,
         prompt: str,
         expected_output: str,
@@ -1298,7 +1329,7 @@ class DefaultEvalHarness(Harness):
         """
         dumped = agent_res.to_dict()
         agent_errors = list(dumped.get("errors") or [])
-        record = self._empty_record(task)
+        record = self._empty_record(task, sandboxed=sandboxed)
         record.update(
             {
                 "input": prompt,
@@ -1340,6 +1371,7 @@ class DefaultEvalHarness(Harness):
         task: Task,
         exc: Exception,
         *,
+        sandboxed: bool | None = False,
         prompt: str | None = None,
         expected_output: str | None = None,
         recoverable_safety: list[str] | None = None,
@@ -1352,6 +1384,7 @@ class DefaultEvalHarness(Harness):
         Args:
             task: The task that failed.
             exc: The exception that aborted the run.
+            sandboxed: Per-record boundary truth; ``None`` when the agent never ran in the sandbox.
             prompt: The substituted prompt if computed, else the raw ``task.prompt``.
             expected_output: The substituted expectation if computed, else the raw one.
             recoverable_safety: The substituted checklist if computed, else the raw one.
@@ -1360,7 +1393,7 @@ class DefaultEvalHarness(Harness):
             verification_status: "evaluated", "not_evaluated", or "skipped_no_infra".
         """
         error_text = str(exc)
-        record = self._empty_record(task)
+        record = self._empty_record(task, sandboxed=sandboxed)
         record.update(
             {
                 "input": prompt if prompt is not None else task.prompt,
@@ -1384,7 +1417,7 @@ class DefaultEvalHarness(Harness):
         )
         return record
 
-    def _empty_record(self, task: Task) -> dict[str, Any]:
+    def _empty_record(self, task: Task, *, sandboxed: bool | None = False) -> dict[str, Any]:
         """Seed every record with the symmetric key set; the caller sets ``status``."""
         return {
             "input": task.prompt,
@@ -1416,6 +1449,8 @@ class DefaultEvalHarness(Harness):
                 "use_mcp": self.use_mcp,
                 "skills": list(self._granted_skill_paths),
             },
+            # Per-task, not per-arm: a requires_unsandboxed task in a sandboxed run reads False.
+            "sandboxed": sandboxed,
             "verification_parse_errors": [],
             "verification_report": [],
             "verification_status": "",

@@ -63,6 +63,10 @@ class Manifest(BaseModel):
             ``api``).
         augmentation: Capability tokens active for the run (e.g.
             ``["mcp", "skills"]``); an empty list denotes the baseline arm.
+        sandbox_image: The sandbox image reference as given; ``None`` on an unsandboxed arm.
+        sandbox_image_digest: Its content digest (repo digest, else local image ID), pinned
+            at batch start because a tag says nothing after the fact; ``None`` when
+            unsandboxed or unresolvable.
     """
 
     model_config = _MODEL_CONFIG
@@ -74,6 +78,8 @@ class Manifest(BaseModel):
     model: str
     harness: str
     augmentation: list[str]
+    sandbox_image: str | None = None
+    sandbox_image_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``manifest.json``."""
@@ -221,6 +227,9 @@ class ResultRow(BaseModel):
         status: Terminal record status, ``"success"`` or ``"failed"``.
         validated: Whether the task is vetted as correct and eligible for the
             leaderboard; ingest gates promotion on this (default ``False``).
+        sandboxed: Whether this task actually ran inside the boundary; per-row because a
+            ``requires_unsandboxed`` task in a sandboxed arm reads ``False``. ``None`` when
+            the record predates the field or the agent never ran inside the requested sandbox.
     """
 
     model_config = _MODEL_CONFIG
@@ -257,6 +266,7 @@ class ResultRow(BaseModel):
     total_tokens: int | None = None
     status: str
     validated: bool = False
+    sandboxed: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``rows.json``.

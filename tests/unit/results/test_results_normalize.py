@@ -212,6 +212,7 @@ def test_build_rows_success_record():
         "totalTokens": None,
         "status": "success",
         "validated": False,
+        "sandboxed": None,
     }
 
 
@@ -456,6 +457,7 @@ def test_result_row_keys_match_typescript_interface():
         "cacheWriteTokens",
         "totalTokens",
         "validated",
+        "sandboxed",
         "taskTitle",
         "taskSummary",
         "taskCategory",
@@ -479,7 +481,29 @@ def test_manifest_to_dict_keys():
         "model",
         "harness",
         "augmentation",
+        "sandboxImage",
+        "sandboxImageDigest",
     }
+
+
+def test_derive_augmentation_sandboxed_token():
+    """``sandboxed`` rides in the setup id so a sandboxed arm is its own dashboard setup."""
+    assert derive_augmentation({"sandboxed": True}) == ["sandboxed"]
+    assert derive_augmentation({"use_mcp": True, "sandboxed": True}) == ["mcp", "sandboxed"]
+    assert derive_augmentation({"sandboxed": False}) == []
+    assert setup_id("m", "gemini", ["sandboxed"]) == "m-gemini-sandboxed"
+
+
+def test_build_rows_carries_per_record_sandboxed():
+    """An exempt task in a sandboxed arm reads False; a record predating the field reads None."""
+    manifest = _manifest()
+    base = {"name": "t", "folder": "f", "status": "success"}
+    inside = build_rows([{**base, "sandboxed": True}], manifest)[0]
+    exempt = build_rows([{**base, "sandboxed": False}], manifest)[0]
+    legacy = build_rows([base], manifest)[0]
+    assert inside.to_dict()["sandboxed"] is True
+    assert exempt.to_dict()["sandboxed"] is False
+    assert legacy.to_dict()["sandboxed"] is None
 
 
 def test_build_rows_propagates_validated():

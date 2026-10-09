@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +40,7 @@ class _DummyAgent(AgentHarness):
         raise NotImplementedError
 
 
-def _complete_spec(tmp_path: Path, **overrides) -> sandbox.SandboxSpec:
+def _complete_spec(tmp_path: Path, **overrides: object) -> sandbox.SandboxSpec:
     """A fully-populated spec rooted in ``tmp_path``."""
     workspace = tmp_path / "workspace-abc123"
     workspace.mkdir(exist_ok=True)
@@ -101,6 +103,65 @@ def test_container_name_for_workspace_differs_per_workspace() -> None:
     a = sandbox.container_name_for_workspace(Path("/tmp/workspace-a"))
     b = sandbox.container_name_for_workspace(Path("/tmp/workspace-b"))
     assert a != b
+
+
+def test_image_digest_prefers_the_repo_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RepoDigests is the cross-host identity; the local Id is only the never-pushed fallback."""
+    inspected = [
+        {
+            "Id": "sha256:aaaa",
+            "RepoDigests": ["registry.example/agent-sandbox@sha256:bbbb"],
+        }
+    ]
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        assert argv == ["docker", "image", "inspect", "agent-sandbox:v1"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(inspected), stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("agent-sandbox:v1") == (
+        "registry.example/agent-sandbox@sha256:bbbb"
+    )
+
+
+def test_image_digest_falls_back_to_the_local_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps([{"Id": "sha256:aaaa", "RepoDigests": []}]), stderr=""
+        )
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("agent-sandbox:dev") == "sha256:aaaa"
+
+
+def _unknown_image(argv: list[str], **kwargs: object) -> SimpleNamespace:
+    return SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+
+
+def _malformed(argv: list[str], **kwargs: object) -> SimpleNamespace:
+    return SimpleNamespace(returncode=0, stdout="not-json", stderr="")
+
+
+def _missing_runtime(argv: list[str], **kwargs: object) -> SimpleNamespace:
+    raise FileNotFoundError("docker")
+
+
+def _wedged_daemon(argv: list[str], **kwargs: object) -> SimpleNamespace:
+    assert kwargs.get("timeout"), "inspect must be bounded"
+    raise sandbox.SubprocessError(argv, returncode=-1, stdout="", stderr="")
+
+
+@pytest.mark.parametrize(
+    "fake_run",
+    [_unknown_image, _malformed, _missing_runtime, _wedged_daemon],
+    ids=["unknown-image", "malformed-output", "missing-runtime", "timeout"],
+)
+def test_image_digest_never_raises(
+    monkeypatch: pytest.MonkeyPatch, fake_run: Callable[..., SimpleNamespace]
+) -> None:
+    """Every failure mode yields None rather than raising."""
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("nope:latest") is None
 
 
 def test_kill_container_invokes_docker_kill_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -541,6 +602,16 @@ def test_wrap_argv_core_shape(tmp_path: Path) -> None:
     # Default working directory is the workspace; image then the raw argv.
     assert argv[argv.index("-w") + 1] == "/workspace"
     assert argv[-4:] == ["agent-image", "gemini", "-p", "hi"]
+
+
+def test_wrap_argv_launches_the_pinned_digest_over_the_tag(tmp_path: Path) -> None:
+    """The reference docker runs is the one the manifest records; the tag alone can move."""
+    spec = _complete_spec(tmp_path, image_digest="agent-image@sha256:feed")
+    argv = sandbox.SandboxExecutor(spec).wrap_argv(["gemini", "-p", "hi"])
+    assert argv[-4] == "agent-image@sha256:feed"
+    assert "agent-image" not in argv[:-4]
+    unpinned = sandbox.SandboxExecutor(_complete_spec(tmp_path)).wrap_argv(["gemini"])
+    assert unpinned[-2] == "agent-image"
 
 
 def test_wrap_argv_container_owned_env_flags_come_last(tmp_path: Path) -> None:
