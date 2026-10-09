@@ -121,6 +121,12 @@ def _verifier(**kwargs: Any) -> ResourcePropertyVerifier:
     return ResourcePropertyVerifier(**base)
 
 
+def test_verify_forwards_context_to_get_resource() -> None:
+    with patch(_GET, return_value=_deployment()) as mock_get:
+        _verifier(op="exists", resource_name="web", context="gke_p_us-east1-b_c").verify(0.0)
+    assert mock_get.call_args.kwargs["context"] == "gke_p_us-east1-b_c"
+
+
 # -- quantity parsing ---------------------------------------------------
 
 

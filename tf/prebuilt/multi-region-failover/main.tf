@@ -216,6 +216,55 @@ resource "google_compute_global_forwarding_rule" "lb" {
   load_balancing_scheme = "EXTERNAL"
 }
 
+# A provisioner failure taints its resource, and OpenTofu skips `when = destroy`
+# provisioners on tainted resources -- so cleanup that must survive a partial
+# setup.sh failure (Services created, rollout wait timed out) cannot live on
+# null_resource.setup. Housing it here, with setup depending on this resource,
+# keeps the destroy order setup -> teardown -> clusters/addresses. Same
+# destroy-only idiom as minimum's ar_cleanup.
+resource "null_resource" "teardown" {
+  # All values the destroy provisioners need, reachable via self.triggers;
+  # referencing the modules/addresses also orders this before their destroy.
+  triggers = {
+    project_id      = var.project_id
+    namespace       = var.namespace
+    east_cluster    = module.east.cluster_name
+    east_zone       = var.zone_primary
+    west_cluster    = module.west.cluster_name
+    west_zone       = var.zone_standby
+    east_ip         = google_compute_address.east_ip.address
+    west_ip         = google_compute_address.west_ip.address
+    west_kubeconfig = local.west_kubeconfig
+  }
+
+  # Runs while both clusters still exist: deletes the Services so the GKE
+  # controller tears down its out-of-state NLB resources before the
+  # google_compute_address destroys, which are otherwise rejected as in-use.
+  provisioner "local-exec" {
+    when        = destroy
+    on_failure  = continue
+    interpreter = ["/bin/bash", "-c"]
+    command     = "${path.module}/scripts/teardown.sh"
+
+    environment = {
+      PROJECT_ID   = self.triggers.project_id
+      NAMESPACE    = self.triggers.namespace
+      EAST_CLUSTER = self.triggers.east_cluster
+      EAST_ZONE    = self.triggers.east_zone
+      WEST_CLUSTER = self.triggers.west_cluster
+      WEST_ZONE    = self.triggers.west_zone
+      EAST_IP      = self.triggers.east_ip
+      WEST_IP      = self.triggers.west_ip
+    }
+  }
+
+  provisioner "local-exec" {
+    when       = destroy
+    on_failure = continue
+    command    = "rm -f '${self.triggers.west_kubeconfig}'"
+  }
+}
+
 resource "null_resource" "setup" {
   triggers = {
     east_cluster    = module.east.cluster_name
@@ -250,14 +299,8 @@ resource "null_resource" "setup" {
     }
   }
 
-  # Destroy-time provisioners may only reference self, hence the trigger above.
-  provisioner "local-exec" {
-    when       = destroy
-    on_failure = continue
-    command    = "rm -f '${self.triggers.west_kubeconfig}'"
-  }
-
   depends_on = [
+    null_resource.teardown,
     module.east,
     module.west,
     google_sql_database_instance.replica,
