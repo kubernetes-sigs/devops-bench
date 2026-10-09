@@ -43,7 +43,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_matrix_lib.sh"
 MATRIX_AGENT_CONFIGS="${MATRIX_AGENT_CONFIGS:-oc+mcp+skills}"
 
 # Translate an agent-config preset into the refactored arm's env (';'-joined).
-# <type> is oc|gcli; +mcp / +skills toggle capabilities.
+# <type> is oc|gcli|agy|cc; +mcp / +skills toggle capabilities.
 agent_config_env() {
   local preset="$1" type feat want_mcp=0 want_skills=0 out=()
   type="${preset%%+*}"
@@ -52,6 +52,8 @@ agent_config_env() {
     # "gemini" is the registered agent key; "cli" matches neither a registered
     # agent nor the gemini-cli alias, so it fails at agent resolution.
     gcli) out+=("BENCH_AGENT_TYPE=gemini" "AGENT_TARGET=gemini") ;;
+    agy)  out+=("BENCH_AGENT_TYPE=antigravity" "AGENT_TARGET=\$HOME/.local/bin/agy") ;;
+    cc)   out+=("BENCH_AGENT_TYPE=claude" "AGENT_TARGET=\$HOME/.local/bin/claude") ;;
     *) echo "ERROR: unknown agent type '${type}' in preset '${preset}'" >&2; return 1 ;;
   esac
   for feat in $(echo "${preset}" | tr '+' ' '); do
