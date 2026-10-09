@@ -977,6 +977,13 @@ class DefaultEvalHarness(Harness):
                     "agent sandbox even though a sandbox was requested",
                     task.name,
                 )
+                if cluster_info.agent_cloud_identity:
+                    _log.warning(
+                        "task %s also names agent_cloud_identity %s; no credential is minted "
+                        "for it and the agent uses the ambient one instead",
+                        task.name,
+                        cluster_info.agent_cloud_identity,
+                    )
                 sandbox_exempt = True
             elif self._agent_config.sandbox is not None:
                 # The kubeconfig gets its own dir so the credential enters only via its
@@ -1201,7 +1208,9 @@ class DefaultEvalHarness(Harness):
                 "must gate on config.sandbox"
             )
         (workspace_path / "home").mkdir(parents=True, exist_ok=True)
+        token_ttl_sec: int | None = None
         if with_cluster:
+            token_ttl_sec = agent_credentials.token_ttl_for(self._agent_config.timeout_sec)
             # Pinned here too, so the spec and the run-end teardown target the same cluster.
             plan = agent_credentials.pin_plan_context(
                 agent_sandbox.build_network_plan(provider, cluster_info)
@@ -1209,7 +1218,7 @@ class DefaultEvalHarness(Harness):
             kubeconfig = agent_credentials.provision_agent_credentials(
                 plan,
                 creds_dir,
-                token_ttl_sec=agent_credentials.token_ttl_for(self._agent_config.timeout_sec),
+                token_ttl_sec=token_ttl_sec,
                 pod_security=pod_security,
             )
         else:
@@ -1218,12 +1227,19 @@ class DefaultEvalHarness(Harness):
             kubeconfig.write_text("apiVersion: v1\nkind: Config\n")
             kubeconfig.chmod(0o600)
         try:
+            # A mint failure raises: a failed record, never a run missing its credential.
+            cloud_credential_env = (
+                provider.sandbox_cloud_credential_env(cluster_info, lifetime_sec=token_ttl_sec)
+                if with_cluster and provider is not None
+                else {}
+            )
             return replace(
                 self._agent_config.sandbox,
                 network=plan,
                 workspace=workspace_path,
                 kubeconfig=kubeconfig,
                 fixture_mounts=agent_sandbox.discover_fixture_mounts(cluster_info.name),
+                cloud_credential_env=cloud_credential_env,
             )
         except Exception:
             # Provisioned, but no completed spec will carry the objects to the run-end teardown.

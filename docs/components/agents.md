@@ -618,6 +618,25 @@ host processes with the operator's own ADC.
 > auth method is set — naming the very variable you exported. Export
 > `AGENT_API_KEY` and the sandboxed run routes it onward for you.
 
+### Task cloud credentials
+
+A task whose work includes cloud API calls beyond `kubectl` can have its stack
+provision a run-unique cloud identity holding only the roles it needs, and
+name it in an `agent_cloud_identity` output. On a sandboxed run the provider
+mints a short-lived credential for that identity host-side and injects it into
+the container; the operator's own credentials never cross. On GCP this is an
+impersonated access token (`CLOUDSDK_AUTH_ACCESS_TOKEN` /
+`GOOGLE_OAUTH_ACCESS_TOKEN`, with `CLOUDSDK_CORE_PROJECT` pinned to the task's
+project), sized to the same budget as the cluster token above and not
+refreshed. A budget past an hour needs the organization policy that allows
+service-account credential lifetime extension; without it the mint falls back
+to an hour and warns that the credential expires before the agent's timeout.
+A mint failure, a hung `gcloud`, or a provider that cannot mint for a named
+identity fails the run rather than letting the agent run without the
+credential its task depends on. A task that also declares
+`requires_unsandboxed` runs ambient and the identity goes unused, with a
+warning. Tasks with no such output are unaffected.
+
 ## Adding your own harness
 
 Want to wrap a different agent? See

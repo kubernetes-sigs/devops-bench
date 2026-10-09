@@ -51,12 +51,15 @@ class ClusterInfo:
         project: Cloud project; None for local clusters.
         kubeconfig_path: Kubeconfig path; resolved from ``KUBECONFIG`` or
             ``~/.kube/config`` when not supplied.
+        agent_cloud_identity: Identity the task's stack provisioned for the
+            agent's own cloud API calls; None when the task needs none.
     """
 
     name: str
     location: str | None = None
     project: str | None = None
     kubeconfig_path: str = field(default_factory=_resolve_kubeconfig)
+    agent_cloud_identity: str | None = None
 
     @classmethod
     def from_dict(cls, info: dict[str, Any]) -> ClusterInfo:
@@ -64,7 +67,7 @@ class ClusterInfo:
 
         Args:
             info: Mapping with a required ``name`` and optional ``location``,
-                ``project``, and ``kubeconfig_path``.
+                ``project``, ``kubeconfig_path``, and ``agent_cloud_identity``.
 
         Returns:
             The constructed instance, with ``kubeconfig_path`` resolved when absent.
@@ -74,6 +77,7 @@ class ClusterInfo:
             location=info.get("location"),
             project=info.get("project"),
             kubeconfig_path=_resolve_kubeconfig(info.get("kubeconfig_path")),
+            agent_cloud_identity=info.get("agent_cloud_identity"),
         )
 
 
