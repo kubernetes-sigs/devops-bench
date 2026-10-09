@@ -466,6 +466,8 @@ opt-out drops exactly two things: policy 2 and the PSA labels (including policy
 3's label requirement). Policies 3 and 4 still apply, because where the agent
 may write is unrelated to what its pods may do, and policy 5 is still applied
 with an empty list so a reused cluster does not keep the previous run's.
+The credential's `ResourceQuota`/`LimitRange` write grant is on by default too;
+a task declines it with `agent_quota_writes: false`.
 
 **All of this is torn down at the end of a run whose cluster survives it**
 (`BENCH_NO_TEARDOWN`, a task with `teardown: false`, the no-op deployer). A

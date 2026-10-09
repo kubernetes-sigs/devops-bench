@@ -869,8 +869,18 @@ class DefaultEvalHarness(Harness):
         )
         from devops_bench.results import setup_id as results_setup_id
 
+        # ``sandboxed`` is the ARM's property (the run was requested sandboxed),
+        # so it belongs in the setup id: a sandboxed arm aggregates as its own
+        # dashboard setup and the A/B soak is a plain group-by. Per-task
+        # divergence (a requires_unsandboxed exemption) is carried on each
+        # row's own ``sandboxed`` field instead.
+        sandbox = self._agent_config.sandbox
         augmentation = derive_augmentation(
-            {"use_mcp": self.use_mcp, "skills": list(self._granted_skill_paths)}
+            {
+                "use_mcp": self.use_mcp,
+                "skills": list(self._granted_skill_paths),
+                "sandboxed": sandbox is not None,
+            }
         )
         # Canonical key, so an alias aggregates with it instead of as a second setup.
         harness = _canonical_agent_type(self.agent_type)
@@ -883,6 +893,14 @@ class DefaultEvalHarness(Harness):
             model=model,
             harness=harness,
             augmentation=augmentation,
+            # A mutable tag is not provenance; the digest is. Resolved at
+            # report time (best-effort, None recorded honestly on failure) so
+            # an A/B pair claiming "the same image" is checkable after the
+            # fact.
+            sandbox_image=sandbox.image if sandbox is not None else None,
+            sandbox_image_digest=(
+                agent_sandbox.image_digest(sandbox.image) if sandbox is not None else None
+            ),
         )
         rows = build_rows(detailed_results, manifest)
         self.reporter.write_rows(run_dir, [row.to_dict() for row in rows])
@@ -989,6 +1007,7 @@ class DefaultEvalHarness(Harness):
                     deployer.provider,
                     task.agent_pod_security,
                     with_cluster=infra_config.get("deployer") != "noop",
+                    quota_writes=task.agent_quota_writes,
                 )
                 sandbox_rules = self._inventory_sandbox_home(
                     task.name, workspace_path / "home", completed_spec.fixture_mounts
@@ -1100,6 +1119,7 @@ class DefaultEvalHarness(Harness):
 
             result = self._build_success_record(
                 task=task,
+                sandboxed=completed_spec is not None,
                 prompt=prompt,
                 expected_output=expected_output,
                 agent_res=agent_res,
@@ -1140,6 +1160,7 @@ class DefaultEvalHarness(Harness):
             result = self._build_failed_record(
                 task,
                 exc,
+                sandboxed=completed_spec is not None,
                 prompt=prompt,
                 expected_output=expected_output,
                 recoverable_safety=recoverable_safety,
@@ -1187,12 +1208,14 @@ class DefaultEvalHarness(Harness):
         pod_security: str,
         *,
         with_cluster: bool = True,
+        quota_writes: bool = True,
     ) -> agent_sandbox.SandboxSpec:
         """Complete the skeletal sandbox spec for one provisioned task.
 
         Builds the context-pinned network plan, provisions the scoped cluster
         credential, and discovers fixture mounts; ``with_cluster=False`` mounts a
-        credential-free stub kubeconfig instead. Raises :class:`SandboxError`
+        credential-free stub kubeconfig instead. ``quota_writes`` is the task's
+        ``agent_quota_writes``. Raises :class:`SandboxError`
         rather than degrading to an ambient run.
         """
         if self._agent_config.sandbox is None:
@@ -1211,6 +1234,7 @@ class DefaultEvalHarness(Harness):
                 creds_dir,
                 token_ttl_sec=agent_credentials.token_ttl_for(self._agent_config.timeout_sec),
                 pod_security=pod_security,
+                quota_writes=quota_writes,
             )
         else:
             plan = agent_sandbox.NetworkPlan()
@@ -1269,6 +1293,7 @@ class DefaultEvalHarness(Harness):
     def _build_success_record(
         self,
         *,
+        sandboxed: bool = False,
         task: Task,
         prompt: str,
         expected_output: str,
@@ -1287,7 +1312,7 @@ class DefaultEvalHarness(Harness):
         """
         dumped = agent_res.to_dict()
         agent_errors = list(dumped.get("errors") or [])
-        record = self._empty_record(task)
+        record = self._empty_record(task, sandboxed=sandboxed)
         record.update(
             {
                 "input": prompt,
@@ -1329,6 +1354,7 @@ class DefaultEvalHarness(Harness):
         task: Task,
         exc: Exception,
         *,
+        sandboxed: bool = False,
         prompt: str | None = None,
         expected_output: str | None = None,
         recoverable_safety: list[str] | None = None,
@@ -1349,7 +1375,7 @@ class DefaultEvalHarness(Harness):
             verification_status: "evaluated", "not_evaluated", or "skipped_no_infra".
         """
         error_text = str(exc)
-        record = self._empty_record(task)
+        record = self._empty_record(task, sandboxed=sandboxed)
         record.update(
             {
                 "input": prompt if prompt is not None else task.prompt,
@@ -1373,7 +1399,7 @@ class DefaultEvalHarness(Harness):
         )
         return record
 
-    def _empty_record(self, task: Task) -> dict[str, Any]:
+    def _empty_record(self, task: Task, *, sandboxed: bool = False) -> dict[str, Any]:
         """Seed every record with the symmetric key set; the caller sets ``status``."""
         return {
             "input": task.prompt,
@@ -1405,6 +1431,10 @@ class DefaultEvalHarness(Harness):
                 "use_mcp": self.use_mcp,
                 "skills": list(self._granted_skill_paths),
             },
+            # Whether THIS task's agent actually ran inside the container
+            # boundary — per-record, not per-run: a ``requires_unsandboxed``
+            # task inside a sandboxed run legitimately differs from its arm.
+            "sandboxed": sandboxed,
             "verification_parse_errors": [],
             "verification_report": [],
             "verification_status": "",

@@ -28,6 +28,7 @@ rather than running ambient. Host reachability is the host setup's
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import sys
@@ -55,6 +56,7 @@ __all__ = [
     "discover_fixture_mounts",
     "filter_boundary_env",
     "container_name_for_workspace",
+    "image_digest",
     "kill_container",
     "sweep_stray_containers",
 ]
@@ -583,6 +585,45 @@ def container_name_for_workspace(workspace: Path, owner: str = "") -> str:
     ``owner`` (:attr:`SandboxSpec.owner`) adds a segment scoping the name to one attempt.
     """
     return f"{_CONTAINER_NAME_PREFIX}{owner + '-' if owner else ''}{workspace.name}"
+
+
+def image_digest(image: str) -> str | None:
+    """Resolve ``image`` to a content digest for the run manifest. Never raises.
+
+    Prefers the first ``RepoDigests`` entry — the registry-anchored identity
+    that survives across hosts — and falls back to the local image ID (the
+    config hash) for an image that was only ever built locally and has no
+    repo digest. Both are content-addressed; either one turns "we ran
+    ``agent-sandbox:dev``" from a mutable-tag claim into evidence.
+
+    Best-effort by design: provenance must never sink a finished run, so a
+    missing docker binary, an unknown image, or malformed inspect output all
+    log and return ``None`` — and the manifest records the absence honestly.
+
+    Args:
+        image: The image reference the run used (tag or digest form).
+
+    Returns:
+        A ``repo@sha256:...`` or ``sha256:...`` string, or ``None``.
+    """
+    completed = run(["docker", "image", "inspect", image], check=False)
+    if completed.returncode != 0:
+        _log.warning(
+            "could not resolve a digest for sandbox image %s; the manifest will "
+            "carry the tag only (%s)",
+            image,
+            (completed.stderr or "").strip() or "docker image inspect failed",
+        )
+        return None
+    try:
+        inspected = json.loads(completed.stdout or "[]")
+        first = inspected[0]
+        repo_digests = first.get("RepoDigests") or []
+        digest = repo_digests[0] if repo_digests else first.get("Id")
+    except (json.JSONDecodeError, IndexError, AttributeError, TypeError):
+        _log.warning("unexpected docker inspect output for sandbox image %s", image)
+        return None
+    return digest or None
 
 
 def kill_container(name: str) -> None:

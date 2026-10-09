@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,6 +102,54 @@ def test_container_name_for_workspace_differs_per_workspace() -> None:
     a = sandbox.container_name_for_workspace(Path("/tmp/workspace-a"))
     b = sandbox.container_name_for_workspace(Path("/tmp/workspace-b"))
     assert a != b
+
+
+def test_image_digest_prefers_the_repo_digest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RepoDigests is the registry-anchored identity that survives across
+    hosts; the local Id is only the fallback for a never-pushed image."""
+    inspected = [
+        {
+            "Id": "sha256:aaaa",
+            "RepoDigests": ["registry.example/agent-sandbox@sha256:bbbb"],
+        }
+    ]
+
+    def fake_run(argv, **kwargs):
+        assert argv == ["docker", "image", "inspect", "agent-sandbox:v1"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(inspected), stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("agent-sandbox:v1") == (
+        "registry.example/agent-sandbox@sha256:bbbb"
+    )
+
+
+def test_image_digest_falls_back_to_the_local_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps([{"Id": "sha256:aaaa", "RepoDigests": []}]), stderr=""
+        )
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    assert sandbox.image_digest("agent-sandbox:dev") == "sha256:aaaa"
+
+
+def test_image_digest_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provenance must never sink a finished run: unknown image, missing
+    docker, malformed output all yield None (and the manifest records the
+    absence honestly)."""
+
+    def unknown_image(argv, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+
+    monkeypatch.setattr(sandbox, "run", unknown_image)
+    assert sandbox.image_digest("nope:latest") is None
+
+    def malformed(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="not-json", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", malformed)
+    assert sandbox.image_digest("nope:latest") is None
 
 
 def test_kill_container_invokes_docker_kill_by_name(monkeypatch: pytest.MonkeyPatch) -> None:

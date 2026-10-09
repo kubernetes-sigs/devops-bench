@@ -704,6 +704,7 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "verification_status",
         "generation_only",
         "validated",
+        "sandboxed",
         "task_metadata",
     }
 )
@@ -1165,13 +1166,20 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     provider = object()
 
     def fake_provision(
-        got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str
+        got_plan: Any,
+        dest_dir: Path,
+        *,
+        token_ttl_sec: int,
+        pod_security: str,
+        quota_writes: bool,
     ) -> Path:
         assert got_plan is plan
         assert dest_dir == tmp_path / "creds"
         # Default 600s agent timeout plus slack: the token must outlast the run.
         assert token_ttl_sec == 1500
         assert pod_security == "baseline"
+        # The task's quota decision reaches provisioning; granted by default.
+        assert quota_writes is True
         return kubeconfig
 
     plan_requests: list[tuple[Any, str]] = []
@@ -1316,6 +1324,7 @@ def test_run_one_tears_down_sandbox_credentials_in_its_finally(
             pod_security: str,
             *,
             with_cluster: bool = True,
+            quota_writes: bool = True,
         ) -> Any:
             (workspace_path / "home").mkdir(parents=True, exist_ok=True)
             return replace(
@@ -1347,6 +1356,67 @@ def test_run_one_tears_down_sandbox_credentials_in_its_finally(
             assert record["sandbox_teardown_clean"] is False
     finally:
         AGENTS._items.pop("fake-sandbox-teardown", None)  # noqa: SLF001
+
+
+def test_write_run_artifacts_records_sandbox_provenance(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm's sandboxing lands in the setup id (A/B is a group-by), and the
+    image is pinned by digest — a mutable tag is not provenance."""
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        harness_default.agent_sandbox, "image_digest", lambda image: f"{image}@sha256:feed"
+    )
+    written: dict[str, Any] = {}
+    monkeypatch.setattr(
+        harness.reporter, "write_rows", lambda run_dir, rows: written.update(rows=rows)
+    )
+    monkeypatch.setattr(
+        harness.reporter, "write_manifest", lambda run_dir, m: written.update(manifest=m)
+    )
+
+    record = {"name": "t", "folder": "f", "status": "success", "sandboxed": True}
+    harness._write_run_artifacts(tmp_path, [record])  # noqa: SLF001
+
+    manifest = written["manifest"]
+    assert "sandboxed" in manifest["augmentation"]
+    assert "sandboxed" in manifest["setupId"]
+    assert manifest["sandboxImage"] == "agent-sandbox:test"
+    assert manifest["sandboxImageDigest"] == "agent-sandbox:test@sha256:feed"
+    assert written["rows"][0]["sandboxed"] is True
+
+
+def test_write_run_artifacts_stays_baseline_when_unsandboxed(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("BENCH_AGENT_SANDBOX", raising=False)
+    harness = DefaultEvalHarness(
+        project_id="p", cluster_name="c", results_root=str(tmp_path / "results")
+    )
+    written: dict[str, Any] = {}
+    monkeypatch.setattr(harness.reporter, "write_rows", lambda run_dir, rows: None)
+    monkeypatch.setattr(
+        harness.reporter, "write_manifest", lambda run_dir, m: written.update(manifest=m)
+    )
+
+    harness._write_run_artifacts(tmp_path, [{"name": "t", "folder": "f", "status": "success"}])  # noqa: SLF001
+
+    manifest = written["manifest"]
+    assert "sandboxed" not in manifest["augmentation"]
+    assert manifest["sandboxImage"] is None
+    assert manifest["sandboxImageDigest"] is None
+
+
+def test_empty_record_carries_the_task_scoped_sandboxed_flag(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-record truth: an exempt task inside a sandboxed arm records False
+    while its siblings record True."""
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+
+    assert harness._empty_record(task)["sandboxed"] is False  # noqa: SLF001
+    assert harness._empty_record(task, sandboxed=True)["sandboxed"] is True  # noqa: SLF001
 
 
 def test_sandbox_credential_teardown_only_runs_when_the_cluster_survives(
@@ -1726,3 +1796,17 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
     assert exempt == ["secret-rotation"]
+
+
+def test_only_readonly_quota_declines_quota_writes() -> None:
+    """Loaded through the real loader so a dropped key cannot pass as the default."""
+    import pathlib
+
+    from devops_bench.tasks.loader import FileSystemTaskLoader
+
+    declining = [
+        p.parent.name
+        for p in sorted(pathlib.Path("tasks").glob("*/*/task.yaml"))
+        if not all(t.agent_quota_writes for t in FileSystemTaskLoader().load_tasks(str(p)))
+    ]
+    assert declining == ["readonly-quota"]
