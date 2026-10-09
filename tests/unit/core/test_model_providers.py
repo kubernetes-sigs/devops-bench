@@ -63,7 +63,6 @@ _ROWS = [
     ("anthropic-bedrock", "anthropic-bedrock", "claude", "anthropic-bedrock", (), True, "bedrock"),
     ("anthropic_bedrock", "anthropic-bedrock", "claude", "anthropic-bedrock", (), True, "bedrock"),
     ("openai", "openai", "openai", "openai", ("OPENAI_API_KEY",), False, None),
-    ("ollama", "ollama", "ollama", "ollama", (), True, None),
 ]
 
 
@@ -99,7 +98,7 @@ def test_unknown_provider_raises_with_known_list():
     assert "gemini" in msg and "anthropic" in msg
 
 
-def test_only_vertex_bedrock_ollama_are_keyless():
+def test_only_vertex_and_bedrock_are_keyless():
     keyless = {raw for raw, *_ in _ROWS if resolve_provider(raw).keyless_ok}
     assert keyless == {
         "google-vertex",
@@ -108,7 +107,6 @@ def test_only_vertex_bedrock_ollama_are_keyless():
         "anthropic_vertex",
         "anthropic-bedrock",
         "anthropic_bedrock",
-        "ollama",
     }
 
 
@@ -121,7 +119,7 @@ def test_provider_spec_is_frozen():
 def test_known_providers_sorted_and_complete():
     known = known_providers()
     assert known == tuple(sorted(known))
-    assert "google-vertex" in known and "ollama" in known
+    assert "google-vertex" in known and "openai" in known
 
 
 # --------------------------------------------------------------------------
@@ -171,11 +169,6 @@ def _get(
 def test_key_based_providers_need_no_recipe(raw: str) -> None:
     # Their key is already in the overlay and crosses the boundary by value.
     assert sandbox_credential_env(resolve_provider(raw)) == {}
-
-
-def test_ollama_needs_no_recipe() -> None:
-    # Keyless, but it authenticates against a local endpoint, not a cloud identity.
-    assert sandbox_credential_env(resolve_provider("ollama")) == {}
 
 
 def test_bedrock_fails_loud_rather_than_silently_unauthenticated() -> None:

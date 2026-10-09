@@ -104,7 +104,7 @@ def get_model(
     Args:
         provider: Provider alias such as ``"gemini"``/``"google"``/
             ``"google-vertex"``, ``"claude"``/``"anthropic"``/
-            ``"anthropic-vertex"``, ``"openai"``, or ``"ollama"``.
+            ``"anthropic-vertex"``, or ``"openai"``.
             Case-insensitive.
         model_name: Optional model override passed to the adapter; when omitted
             the adapter reads ``AGENT_MODEL`` (or its own default).
@@ -116,14 +116,12 @@ def get_model(
     Raises:
         ConfigError: If ``provider`` is not a known alias.
         NotRegisteredError: If the resolved adapter family has no registered
-            adapter (e.g. ``openai``).
+            adapter.
         MissingDependencyError: If the selected provider's SDK is not installed.
     """
     spec = resolve_provider(provider if provider is not None else get_env("AGENT_PROVIDER"))
     key = spec.adapter_family
-    # Import only the resolved adapter family's module so it self-registers. An
-    # unregistered family (e.g. ``openai``) has no module; leave it to surface as
-    # NotRegisteredError from ``MODELS.get``.
+    # Import only the resolved family's module so it self-registers; a missing one raises below.
     module = f"{__package__}.{key}"
     if importlib.util.find_spec(module) is not None:
         importlib.import_module(module)

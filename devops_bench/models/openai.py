@@ -12,15 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Ollama adapter (OpenAI-compatible API) for the LLM client interface."""
+"""OpenAI-compatible adapter for the LLM client interface.
+
+Targets the OpenAI API itself or any server that speaks its chat-completions
+wire format (SGLang, vLLM, Ollama, ...). The endpoint comes from
+``OPENAI_BASE_URL``; when unset the SDK talks to the OpenAI API.
+"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from devops_bench.core.config import get_env
-from devops_bench.core.errors import MissingDependencyError
+from devops_bench.core.config import first_env, get_env, get_int
+from devops_bench.core.errors import ConfigError, MissingDependencyError
 from devops_bench.models.base import MODELS, LLMClient
 
 try:
@@ -28,52 +33,50 @@ try:
 except ImportError:  # pragma: no cover - exercised only without the SDK
     AsyncOpenAI = None
 
-__all__ = ["OllamaClientAdapter"]
+__all__ = ["OpenAIClientAdapter"]
 
-_DEFAULT_MODEL = "gemma4:2b"
-_DEFAULT_BASE_URL = "http://localhost:11434/v1"
+_DEFAULT_MAX_TOKENS = 16000
 
 
-@MODELS.register("ollama")
-class OllamaClientAdapter(LLMClient):
-    """Adapter for an Ollama server via its OpenAI-compatible API.
-
-    Talks to a locally (or remotely) hosted Ollama instance through the
-    ``openai`` client. The endpoint is read from ``OLLAMA_BASE_URL`` and the
-    model from ``AGENT_MODEL``.
+@MODELS.register("openai")
+class OpenAIClientAdapter(LLMClient):
+    """Adapter for an OpenAI-compatible chat-completions endpoint.
 
     Args:
         model_name: Model override; falls back to ``AGENT_MODEL`` when omitted.
-        base_url: Endpoint override; falls back to ``OLLAMA_BASE_URL`` and then
-            the local default when omitted.
-        backend: Accepted for a uniform adapter signature; ignored (Ollama has no
-            backend variants).
+            There is no default: a self-hosted server's model ids are not
+            guessable.
+        base_url: Endpoint override; falls back to ``OPENAI_BASE_URL``, and to
+            the OpenAI API when neither is set.
+        max_tokens: Per-response output token cap; falls back to
+            ``AGENT_MAX_TOKENS`` and then a sane default when omitted.
+        backend: Accepted for a uniform adapter signature; ignored.
 
     Raises:
         MissingDependencyError: If the ``openai`` SDK is not installed.
+        ConfigError: If no model is configured.
     """
 
     def __init__(
         self,
         model_name: str | None = None,
         base_url: str | None = None,
+        max_tokens: int | None = None,
         *,
         backend: str | None = None,
     ) -> None:
         if AsyncOpenAI is None:
-            raise MissingDependencyError("the Ollama model adapter", "openai")
+            raise MissingDependencyError("the OpenAI model adapter", "openai")
 
+        model_name = model_name or get_env("AGENT_MODEL")
         if not model_name:
-            model_name = get_env("AGENT_MODEL", _DEFAULT_MODEL)
-        if not base_url:
-            base_url = get_env("OLLAMA_BASE_URL", _DEFAULT_BASE_URL)
+            raise ConfigError("the openai provider has no default model; set AGENT_MODEL")
 
-        # Ollama supports optional key-based auth (e.g. a remote/hosted endpoint);
-        # use ``AGENT_API_KEY`` when set, else a dummy the local server ignores
-        # (the openai client requires a non-empty key).
-        api_key = get_env("AGENT_API_KEY") or "ollama"
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # The client requires a non-empty key even when the server ignores it.
+        api_key = first_env("AGENT_API_KEY", "OPENAI_API_KEY") or "unused"
+        self.client = AsyncOpenAI(base_url=base_url or get_env("OPENAI_BASE_URL"), api_key=api_key)
         self.model_name = model_name
+        self.max_tokens = max_tokens or get_int("AGENT_MAX_TOKENS", _DEFAULT_MAX_TOKENS)
 
     async def generate_content(
         self,
@@ -82,7 +85,11 @@ class OllamaClientAdapter(LLMClient):
         system_instruction: str | None,
     ) -> Any:
         messages = self._convert_to_openai_messages(contents, system_instruction)
-        kwargs: dict[str, Any] = {"model": self.model_name, "messages": messages}
+        kwargs: dict[str, Any] = {
+            "model": self.model_name,
+            "max_completion_tokens": self.max_tokens,
+            "messages": messages,
+        }
         if tools:
             kwargs["tools"] = tools
         return await self.client.chat.completions.create(**kwargs)
