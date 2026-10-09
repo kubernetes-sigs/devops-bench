@@ -293,6 +293,33 @@ def test_capabilities_granted_matches_agent_config_even_after_env_mutation(
     assert config.capabilities.mcp is not None
 
 
+def test_mcp_is_off_unless_requested(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An MCP server alone does not bind it: the default arm is the baseline, and it says so."""
+    monkeypatch.setenv("AGENT_MCP_SERVER", "/path/to/mcp")
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    with caplog.at_level(logging.WARNING):
+        config = harness.build_agent_config()
+
+    assert harness.use_mcp is False
+    assert config.capabilities.mcp is None
+    assert "AGENT_MCP_SERVER is set but BENCH_USE_MCP is off" in caplog.text
+
+
+def test_mcp_off_is_quiet_without_a_server(
+    isolated_env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A plain baseline run (no server configured) does not warn."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+
+    with caplog.at_level(logging.WARNING):
+        harness.build_agent_config()
+
+    assert "BENCH_USE_MCP is off" not in caplog.text
+
+
 def test_run_one_returns_failed_record_when_get_deployer_raises(
     isolated_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

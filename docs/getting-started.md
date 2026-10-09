@@ -82,7 +82,7 @@ The CLI takes a tasks directory or a single `task.yaml` and runs each task throu
 | `AGENT_TARGET` | Binary path for CLI harnesses. |
 | `AGENT_TIMEOUT_SEC` | Wall-clock cap per external call (default 600). |
 | `AGENT_MAX_TURNS` | Tool-use loop cap for the `api` harness. |
-| `AGENT_MCP_SERVER` | Shell-quoted MCP server command granted to the agent. |
+| `AGENT_MCP_SERVER` | Shell-quoted MCP server command granted to the agent. Bound only when `BENCH_USE_MCP=true`; otherwise the run is the baseline arm and a warning is logged. |
 | `AGENT_ALLOWED_TOOLS` | CSV of pre-approved tool names. |
 | `AGENT_SKILLS_PATHS` | CSV of skill directories granted to the agent. |
 | `AGENT_RULES_TEXT` | Rules text injected into the agent's context. |

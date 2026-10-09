@@ -40,7 +40,8 @@ set -euo pipefail
 # shellcheck source=scripts/bastion/_matrix_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_matrix_lib.sh"
 
-MATRIX_AGENT_CONFIGS="${MATRIX_AGENT_CONFIGS:-oc+mcp+skills}"
+# Baseline by default: an augmentation token changes setup_id, so ask for it explicitly.
+MATRIX_AGENT_CONFIGS="${MATRIX_AGENT_CONFIGS:-oc}"
 
 # Translate an agent-config preset into the refactored arm's env (';'-joined).
 # <type> is oc|gcli; +mcp / +skills toggle capabilities.

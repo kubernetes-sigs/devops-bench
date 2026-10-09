@@ -223,7 +223,8 @@ class DefaultEvalHarness(Harness):
         self.no_infra = no_infra if no_infra is not None else get_bool("BENCH_NO_INFRA")
         self.no_teardown = no_teardown if no_teardown is not None else get_bool("BENCH_NO_TEARDOWN")
         # Resolved once so capabilities and scoring observe the same value.
-        self.use_mcp: bool = get_bool("BENCH_USE_MCP", True)
+        # Off by default: the flag alone adds the mcp token to setup_id, moving the row to another arm.
+        self.use_mcp: bool = get_bool("BENCH_USE_MCP", False)
         # Cheating detection writes ``cheating_report`` (read by IntegrityMetric,
         # which gates a flagged run to zero). Rules load here so a bad path fails loud.
         self.cheat_detect: bool = get_bool("BENCH_CHEAT_DETECT", True)
@@ -348,6 +349,11 @@ class DefaultEvalHarness(Harness):
         else:
             # Dropped so the agent's tools gate and the metrics' ``use_mcp`` agree.
             mcp_servers = ()
+            if env_caps.mcp_servers:
+                _log.warning(
+                    "AGENT_MCP_SERVER is set but BENCH_USE_MCP is off; "
+                    "running the baseline arm without MCP"
+                )
 
         return AllCapabilities(
             mcp_servers=mcp_servers,
