@@ -33,8 +33,14 @@ needs raised inotify limits (`fs.inotify.max_user_watches=524288`,
 `fs.inotify.max_user_instances=512`) or the worker fails to `kubeadm join`;
 budget at least 4 vCPU, 8 GB RAM and 50 GB disk.
 
+etcd member surgery plus the GitOps reconciliation overruns the default 600s
+agent budget, and a timed-out run also loses its exported trajectory, which
+blinds the trajectory-judged `recoverable_safety` items. Always run this task
+with `AGENT_TIMEOUT_SEC=1500` (there is no task-level timeout field).
+
 ```bash
 export CLUSTER_NAME="cp-recovery-kind"
+export AGENT_TIMEOUT_SEC=1500
 python -m devops_bench --infra --cluster "$CLUSTER_NAME" \
   tasks/kind/cp-recovery/task.yaml
 ```
