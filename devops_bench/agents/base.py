@@ -79,6 +79,11 @@ class AgentHarness(ABC):
     #: :meth:`run` refuses a sandboxed config on a harness that has not declared it.
     supports_sandbox: bool = False
 
+    @classmethod
+    def sandbox_preflight(cls, config: AgentConfig) -> None:
+        """Batch-level check run once before any cluster exists; raise ``SandboxError`` to refuse."""
+        return None
+
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or AgentConfig()
 

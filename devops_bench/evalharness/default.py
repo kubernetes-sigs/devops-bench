@@ -778,6 +778,8 @@ class DefaultEvalHarness(Harness):
                     "the sandbox seam; refusing the whole batch rather than "
                     "provisioning a cluster per task just to fail each one"
                 )
+            if agent_cls is not None:
+                agent_cls.sandbox_preflight(self._agent_config)
         if sandboxed:
             # Reap containers a killed harness never got to reap, before this
             # batch's own exist; the sweep itself applies the BENCH_PARALLEL gate.

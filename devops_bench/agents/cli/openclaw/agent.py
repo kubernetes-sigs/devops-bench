@@ -29,6 +29,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -88,6 +89,65 @@ def _ensure_node_on_path(env_overlay: dict[str, str]) -> dict[str, str]:
 
 
 _log = get_logger("agents.cli.openclaw.agent")
+
+# Version token in ``oc --version`` output (``OpenClaw 2026.9.1-beta.1 (1d96e5a)``).
+_OC_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?")
+# The image probe only prints a version, so it gets no network and no capabilities.
+_IMAGE_PROBE_FLAGS = (
+    "--rm",
+    "--network=none",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges=true",
+)
+
+
+def _probe_oc_version(
+    argv: list[str], *, timeout: float, extra_env: dict[str, str] | None = None
+) -> str | None:
+    """Run ``argv`` and parse an ``oc`` version from its stdout, or ``None`` when inconclusive."""
+    try:
+        completed = run(argv, check=False, timeout=timeout, extra_env=extra_env)
+    except (OSError, SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = _OC_VERSION_RE.search(completed.stdout or "")
+    return match[0] if match else None
+
+
+def _host_oc_version(oc_bin: str) -> str | None:
+    """Version of the host ``oc``, probed with nvm's Node on ``PATH`` like the export calls."""
+    return _probe_oc_version([oc_bin, "--version"], timeout=30, extra_env=_ensure_node_on_path({}))
+
+
+def _image_oc_version(image: str) -> str | None:
+    """Version of the sandbox image's ``oc``; the timeout covers a cold pull."""
+    argv = ["docker", "run", *_IMAGE_PROBE_FLAGS, "--entrypoint", "oc", image, "--version"]
+    return _probe_oc_version(argv, timeout=300)
+
+
+def _oc_version_skew(oc_bin: str, image: str) -> str | None:
+    """Describe a host/image ``oc`` mismatch, or ``None`` on a match or an inconclusive probe."""
+    host = _host_oc_version(oc_bin)
+    image_version = _image_oc_version(image)
+    # Equality is a proxy: oc's real check is its state-store schema version, which it never prints.
+    if host is None or image_version is None or host == image_version:
+        return None
+    return (
+        f"oc version skew: host oc is {host} but sandbox image {image} ships oc "
+        f"{image_version}. The post-run trajectory export would fail against the "
+        "session store the container wrote, leaving an empty trajectory. Align "
+        "the host oc with the image before running."
+    )
+
+
+def _resolve_oc_bin(config: AgentConfig) -> str:
+    """Pick the ``oc`` binary path from ``config.target`` or fall back to ``~/bin/oc`` then ``oc``."""
+    if config.target:
+        return os.path.expanduser(config.target)
+    candidate = os.path.expanduser("~/bin/oc")
+    return candidate if os.path.exists(candidate) else "oc"
+
 
 # The image ships its own oc on PATH; a host binary path means nothing inside.
 _CONTAINER_OC_BIN = "oc"
@@ -408,12 +468,14 @@ class OpenClawAgent(AgentHarness):
         self.mcp_servers = caps.mcp_servers
         self.skills = caps.skills
 
-    def _resolve_oc_bin(self) -> str:
-        """Pick the ``oc`` binary path from config or fall back."""
-        if self.config.target:
-            return os.path.expanduser(self.config.target)
-        candidate = os.path.expanduser("~/bin/oc")
-        return candidate if os.path.exists(candidate) else "oc"
+    @classmethod
+    def sandbox_preflight(cls, config: AgentConfig) -> None:
+        """Refuse the batch before any cluster exists when the host and image ``oc`` versions differ."""
+        if config.sandbox is None or not config.sandbox.image:
+            return
+        skew = _oc_version_skew(_resolve_oc_bin(config), config.sandbox.image)
+        if skew:
+            raise SandboxError(skew)
 
     def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
         """Run ``oc agent --local`` with the granted capabilities and extract the trajectory.
@@ -422,7 +484,8 @@ class OpenClawAgent(AgentHarness):
         method owns) first: ``state/`` with skills, and ``openclaw.json`` for MCP.
         """
         caps = self.config.capabilities
-        oc_bin = self._resolve_oc_bin()
+        oc_bin = _resolve_oc_bin(self.config)
+
         final_prompt = _prepend_rules(caps.rules.text, prompt)
 
         with agent_workdir(workspace_path, prefix="oc-run-") as workdir:

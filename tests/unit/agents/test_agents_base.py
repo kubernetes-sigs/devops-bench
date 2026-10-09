@@ -81,6 +81,14 @@ def test_safety_net_covers_a_none_result_from_execute() -> None:
     assert "AttributeError" in result.errors[0]
 
 
+def test_sandbox_preflight_defaults_to_a_no_op() -> None:
+    class _Stub(AgentHarness):
+        def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+            return AgentResult(output="")
+
+    assert _Stub.sandbox_preflight(AgentConfig()) is None
+
+
 def test_config_default_is_a_fresh_agent_config() -> None:
     class _Stub(AgentHarness):
         def _execute(self, prompt: str, workspace_path=None) -> AgentResult:

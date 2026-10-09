@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
-from devops_bench.agents import AGENTS, AgentHarness
+from devops_bench.agents import AGENTS, AgentConfig, AgentHarness
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import ConfigError, MissingDependencyError
 from devops_bench.core.score_keys import INTEGRITY_CATASTROPHIC_KEY, OUTCOME_SCORE_KEY
@@ -1085,6 +1085,42 @@ def test_run_fails_fast_on_an_unmigrated_agent_when_sandboxed(
             harness.run([task])
     finally:
         AGENTS._items.pop("fake-unmigrated", None)  # noqa: SLF001
+
+
+def test_run_calls_the_agent_preflight_before_any_cluster_exists(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent's ``sandbox_preflight`` refusal aborts the batch before provisioning."""
+    from devops_bench.core import SandboxError
+
+    seen: list[AgentConfig] = []
+
+    class _PreflightAgent(AgentHarness):
+        supports_sandbox = True
+
+        @classmethod
+        def sandbox_preflight(cls, config: AgentConfig) -> None:
+            seen.append(config)
+            raise SandboxError("host/image mismatch")
+
+        def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+            raise NotImplementedError
+
+    def never_provision(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a refused batch must not provision a cluster")
+
+    monkeypatch.setattr(harness_default, "get_deployer", never_provision)
+    AGENTS.register("fake-preflight")(_PreflightAgent)
+    try:
+        harness = _sandboxed_harness(monkeypatch, tmp_path, agent_type="fake-preflight")
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        with pytest.raises(SandboxError, match="host/image mismatch"):
+            harness.run([task])
+    finally:
+        AGENTS._items.pop("fake-preflight", None)  # noqa: SLF001
+    assert len(seen) == 1
+    assert seen[0].sandbox is not None
+    assert seen[0].sandbox.image == "agent-sandbox:test"
 
 
 def test_exempt_only_batch_skips_the_sandbox_preflight(

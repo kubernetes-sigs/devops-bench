@@ -121,6 +121,9 @@ A harness that shells out must also work inside the agent sandbox (see
 - Set `supports_sandbox = True` once every agent-owned call goes through the
   seam. Until then, `run()` refuses to start the harness while
   `BENCH_AGENT_SANDBOX` is set.
+- Override the `sandbox_preflight(config)` classmethod for a check that should
+  refuse the whole batch before any cluster exists (a host/image version
+  mismatch, say). Raise `SandboxError`; the default is a no-op.
 - Translate host paths that cross the boundary, in argv or env, with
   `sandbox.container_path(self.config.sandbox.workspace, path)`. Keep the host
   path for reading results back; the workspace is a bind mount. See

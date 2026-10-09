@@ -45,7 +45,8 @@ from devops_bench.agents.cli.openclaw.agent import (
     _oc_model_id,
 )
 from devops_bench.agents.cli.openclaw.parsing import _pick_session_key, _strip_ansi
-from devops_bench.core.errors import ConfigError, SubprocessError
+from devops_bench.agents.sandbox import SandboxSpec
+from devops_bench.core.errors import ConfigError, SandboxError, SubprocessError
 
 
 def _events(*entries: dict) -> str:
@@ -391,6 +392,92 @@ def test_execute_falls_back_to_stdout_when_bundle_has_no_answer(
 
     result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert result.output == "bare stdout answer"
+
+
+def test_oc_version_probes_parse_real_output_and_send_the_right_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both probes parse the one-line ``OpenClaw <ver> (<sha>)`` output, the host probe
+    carries the nvm PATH overlay, and the image probe runs locked down."""
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+        calls.append((argv, kwargs))
+        if argv[0] == "docker":
+            return _make_subprocess_result("OpenClaw 2026.9.6 (eb377ac)\n", "", 0)
+        return _make_subprocess_result("OpenClaw 2026.9.1-beta.1 (1d96e5a)\n", "", 0)
+
+    monkeypatch.setattr(oc_mod, "run", fake_run)
+    monkeypatch.setattr(oc_mod, "_ensure_node_on_path", lambda env: {"PATH": "/nvm/bin"})
+    assert oc_mod._host_oc_version("/usr/local/bin/oc") == "2026.9.1-beta.1"
+    assert oc_mod._image_oc_version("img") == "2026.9.6"
+    host_argv, host_kw = calls[0]
+    assert host_argv == ["/usr/local/bin/oc", "--version"]
+    assert host_kw["extra_env"] == {"PATH": "/nvm/bin"}
+    image_argv, _ = calls[1]
+    assert image_argv[:2] == ["docker", "run"]
+    assert {"--network=none", "--cap-drop=ALL"} <= set(image_argv)
+    assert image_argv[-4:] == ["--entrypoint", "oc", "img", "--version"]
+
+
+def _raise_oserror(argv: list[str], **kwargs: Any) -> SimpleNamespace:
+    raise OSError("docker not installed")
+
+
+def test_oc_version_probe_is_inconclusive_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wrapper without ``--version``, or a docker failure, yields None rather than raising."""
+    monkeypatch.setattr(
+        oc_mod, "run", lambda argv, **kw: _make_subprocess_result("no version here", "", 1)
+    )
+    assert oc_mod._host_oc_version("oc-a") is None
+    monkeypatch.setattr(oc_mod, "run", _raise_oserror)
+    assert oc_mod._image_oc_version("img-a") is None
+
+
+def test_oc_version_skew_names_both_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oc_mod, "_host_oc_version", lambda b: "2026.8.2")
+    monkeypatch.setattr(oc_mod, "_image_oc_version", lambda i: "2026.9.1-beta.1")
+    skew = oc_mod._oc_version_skew("oc", "img")
+    assert skew is not None
+    assert "2026.8.2" in skew
+    assert "2026.9.1-beta.1" in skew
+
+
+def test_oc_version_skew_silent_on_match_or_inconclusive_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(oc_mod, "_host_oc_version", lambda b: "2026.9.1-beta.1")
+    monkeypatch.setattr(oc_mod, "_image_oc_version", lambda i: "2026.9.1-beta.1")
+    assert oc_mod._oc_version_skew("oc", "img") is None
+    monkeypatch.setattr(oc_mod, "_host_oc_version", lambda b: None)
+    assert oc_mod._oc_version_skew("oc", "img") is None
+
+
+def test_sandbox_preflight_refuses_a_skewed_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A skewed host/image pair raises ``SandboxError`` at batch start, so the harness refuses
+    the batch unscored instead of provisioning a cluster per task to produce an empty trajectory."""
+    seen: list[tuple[str, str]] = []
+
+    def fake_skew(oc_bin: str, image: str) -> str:
+        seen.append((oc_bin, image))
+        return "oc version skew: boom"
+
+    monkeypatch.setattr(oc_mod, "_oc_version_skew", fake_skew)
+    config = AgentConfig(target="~/tools/oc", sandbox=SandboxSpec(image="img"))
+    with pytest.raises(SandboxError, match="version skew"):
+        OpenClawAgent.sandbox_preflight(config)
+    assert seen == [(os.path.expanduser("~/tools/oc"), "img")]
+
+
+def test_sandbox_preflight_skips_the_probe_when_unsandboxed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def never_probe(oc_bin: str, image: str) -> str | None:
+        raise AssertionError("no sandbox image, so nothing to compare against")
+
+    monkeypatch.setattr(oc_mod, "_oc_version_skew", never_probe)
+    OpenClawAgent.sandbox_preflight(AgentConfig(target="oc"))
+    OpenClawAgent.sandbox_preflight(AgentConfig(target="oc", sandbox=SandboxSpec(image="")))
 
 
 def test_execute_records_when_sessions_returns_no_rows(
