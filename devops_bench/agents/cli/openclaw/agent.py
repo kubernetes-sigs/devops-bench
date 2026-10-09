@@ -52,6 +52,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 )
 from devops_bench.agents.shared.vertex_env import vertex_project
 from devops_bench.core import SubprocessError, get_logger
+from devops_bench.core.config import get_bool, get_env, get_int
 from devops_bench.core.errors import ConfigError, SandboxError
 from devops_bench.core.model_providers import resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
@@ -122,6 +123,9 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
         "api": "anthropic-messages",
         "baseUrl": "https://aiplatform.googleapis.com",
         "apiKey": "gcp-vertex-credentials",
+    },
+    "openai": {
+        "api": "openai-completions",
     },
 }
 # node-fetch->native-fetch loader shim (see :func:`_write_node_fetch_shim`), under
@@ -210,13 +214,19 @@ def _build_model_override(config: AgentConfig) -> dict:
     which would race across runs. The provider comes from the resolved model id,
     so one id works on any pinned backend; auth flows from the env, not from here.
 
+    An ``openai`` model is always registered when ``OPENAI_BASE_URL`` is set, with
+    that ``baseUrl``: a self-hosted server's model ids are never in oc's catalog.
+    ``AGENT_CONTEXT_WINDOW``, ``AGENT_MODEL_REASONING``, and ``AGENT_MAX_TOKENS``
+    populate ``contextWindow``, ``reasoning``, and ``maxTokens`` on the entry when set.
+
     Returns an empty dict when no model is set or oc already knows it.
     """
     model_id = _oc_model_id(config)
     if not model_id:
         return {}
     provider, _, bare = model_id.partition("/")
-    if bare not in _CATALOG_OVERRIDES.get(provider, frozenset()):
+    base_url = get_env("OPENAI_BASE_URL") if provider == "openai" else None
+    if bare not in _CATALOG_OVERRIDES.get(provider, frozenset()) and not base_url:
         return {}
     # Fail loud rather than ship a transport-less entry (see _PROVIDER_TRANSPORT).
     if provider not in _PROVIDER_TRANSPORT:
@@ -226,7 +236,18 @@ def _build_model_override(config: AgentConfig) -> dict:
             f"{', '.join(sorted(_PROVIDER_TRANSPORT))})"
         )
     provider_entry: dict = dict(_PROVIDER_TRANSPORT[provider])
-    provider_entry["models"] = [{"id": bare, "name": bare}]
+    if base_url:
+        provider_entry["baseUrl"] = base_url.rstrip("/")
+    model_entry: dict[str, str | int | bool] = {"id": bare, "name": bare}
+    context_window = get_int("AGENT_CONTEXT_WINDOW")
+    if context_window is not None:
+        model_entry["contextWindow"] = context_window
+    if get_bool("AGENT_MODEL_REASONING"):
+        model_entry["reasoning"] = True
+    max_tokens = get_int("AGENT_MAX_TOKENS")
+    if max_tokens is not None:
+        model_entry["maxTokens"] = max_tokens
+    provider_entry["models"] = [model_entry]
     return {
         "models": {"providers": {provider: provider_entry}},
         # Allowlist ``provider/id`` for the agent's per-run ``--model`` override.
