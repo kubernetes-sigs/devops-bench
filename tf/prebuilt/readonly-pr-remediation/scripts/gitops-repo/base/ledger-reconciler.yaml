@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ledger-reconciler
+  namespace: accounts
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Replace
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: ledger-reconciler
+              image: busybox:1.36
+              command: ["sh", "-c", "echo Reconciling ledger with $DB_ENDPOINT && sleep 5"]
+              resources:
+                requests:
+                  memory: "64Mi"
+                limits:
+                  memory: "128Mi"
+              env:
+                - name: DB_ENDPOINT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: ledger-db-config
+                      key: host

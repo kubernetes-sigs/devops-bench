@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: accounts-limits
+  namespace: accounts
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        memory: "256Mi"
+      default:
+        memory: "512Mi"
