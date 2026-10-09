@@ -48,6 +48,25 @@ resource "google_project_iam_member" "bastion" {
   member   = "serviceAccount:${google_service_account.bastion.email}"
 }
 
+locals {
+  has_gpu = var.model != "" || var.gpu_type != ""
+  image = coalesce(
+    var.image,
+    local.has_gpu
+    ? "ubuntu-os-accelerator-images/ubuntu-accelerator-2404-amd64-with-nvidia-580"
+    : "ubuntu-os-cloud/ubuntu-2404-lts-amd64",
+  )
+}
+
+# Grant the bastion SA access to the Hugging Face token secret for gated models.
+resource "google_secret_manager_secret_iam_member" "hf_token" {
+  count     = var.hf_token_secret != "" ? 1 : 0
+  project   = var.project_id
+  secret_id = var.hf_token_secret
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.bastion.email}"
+}
+
 # Allow SSH only from Google's IAP TCP-forwarding range, scoped to this VM's tag.
 resource "google_compute_firewall" "allow_iap_ssh" {
   name    = "allow-iap-ssh-${var.name}"
@@ -75,8 +94,33 @@ resource "google_compute_instance" "bastion" {
 
   boot_disk {
     initialize_params {
-      image = var.image
+      image = local.image
       size  = var.boot_disk_gb
+      type  = var.boot_disk_type
+    }
+  }
+
+  lifecycle {
+    # The provider's DiskImageDiffSuppress only matches ubuntu-*-lts families,
+    # so ubuntu-accelerator-* family shorthand otherwise forces replacement.
+    ignore_changes = [boot_disk[0].initialize_params[0].image]
+  }
+
+  depends_on = [google_secret_manager_secret_iam_member.hf_token]
+
+  # GCE requires TERMINATE host maintenance on every GPU-attached VM.
+  dynamic "scheduling" {
+    for_each = local.has_gpu ? [1] : []
+    content {
+      on_host_maintenance = "TERMINATE"
+    }
+  }
+
+  dynamic "guest_accelerator" {
+    for_each = var.gpu_type != "" ? [1] : []
+    content {
+      type  = var.gpu_type
+      count = var.gpu_count
     }
   }
 
@@ -98,9 +142,21 @@ resource "google_compute_instance" "bastion" {
 
   # Block project-wide SSH keys so access relies solely on instance-level keys
   # injected via IAP/OS Login, limiting blast radius if project keys leak.
-  metadata = {
-    block-project-ssh-keys = "true"
-  }
+  metadata = merge(
+    {
+      block-project-ssh-keys = "true"
+    },
+    var.model != "" ? {
+      sglang-model            = var.model
+      sglang-served-name      = var.served_name != "" ? var.served_name : var.model
+      sglang-tp               = tostring(var.tp)
+      sglang-context-length   = var.context_length != null ? tostring(var.context_length) : ""
+      sglang-reasoning-parser = var.reasoning_parser
+      sglang-tool-call-parser = var.tool_call_parser
+      sglang-image            = var.sglang_image
+      sglang-hf-token-secret  = var.hf_token_secret
+    } : {},
+  )
 
   metadata_startup_script = file("${path.module}/startup.sh")
 }

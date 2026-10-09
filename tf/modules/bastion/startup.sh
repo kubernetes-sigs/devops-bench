@@ -104,6 +104,111 @@ curl -fsSL https://astral.sh/uv/install.sh -o "$tmp_uv"
 env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh "$tmp_uv"
 rm -f "$tmp_uv"
 
+SGLANG_MODEL="$(curl -fsSL -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/attributes/sglang-model 2>/dev/null || true)"
+if [ -n "$SGLANG_MODEL" ]; then
+  echo "==> SGLang runtime (Docker + NVIDIA Container Toolkit + sglang.service)"
+  if ! command -v docker >/dev/null 2>&1; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /usr/share/keyrings/docker.gpg
+    # shellcheck disable=SC1091
+    echo "deb [arch=${ARCH} signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update -y
+    apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io
+  fi
+
+  mkdir -p /etc/docker
+  if [ -s /etc/docker/daemon.json ]; then
+    jq '. + {"mtu": 1460}' /etc/docker/daemon.json > /etc/docker/daemon.json.tmp
+    mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
+  else
+    echo '{"mtu": 1460}' > /etc/docker/daemon.json
+  fi
+
+  if ! command -v nvidia-ctk >/dev/null 2>&1; then
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+      > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt-get update -y
+    apt-get install -y --no-install-recommends nvidia-container-toolkit
+  fi
+  nvidia-ctk runtime configure --runtime=docker
+  systemctl restart docker
+
+  cat > /usr/local/bin/sglang-env <<'EOS'
+#!/usr/bin/env bash
+set -euo pipefail
+meta() {
+  curl -fsSL -H "Metadata-Flavor: Google" \
+    "http://169.254.169.254/computeMetadata/v1/instance/attributes/$1" 2>/dev/null || true
+}
+model="$(meta sglang-model)"
+if [ -z "$model" ]; then
+  echo "sglang-model metadata key is empty" >&2
+  exit 1
+fi
+served="$(meta sglang-served-name)"
+tp="$(meta sglang-tp)"
+ctx="$(meta sglang-context-length)"
+rparser="$(meta sglang-reasoning-parser)"
+tparser="$(meta sglang-tool-call-parser)"
+image="$(meta sglang-image)"
+secret="$(meta sglang-hf-token-secret)"
+
+extra=()
+[ -n "$served" ] && extra+=(--served-model-name "$served")
+[ -n "$ctx" ] && extra+=(--context-length "$ctx")
+[ -n "$rparser" ] && extra+=(--reasoning-parser "$rparser")
+[ -n "$tparser" ] && extra+=(--tool-call-parser "$tparser")
+
+hf_token=""
+if [ -n "$secret" ]; then
+  project="$(curl -fsSL -H "Metadata-Flavor: Google" http://169.254.169.254/computeMetadata/v1/project/project-id)"
+  hf_token="$(gcloud secrets versions access latest --secret="$secret" --project="$project" | tr -d '\r\n')"
+fi
+
+umask 0077
+mkdir -p /run/sglang /var/cache/huggingface
+cat > /run/sglang/env <<EOT
+SGLANG_IMAGE=${image:-lmsysorg/sglang:v0.5.20}
+MODEL=${model}
+TP=${tp:-1}
+EXTRA_ARGS=${extra[*]:-}
+HF_TOKEN=${hf_token}
+EOT
+EOS
+  chmod 0755 /usr/local/bin/sglang-env
+
+  cat > /etc/systemd/system/sglang.service <<'EOS'
+[Unit]
+Description=SGLang OpenAI-compatible model server
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+RuntimeDirectory=sglang
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/local/bin/sglang-env
+ExecStartPre=-/usr/bin/docker rm -f sglang
+EnvironmentFile=-/run/sglang/env
+ExecStart=/usr/bin/docker run --rm --name sglang --gpus all --shm-size 16g \
+  -p 127.0.0.1:8000:8000 -v /var/cache/huggingface:/root/.cache/huggingface \
+  -e HF_TOKEN ${SGLANG_IMAGE} python3 -m sglang.launch_server \
+  --model-path ${MODEL} --tp ${TP} --enable-cache-report \
+  --disable-prefill-cuda-graph --host 0.0.0.0 --port 8000 $EXTRA_ARGS
+ExecStop=-/usr/bin/docker stop sglang
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOS
+
+  systemctl daemon-reload
+  systemctl enable sglang.service
+  systemctl start --no-block sglang.service
+fi
+
 echo "==> versions"
 tofu version || true
 node --version || true
