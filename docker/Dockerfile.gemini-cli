@@ -42,15 +42,13 @@ ARG KUBECTL_SHA256_ARM64=39c98bca82875d9a9ddfb6f3c5ab17c3f78ea0801230683e538a67d
 ARG HELM_SHA256_AMD64=1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
 ARG HELM_SHA256_ARM64=f14e804dfee240f55525b667488fe9adca349e63e00c9af634c0beb1421ac310
 
-# Modern Git comes from backports for reftable support; ripgrep and jq are
-# what the agent's own search and JSON handling reach for.
-RUN echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
+# ripgrep and jq are what the agent's own search and JSON handling reach for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        git \
         jq \
         ripgrep \
-    && apt-get install -y -t bookworm-backports --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
 # kubectl and helm: resolve the arch from the build platform rather than
