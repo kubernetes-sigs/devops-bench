@@ -29,6 +29,7 @@ from devops_bench.agents import capabilities
 from devops_bench.agents import config as agents_config
 from devops_bench.agents.cli.antigravity import agent as agy_mod
 from devops_bench.agents.cli.antigravity import parsing
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError
 from devops_bench.core import subprocess as devops_subprocess
 from devops_bench.core.errors import ConfigError, SubprocessError
 
@@ -1016,6 +1017,36 @@ def test_agy_cli_agent_forwards_extra_flags(
 
 @mock.patch.object(pathlib.Path, "home")
 @mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_fails_the_run_when_a_granted_mcp_server_is_unreachable(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable MCP server aborts the run before ``agy`` is invoked."""
+
+    def boom(*_a: object, **_kw: object) -> dict[str, tuple[str, ...]]:
+        raise McpUnreachableError("MCP server 'gke' is unreachable: could not launch server")
+
+    mock_home.return_value = tmp_path
+    monkeypatch.setattr(agy_mod, "preflight_mcp", boom)
+    caps = capabilities.AllCapabilities(
+        mcp_servers=(capabilities.McpBinding(name="gke", command=("gke-mcp",)),)
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy", model="gemini-3.5-flash", capabilities=caps
+    )
+
+    result = agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert result.errors == [
+        "MCP preflight failed: MCP server 'gke' is unreachable: could not launch server"
+    ]
+    assert all(call.args[0][0] == "gcloud" for call in mock_run.call_args_list)
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
 def test_agy_cli_agent_discovers_gemini_dir_conversations_fallback(
     mock_run: mock.MagicMock,
     mock_home: mock.MagicMock,
@@ -1107,3 +1138,178 @@ def test_agy_cli_agent_discovers_parent_conversations_when_nested_is_empty(
     )
     assert len(result.trajectory) == 2
     assert result.errors == []
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_probes_with_the_run_env_and_workdir(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``preflight_mcp`` receives the harness env overlay and workspace directory."""
+    seen: dict[str, object] = {}
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(args=["agy"], returncode=0, stdout="ok", stderr="")
+
+    def record(_bindings: object, **kw: object) -> None:
+        cwd = kw["cwd"]
+        assert isinstance(cwd, pathlib.Path)
+        seen.update(kw, cwd_exists=cwd.is_dir())
+
+    monkeypatch.setattr(agy_mod, "preflight_mcp", record)
+    caps = capabilities.AllCapabilities(
+        mcp_servers=(capabilities.McpBinding(name="gke", command=("gke-mcp",)),)
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy", model="gemini-3.5-flash", api_key="secret-key", capabilities=caps
+    )
+
+    agy_mod.AgyCliAgent(config)._execute("run task")
+
+    base_env = seen["base_env"]
+    assert isinstance(base_env, dict)
+    assert base_env["GEMINI_API_KEY"] == "secret-key"
+    assert base_env["PATH"] == os.environ["PATH"]
+    assert seen["cwd_exists"]
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_probes_every_granted_binding(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every granted ``McpBinding`` is passed verbatim to ``preflight_mcp``."""
+    seen: dict[str, object] = {}
+    mock_home.return_value = tmp_path
+    mock_run.return_value = SimpleNamespace(args=["agy"], returncode=0, stdout="ok", stderr="")
+
+    def record(bindings: object, **kw: object) -> None:
+        seen["bindings"] = bindings
+        seen["kwargs"] = kw
+
+    monkeypatch.setattr(agy_mod, "preflight_mcp", record)
+    bindings = (
+        capabilities.McpBinding(name="gke", command=("gke-mcp",)),
+        capabilities.McpBinding(
+            name="facts",
+            command=("uvx", "facts-server"),
+            env=(("FACTS_TOKEN", "${FACTS_TOKEN}"),),
+            cwd="/srv/facts",
+        ),
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=capabilities.AllCapabilities(mcp_servers=bindings),
+    )
+
+    agy_mod.AgyCliAgent(config)._execute("run task")
+
+    assert seen["bindings"] == bindings
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert set(kwargs) == {"base_env", "cwd", "timeout"}
+
+
+@mock.patch.object(pathlib.Path, "home")
+def test_agy_cli_agent_skips_host_mcp_preflight_when_sandboxed(
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandboxed runs skip host-side ``preflight_mcp`` so container-only servers can run."""
+    from devops_bench.agents import sandbox as sandbox_mod
+
+    mock_home.return_value = tmp_path
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    probe_calls: list[object] = []
+
+    def fail_probe(*args: object, **_kwargs: object) -> dict[str, tuple[str, ...]]:
+        probe_calls.append(args)
+        raise AssertionError("preflight_mcp must not run on the host when sandboxed")
+
+    monkeypatch.setattr(agy_mod, "preflight_mcp", fail_probe)
+    caps = capabilities.AllCapabilities(
+        mcp_servers=(capabilities.McpBinding(name="time", command=("uvx",)),)
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        capabilities=caps,
+        sandbox=sandbox_mod.SandboxSpec(image="img", workspace=str(workspace)),
+    )
+    agent = agy_mod.AgyCliAgent(config)
+
+    def fake_run_agent_cmd(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        cwd = kwargs["cwd"]
+        assert isinstance(cwd, pathlib.Path)
+        _write_sample_transcript(cwd)
+        return SimpleNamespace(args=list(cmd), returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(agent, "run_agent_cmd", fake_run_agent_cmd)
+
+    result = agent._execute("run task", workspace_path=workspace)
+
+    assert result.errors == []
+    assert probe_calls == []
+
+
+@mock.patch.object(pathlib.Path, "home")
+@mock.patch.object(devops_subprocess, "run")
+def test_agy_cli_agent_bounds_preflight_timeout_by_budget_and_excludes_preflight_from_latency(
+    mock_run: mock.MagicMock,
+    mock_home: mock.MagicMock,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preflight shares ``timeout_sec`` and does not inflate ``result.latency``."""
+    mock_home.return_value = tmp_path
+    timeouts: list[tuple[str, float | None]] = []
+    clock = [100.0]
+
+    def fake_monotonic() -> float:
+        return clock[0]
+
+    def fake_preflight(*_args: object, **kwargs: object) -> dict[str, tuple[str, ...]]:
+        timeout = kwargs.get("timeout")
+        assert timeout is None or isinstance(timeout, float)
+        timeouts.append(("probe", timeout))
+        clock[0] += 4.0
+        return {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        if argv[0] == "gcloud":
+            return SimpleNamespace(args=argv, returncode=1, stdout="", stderr="")
+        timeout = kwargs.get("timeout")
+        assert timeout is None or isinstance(timeout, float)
+        timeouts.append(("turn", timeout))
+        clock[0] += 2.5
+        cwd = kwargs.get("cwd")
+        assert isinstance(cwd, pathlib.Path)
+        _write_sample_transcript(cwd)
+        return SimpleNamespace(args=argv, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(agy_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(agy_mod, "preflight_mcp", fake_preflight)
+    mock_run.side_effect = fake_run
+    caps = capabilities.AllCapabilities(
+        mcp_servers=(capabilities.McpBinding(name="time", command=("uvx",)),)
+    )
+    config = agents_config.AgentConfig(
+        target="/bin/agy",
+        model="gemini-3.5-flash",
+        timeout_sec=10.0,
+        capabilities=caps,
+    )
+
+    result = agy_mod.AgyCliAgent(config).run("run task")
+
+    assert result.errors == []
+    assert timeouts == [("probe", 10.0), ("turn", 6.0)]
+    assert result.latency == pytest.approx(2.5)

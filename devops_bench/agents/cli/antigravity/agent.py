@@ -31,6 +31,11 @@ from devops_bench.agents import result as agents_result
 from devops_bench.agents import sandbox as sandbox_mod
 from devops_bench.agents.cli.antigravity import parsing
 from devops_bench.agents.shared import cli_capabilities
+from devops_bench.agents.shared.mcp_probe import (
+    PROBE_TIMEOUT_SEC,
+    McpUnreachableError,
+    preflight_mcp,
+)
 from devops_bench.agents.shared.vertex_env import vertex_location, vertex_project
 from devops_bench.core import subprocess as devops_subprocess
 
@@ -375,6 +380,33 @@ class AgyCliAgent(base.AgentHarness):
                     json.dumps(settings, indent=2), encoding="utf-8"
                 )
 
+            turn_timeout = self.config.timeout_sec
+            if any(b.command for b in caps.mcp_servers):
+                if self.config.sandbox is not None:
+                    _log.info("Skipping host MCP preflight for sandboxed run")
+                else:
+                    deadline = (
+                        None
+                        if self.config.timeout_sec is None
+                        else time.monotonic() + self.config.timeout_sec
+                    )
+                    probe_timeout = (
+                        PROBE_TIMEOUT_SEC
+                        if deadline is None
+                        else min(PROBE_TIMEOUT_SEC, max(0.0, deadline - time.monotonic()))
+                    )
+                    try:
+                        preflight_mcp(
+                            caps.mcp_servers,
+                            base_env={**os.environ, **env_overlay},
+                            cwd=workdir,
+                            timeout=probe_timeout,
+                        )
+                    except McpUnreachableError as exc:
+                        return agents_result.AgentResult.errored(f"MCP preflight failed: {exc}")
+                    if deadline is not None:
+                        turn_timeout = max(0.0, deadline - time.monotonic())
+
             # Copy, not symlink: agy refreshes the token in place, and a shared
             # symlink would race across concurrent runs.
             real_home = pathlib.Path.home()
@@ -393,6 +425,7 @@ class AgyCliAgent(base.AgentHarness):
 
             completed: devops_subprocess.CompletedProcess | None = None
             timeout_exc: core.SubprocessError | None = None
+            turn_start = time.monotonic()
             try:
                 # Through the sandbox seam: containerised when config.sandbox is
                 # set, otherwise identical to the previous direct run(...).
@@ -401,7 +434,7 @@ class AgyCliAgent(base.AgentHarness):
                     extra_env=env_overlay,
                     cwd=workdir,
                     check=False,
-                    timeout=self.config.timeout_sec,
+                    timeout=turn_timeout,
                     host_run=devops_subprocess.run,
                 )
             except core.SubprocessError as exc:
@@ -417,6 +450,7 @@ class AgyCliAgent(base.AgentHarness):
                 # in a workspace retained for artifact collection.
                 if copied_token is not None:
                     copied_token.unlink(missing_ok=True)
+            turn_latency = time.monotonic() - turn_start
 
             # Look for conversations under <gemini_dir>/antigravity-cli/ or <gemini_dir>/
             conv_dir = agy_config_dir / "conversations"
@@ -512,5 +546,6 @@ class AgyCliAgent(base.AgentHarness):
             trajectory=trajectory,
             tokens=tokens,
             errors=errors,
+            latency=turn_latency,
             metadata=metadata,
         )

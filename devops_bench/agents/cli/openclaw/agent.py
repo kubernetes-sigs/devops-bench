@@ -32,6 +32,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,11 @@ from devops_bench.agents.shared.cli_capabilities import (
     agent_workdir,
     build_mcp_servers,
     materialize_skills,
+)
+from devops_bench.agents.shared.mcp_probe import (
+    PROBE_TIMEOUT_SEC,
+    McpUnreachableError,
+    preflight_mcp,
 )
 from devops_bench.agents.shared.vertex_env import vertex_project
 from devops_bench.core import SubprocessError, get_logger
@@ -71,8 +77,15 @@ def _node_version_key(bin_path: str) -> tuple[int, ...]:
 def _ensure_node_on_path(env_overlay: dict[str, str]) -> dict[str, str]:
     """Return ``env_overlay`` with the nvm Node bin dir prepended to ``PATH``.
 
-    The extraction calls run ``oc`` without a shell, so on an nvm-managed host
-    they would exit 127 and empty the trajectory. No-op when Node is on ``PATH``.
+    The agent *turn* runs ``oc`` through a bash command that sources nvm, but
+    direct subprocesses — the MCP reachability probe (``preflight_mcp``) and the
+    ``oc sessions`` / ``export-trajectory`` extraction calls — spawn without a
+    shell. On an nvm-managed host Node/npx are not on the inherited ``PATH``, so
+    those calls fail with ``FileNotFoundError`` or ``exit 127: /usr/bin/env:
+    'node': No such file or directory``. Prepend the nvm Node bin dir so every
+    direct subprocess finds Node too.
+
+    No-op when Node is already discoverable on ``PATH`` or nvm is absent.
     """
     if shutil.which("node"):
         return env_overlay
@@ -428,10 +441,37 @@ class OpenClawAgent(AgentHarness):
         with agent_workdir(workspace_path, prefix="oc-run-") as workdir:
             state_dir = workdir / _OPENCLAW_STATE_DIRNAME
             state_dir.mkdir(parents=True, exist_ok=True)
+            env_overlay = _build_env(self.config)
+
+            turn_timeout = self.config.timeout_sec
+            if any(b.command for b in caps.mcp_servers):
+                if self.config.sandbox is not None:
+                    _log.info("Skipping host MCP preflight for sandboxed run")
+                else:
+                    deadline = (
+                        None
+                        if self.config.timeout_sec is None
+                        else time.monotonic() + self.config.timeout_sec
+                    )
+                    probe_timeout = (
+                        PROBE_TIMEOUT_SEC
+                        if deadline is None
+                        else min(PROBE_TIMEOUT_SEC, max(0.0, deadline - time.monotonic()))
+                    )
+                    try:
+                        preflight_mcp(
+                            caps.mcp_servers,
+                            base_env={**os.environ, **_ensure_node_on_path(env_overlay)},
+                            cwd=workdir,
+                            timeout=probe_timeout,
+                        )
+                    except McpUnreachableError as exc:
+                        return AgentResult.errored(f"MCP preflight failed: {exc}")
+                    if deadline is not None:
+                        turn_timeout = max(0.0, deadline - time.monotonic())
 
             materialize_skills(state_dir / _OPENCLAW_SKILLS_DIRNAME, caps.skills.paths)
 
-            env_overlay = _build_env(self.config)
             env_overlay["OPENCLAW_STATE_DIR"] = str(state_dir)
 
             config_payload = _build_openclaw_config(self.config, caps.mcp_servers)
@@ -457,6 +497,7 @@ class OpenClawAgent(AgentHarness):
 
             command = _build_local_command(self.config, final_prompt, self.agent_name, agent_oc_bin)
 
+            turn_start = time.monotonic()
             # TODO(follow-up): a timeout SIGKILLs only the bash child and orphans the
             # oc/kubectl/MCP tree; run in its own process group and killpg instead.
             try:
@@ -466,7 +507,7 @@ class OpenClawAgent(AgentHarness):
                     cwd=str(workdir),
                     extra_env=agent_env,
                     check=False,
-                    timeout=self.config.timeout_sec,
+                    timeout=turn_timeout,
                     host_run=run,
                 )
             except SubprocessError:
@@ -474,6 +515,7 @@ class OpenClawAgent(AgentHarness):
                 return AgentResult.errored(f"oc agent timed out after {self.config.timeout_sec}s")
             except OSError as exc:
                 return AgentResult.errored(f"oc binary unavailable: {exc}")
+            turn_latency = time.monotonic() - turn_start
 
             stdout_text = _strip_ansi(completed.stdout or "")
             errors: list[str] = []
@@ -497,6 +539,7 @@ class OpenClawAgent(AgentHarness):
             trajectory=trajectory,
             tokens=tokens,
             errors=errors,
+            latency=turn_latency,
             metadata=metadata,
         )
 

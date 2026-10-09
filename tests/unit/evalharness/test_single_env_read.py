@@ -44,6 +44,7 @@ def isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "BENCH_AGENT_TYPE",
         "BENCH_NO_INFRA",
         "AGENT_MCP_SERVER",
+        "AGENT_MCP_CONFIG",
         "AGENT_ALLOWED_TOOLS",
         "AGENT_SKILLS_PATHS",
         "AGENT_RULES_TEXT",

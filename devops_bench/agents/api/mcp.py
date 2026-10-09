@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Any
@@ -37,6 +38,12 @@ class MCPClient:
 
     Attributes:
         server_path: Command used to launch the MCP server over stdio.
+        env: Extra environment variables merged over the SDK's safe default
+            environment (``HOME``, ``LOGNAME``, ``PATH``, ``SHELL``, ``TERM``,
+            ``USER``), or ``None`` to leave that default untouched. Callers pass
+            only the binding's declared keys so the full runner environment is
+            never leaked to the server.
+        cwd: Directory to spawn the server in, or ``None`` for the caller's.
         session: The active ``ClientSession`` once entered, else ``None``.
 
     Raises:
@@ -45,8 +52,16 @@ class MCPClient:
         ValueError: If ``server_path`` is empty or whitespace-only (on enter).
     """
 
-    def __init__(self, server_path: str) -> None:
+    def __init__(
+        self,
+        server_path: str,
+        *,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> None:
         self.server_path = server_path
+        self.env = None if env is None else dict(env)
+        self.cwd = cwd or None
         self.exit_stack = AsyncExitStack()
         self.session: Any = None
 
@@ -70,7 +85,12 @@ class MCPClient:
                 "MCP server_path is empty; set AGENT_TARGET/MCP_SERVER_PATH to the "
                 "MCP server command."
             )
-        server_params = StdioServerParameters(command=parts[0], args=parts[1:])
+        # ``stdio_client`` merges ``env`` over ``get_default_environment()``
+        # (``HOME``, ``LOGNAME``, ``PATH``, ``SHELL``, ``TERM``, ``USER``), so
+        # callers pass only the binding's declared keys (or ``None``).
+        server_params = StdioServerParameters(
+            command=parts[0], args=parts[1:], env=self.env, cwd=self.cwd
+        )
         # Unwind anything already entered (e.g. the spawned server subprocess)
         # when a later setup step fails — __aexit__ never runs if __aenter__
         # raises, so cleanup must happen here.

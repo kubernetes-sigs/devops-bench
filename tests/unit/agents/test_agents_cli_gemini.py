@@ -42,6 +42,7 @@ from devops_bench.agents.cli.gemini_cli.agent import (
     _build_settings,
 )
 from devops_bench.agents.sandbox import SandboxSpec
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError
 from devops_bench.agents.shared.vertex_env import VERTEX_LOCATION_ENVS, VERTEX_PROJECT_ENVS
 from devops_bench.core.errors import ConfigError, SubprocessError
 from devops_bench.core.model_providers import ProviderSpec
@@ -991,3 +992,297 @@ def test_execute_forwards_extra_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     GeminiCliAgent(cfg).run("p")
     assert "--flag1" in captured["argv"]
     assert "--opt=val" in captured["argv"]
+
+
+def test_execute_fails_the_run_when_a_granted_mcp_server_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable MCP server aborts the run before the prompt is executed."""
+    invoked: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        invoked.append(argv)
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(
+                stdout="○ gke: gke-mcp (stdio) - Disconnected\n", stderr="", returncode=0
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    def fake_preflight(*_args, **_kwargs):
+        raise McpUnreachableError("MCP server 'gke' is unreachable: could not launch server")
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert result.errors == [
+        "MCP preflight failed: the CLI does not report these servers as connected: "
+        "gke (Disconnected); MCP server 'gke' is unreachable: could not launch server"
+    ]
+    assert [a[1:3] for a in invoked] == [["mcp", "list"]], "the prompt must never run"
+
+
+def test_execute_fails_the_run_when_the_cli_cannot_see_a_granted_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server reachable via stdio probe but disabled in ``gemini mcp list`` fails the run."""
+    invoked: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        invoked.append(argv)
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(
+                stdout="Configured MCP servers:\n\n\u25cb gke: gke-mcp  (stdio) - Disabled\n",
+                stderr="",
+                returncode=0,
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert result.errors == [
+        "MCP preflight failed: the CLI does not report these servers as connected: gke (Disabled)"
+        "; every server answered a direct stdio probe, so this is a CLI-side gate (folder trust)"
+    ]
+    assert [a[1:3] for a in invoked] == [["mcp", "list"]], "the prompt must never run"
+
+
+def test_execute_proceeds_when_the_cli_reports_every_server_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connected server clears the gate and the prompt runs."""
+
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(
+                stdout="\u2713 gke: gke-mcp  (stdio) - Connected\n", stderr="", returncode=0
+            )
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert result.errors == []
+    assert result.output == "Done."
+
+
+def test_execute_fails_when_a_granted_server_is_absent_from_the_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server missing from ``gemini mcp list`` output fails with ``<not listed>``."""
+
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(stdout="no servers here", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert "gke (<not listed>)" in result.errors[0]
+
+
+def test_execute_fails_when_the_mcp_listing_command_exits_non_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-zero ``gemini mcp list`` surfaces the CLI's stderr instead of ``<not listed>``."""
+
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(
+                stdout="",
+                stderr="SyntaxError: Unexpected token } in JSON at position 42\n",
+                returncode=1,
+            )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert "'gemini mcp list' exited 1" in result.errors[0]
+    assert "Unexpected token }" in result.errors[0]
+    assert "<not listed>" not in result.errors[0]
+
+
+def test_execute_skips_the_cli_gate_when_no_mcp_is_granted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-MCP arm pays no extra CLI invocation."""
+    invoked: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        invoked.append(argv)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+
+    result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+
+    assert result.errors == []
+    assert all(a[1:3] != ["mcp", "list"] for a in invoked)
+
+
+def test_execute_reads_the_mcp_listing_from_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``gemini mcp list`` status rows printed on stderr are still parsed."""
+
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(
+                stdout="",
+                stderr="Configured MCP servers:\n\n✓ gke: gke-mcp  (stdio) - Connected\n",
+                returncode=0,
+            )
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert result.errors == []
+
+
+def test_execute_bounds_preflight_timeouts_by_budget_and_excludes_preflight_from_latency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preflight checks share ``timeout_sec`` and do not inflate ``result.latency``."""
+    timeouts: list[tuple[str, float | None]] = []
+    clock = [100.0]
+
+    def fake_monotonic() -> float:
+        return clock[0]
+
+    def fake_run(argv, **kwargs):
+        if argv[1:3] == ["mcp", "list"]:
+            timeouts.append(("mcp_list", kwargs.get("timeout")))
+            clock[0] += 4.0
+            return SimpleNamespace(
+                stdout="✓ gke: gke-mcp (stdio) - Connected\n", stderr="", returncode=0
+            )
+        timeouts.append(("turn", kwargs.get("timeout")))
+        clock[0] += 2.5
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=10.0, capabilities=caps)).run(
+        "p"
+    )
+
+    assert result.errors == []
+    assert timeouts == [("mcp_list", 10.0), ("turn", 6.0)]
+    assert result.latency == pytest.approx(2.5)
+
+
+def test_execute_bounds_probe_failure_detail_timeout_by_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Diagnostic ``preflight_mcp`` gets at most the remaining ``timeout_sec`` budget."""
+    probe_timeouts: list[float | None] = []
+    clock = [50.0]
+
+    def fake_monotonic() -> float:
+        return clock[0]
+
+    def fake_run(argv, **kwargs):
+        clock[0] += 7.0
+        return SimpleNamespace(
+            stdout="○ gke: gke-mcp (stdio) - Disconnected\n", stderr="", returncode=0
+        )
+
+    def fake_preflight(*_args, **kwargs):
+        probe_timeouts.append(kwargs.get("timeout"))
+        raise McpUnreachableError("MCP server 'gke' is unreachable: boom")
+
+    monkeypatch.setattr(gemini_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=10.0, capabilities=caps)).run(
+        "p"
+    )
+
+    assert result.has_errors()
+    assert probe_timeouts == [pytest.approx(3.0)]
+
+
+def test_execute_fails_when_duplicate_rows_disagree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later disconnected row for the same server overrides an earlier connected row."""
+
+    def fake_run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        if argv[1:3] == ["mcp", "list"]:
+            return SimpleNamespace(
+                stdout=(
+                    "Configured MCP servers:\n\n"
+                    "✓ time: uvx mcp-server-time (stdio) - Connected\n"
+                    "✗ time: uvx mcp-server-time (stdio) - Disconnected\n"
+                ),
+                stderr="",
+                returncode=0,
+            )
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="time", command=("uvx",)),))
+
+    result = GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert result.has_errors()
+    assert "time (Connected/Disconnected)" in result.errors[0]
+
+
+def test_execute_skips_host_mcp_preflight_when_sandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sandboxed runs skip host-side ``gemini mcp list`` and ``preflight_mcp``."""
+    host_calls: list[list[str]] = []
+    probe_calls: list[object] = []
+
+    def fail_host_run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        host_calls.append(list(argv))
+        raise AssertionError(f"unexpected host subprocess call: {argv}")
+
+    def fail_probe(*args: object, **_kwargs: object) -> dict[str, tuple[str, ...]]:
+        probe_calls.append(args)
+        raise AssertionError("preflight_mcp must not run on the host when sandboxed")
+
+    monkeypatch.setattr(gemini_mod, "run", fail_host_run)
+    monkeypatch.setattr(gemini_mod, "preflight_mcp", fail_probe)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="time", command=("uvx",)),))
+    agent = GeminiCliAgent(
+        AgentConfig(
+            target="/host/bin/gemini",
+            api_key="test-key",
+            capabilities=caps,
+            sandbox=SandboxSpec(image="img", workspace=tmp_path),
+        )
+    )
+    monkeypatch.setattr(
+        agent,
+        "run_agent_cmd",
+        lambda *_a, **_kw: SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0),
+    )
+
+    result = agent.run("p", workspace_path=tmp_path)
+
+    assert result.errors == []
+    assert host_calls == []
+    assert probe_calls == []

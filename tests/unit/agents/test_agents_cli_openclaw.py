@@ -45,6 +45,7 @@ from devops_bench.agents.cli.openclaw.agent import (
     _oc_model_id,
 )
 from devops_bench.agents.cli.openclaw.parsing import _pick_session_key, _strip_ansi
+from devops_bench.agents.shared.mcp_probe import McpUnreachableError
 from devops_bench.core.errors import ConfigError, SubprocessError
 
 
@@ -1126,3 +1127,120 @@ def test_latest_models_have_per_run_catalog_and_transport(
     assert entry["models"] == [{"id": model, "name": model}]
     assert entry["api"] == transport
     assert override["agents"]["defaults"]["models"] == {f"{provider}/{model}": {}}
+
+
+def test_execute_fails_the_run_when_a_granted_mcp_server_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unreachable MCP server aborts the run before ``oc`` is invoked."""
+    invoked: list[Any] = []
+
+    def fake_bash(command: str, **kwargs: Any) -> SimpleNamespace:
+        invoked.append(command)
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    def fake_preflight(*_args: Any, **_kwargs: Any) -> dict:
+        raise McpUnreachableError("MCP server 'gke' is unreachable: could not launch server")
+
+    _install_oc_run(monkeypatch, fake_bash)
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gke", command=("gke-mcp",)),))
+
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
+
+    assert invoked == [], "oc must not run once preflight has failed"
+    assert result.errors == [
+        "MCP preflight failed: MCP server 'gke' is unreachable: could not launch server"
+    ]
+
+
+def test_execute_prepends_nvm_node_to_path_for_mcp_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``preflight_mcp`` receives bindings, cwd, and ``PATH`` with nvm node prepended."""
+    nvm_bin = tmp_path / ".nvm" / "versions" / "node" / "v22.1.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    monkeypatch.setenv("NVM_DIR", str(tmp_path / ".nvm"))
+    monkeypatch.setattr(oc_mod.shutil, "which", lambda _cmd: None)
+    captured: dict[str, Any] = {}
+
+    def fake_preflight(
+        bindings: Any, *, base_env: Any = None, cwd: Any = None, **_kw: Any
+    ) -> dict[str, tuple[str, ...]]:
+        captured["bindings"] = bindings
+        captured["base_env"] = dict(base_env or {})
+        captured["cwd_exists"] = cwd is not None and Path(cwd).is_dir()
+        return {}
+
+    def fake_bash(_command: str, **_kwargs: Any) -> SimpleNamespace:
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    _install_oc_run(monkeypatch, fake_bash, _empty_sessions_run)
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fake_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="gh", command=("npx", "srv")),))
+
+    OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
+
+    assert captured["bindings"] == caps.mcp_servers
+    assert captured["cwd_exists"] is True
+    assert captured["base_env"]["PATH"].split(os.pathsep)[0] == str(nvm_bin)
+
+
+def test_execute_skips_host_mcp_preflight_when_sandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Sandboxed runs skip host-side ``preflight_mcp`` so container-only servers can run."""
+    probe_calls: list[Any] = []
+
+    def fail_preflight(*args: Any, **_kwargs: Any) -> dict[str, tuple[str, ...]]:
+        probe_calls.append(args)
+        raise AssertionError("preflight_mcp must not run on the host when sandboxed")
+
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fail_preflight)
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="time", command=("uvx",)),))
+    agent = OpenClawAgent(_sandboxed(tmp_path, api_key="k", provider="google", capabilities=caps))
+    monkeypatch.setattr(
+        agent,
+        "run_agent_cmd",
+        lambda *_a, **_kw: _make_subprocess_result(stdout="ok", returncode=0),
+    )
+    monkeypatch.setattr(oc_mod, "run", _bundle_writer(SAMPLE_EVENTS))
+
+    result = agent.run("p", workspace_path=tmp_path)
+
+    assert result.errors == []
+    assert probe_calls == []
+
+
+def test_execute_bounds_preflight_timeout_by_budget_and_excludes_preflight_from_latency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Preflight shares ``timeout_sec`` and does not inflate ``result.latency``."""
+    timeouts: list[tuple[str, float | None]] = []
+    clock = [100.0]
+
+    def fake_monotonic() -> float:
+        return clock[0]
+
+    def fake_preflight(*_args: Any, **kwargs: Any) -> dict[str, tuple[str, ...]]:
+        timeouts.append(("probe", kwargs.get("timeout")))
+        clock[0] += 3.5
+        return {}
+
+    def fake_bash(_cmd: str, **kwargs: Any) -> SimpleNamespace:
+        timeouts.append(("turn", kwargs.get("timeout")))
+        clock[0] += 2.0
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    monkeypatch.setattr(oc_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(oc_mod, "preflight_mcp", fake_preflight)
+    _install_oc_run(monkeypatch, fake_bash, _bundle_writer(SAMPLE_EVENTS))
+    caps = AllCapabilities(mcp_servers=(McpBinding(name="time", command=("uvx",)),))
+
+    result = OpenClawAgent(
+        AgentConfig(target=str(tmp_path / "oc"), timeout_sec=10.0, capabilities=caps)
+    ).run("p")
+
+    assert result.errors == []
+    assert timeouts == [("probe", 10.0), ("turn", 6.5)]
+    assert result.latency == pytest.approx(2.0)

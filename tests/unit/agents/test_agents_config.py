@@ -14,6 +14,11 @@
 
 """Unit tests for devops_bench.agents.config."""
 
+import json
+from pathlib import Path
+
+import pytest
+
 from devops_bench.agents.capabilities import (
     AgentRules,
     AllCapabilities,
@@ -21,6 +26,7 @@ from devops_bench.agents.capabilities import (
     SkillBinding,
 )
 from devops_bench.agents.config import AgentConfig
+from devops_bench.core import ConfigError
 
 
 def test_default_construction_uses_safe_defaults() -> None:
@@ -166,3 +172,242 @@ def test_from_env_reads_the_sandbox_opt_in_and_image() -> None:
     # from_env yields the skeletal spec; the eval harness completes it per task.
     assert cfg.sandbox.workspace is None
     assert cfg.sandbox.kubeconfig is None
+
+
+def test_from_env_parses_inline_mcp_config_document() -> None:
+    """``AGENT_MCP_CONFIG`` accepts the standard ``mcpServers`` document inline,
+    so a one-off run needs no config file."""
+    env = {
+        "AGENT_MCP_CONFIG": json.dumps(
+            {
+                "mcpServers": {
+                    "time": {"command": "uvx", "args": ["mcp-server-time"]},
+                    "github": {
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-github"],
+                        "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"},
+                        "cwd": "/work",
+                        "tools": ["create_issue"],
+                    },
+                }
+            }
+        )
+    }
+    cfg = AgentConfig.from_env(env)
+
+    assert cfg.capabilities.mcp_servers == (
+        McpBinding(name="time", command=("uvx", "mcp-server-time")),
+        McpBinding(
+            name="github",
+            command=("npx", "-y", "@modelcontextprotocol/server-github"),
+            env=(("GITHUB_TOKEN", "${GITHUB_TOKEN}"),),
+            cwd="/work",
+            tools=("create_issue",),
+        ),
+    )
+
+
+def test_from_env_reads_mcp_config_from_a_path(tmp_path: Path) -> None:
+    """A value that is not inline JSON is a path — the form the matrix uses,
+    where a quoted JSON blob would not survive its ';'-joined, eval'd env."""
+    config = tmp_path / "bench-mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"time": {"command": "uvx"}}}))
+
+    cfg = AgentConfig.from_env({"AGENT_MCP_CONFIG": str(config)})
+
+    assert cfg.capabilities.mcp_servers == (McpBinding(name="time", command=("uvx",)),)
+
+
+def test_from_env_mcp_config_servers_inherit_allowed_tools() -> None:
+    """A server declaring no ``tools`` inherits ``AGENT_ALLOWED_TOOLS``."""
+    env = {
+        "AGENT_MCP_CONFIG": '{"mcpServers": {"time": {"command": "uvx"}}}',
+        "AGENT_ALLOWED_TOOLS": "a,b",
+    }
+    cfg = AgentConfig.from_env(env)
+
+    assert cfg.capabilities.mcp_servers[0].tools == ("a", "b")
+
+
+def test_from_env_mcp_config_takes_precedence_over_the_shorthand() -> None:
+    """``AGENT_MCP_SERVER`` is the single-server shorthand; the document wins."""
+    env = {
+        "AGENT_MCP_CONFIG": '{"mcpServers": {"time": {"command": "uvx"}}}',
+        "AGENT_MCP_SERVER": "/bin/gke-mcp",
+    }
+    cfg = AgentConfig.from_env(env)
+
+    assert [b.name for b in cfg.capabilities.mcp_servers] == ["time"]
+
+
+def test_from_env_blank_mcp_config_falls_back_to_the_shorthand() -> None:
+    """An empty value is treated as unset, not as a malformed document."""
+    env = {"AGENT_MCP_CONFIG": "  ", "AGENT_MCP_SERVER": "/bin/gke-mcp"}
+    cfg = AgentConfig.from_env(env)
+
+    assert cfg.capabilities.mcp_servers == (McpBinding(name="default", command=("/bin/gke-mcp",)),)
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ("{not json", "not valid JSON"),
+        ('{"servers": {}}', "no 'mcpServers' key"),
+        ('{"mcpServers": []}', "must be a JSON object"),
+        ('{"mcpServers": {"a": "uvx"}}', "must be a JSON object"),
+        ('{"mcpServers": {"a": {}}}', "command: Field required"),
+        ('{"mcpServers": {"a": {"command": ""}}}', "command: String should have at least 1"),
+        # An all-whitespace command clears min_length but splits to no argv at
+        # all, which is the same "MCP arm with no MCP server" the empty case is
+        # rejected for.
+        (
+            '{"mcpServers": {"a": {"command": "   "}}}',
+            "command: String should match pattern",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "args": "x"}}}',
+            "args: Input should be a valid list",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "env": {"K": 1}}}}',
+            "env.K: Input should be a valid string",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "tools": "x"}}}',
+            "tools: Input should be a valid list",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "cwd": ["/tmp"]}}}',
+            "cwd: Input should be a valid string",
+        ),
+        # A falsy wrong type must raise rather than be coerced or fall back to
+        # the default: dropping a declared env or argv leaves the server
+        # launching without its credential, and the probe then reports the wrong
+        # cause. Strict mode is what makes ``0`` an error instead of ``"0"``.
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "args": 0}}}',
+            "args: Input should be a valid list",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "env": 0}}}',
+            "env: Input should be a valid dict",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "cwd": 0}}}',
+            "cwd: Input should be a valid string",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "arg": ["-y"]}}}',
+            "arg: Extra inputs are not permitted",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "type": "http"}}}',
+            "only 'stdio' MCP servers are supported",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "url": "https://example.com/mcp"}}}',
+            "HTTP/remote MCP servers",
+        ),
+        (
+            '{"mcpServers": {"a": {"command": "uvx", "disabled": true}}}',
+            "no enabled servers",
+        ),
+        ('{"mcpServers": {}}', "is empty"),
+        ("/nonexistent/bench-mcp.json", "unreadable"),
+    ],
+)
+def test_from_env_malformed_mcp_config_fails_loud(raw: str, match: str) -> None:
+    with pytest.raises(ConfigError, match=match):
+        AgentConfig.from_env({"AGENT_MCP_CONFIG": raw})
+
+
+def test_from_env_mcp_config_skips_disabled_servers_and_accepts_standard_fields() -> None:
+    raw = json.dumps(
+        {
+            "mcpServers": {
+                "off": {"command": "uvx", "disabled": True},
+                "on": {
+                    "command": "uvx",
+                    "args": ["mcp-server-time"],
+                    "type": "stdio",
+                    "timeout": 30,
+                    "trust": True,
+                    "description": "time server",
+                    "alwaysAllow": ["get_time"],
+                },
+            }
+        }
+    )
+    cfg = AgentConfig.from_env({"AGENT_MCP_CONFIG": raw})
+
+    assert cfg.capabilities.mcp_servers == (
+        McpBinding(name="on", command=("uvx", "mcp-server-time")),
+    )
+
+
+def test_from_env_mcp_config_file_must_hold_a_json_object(tmp_path: Path) -> None:
+    config = tmp_path / "bench-mcp.json"
+    config.write_text("[]")
+
+    with pytest.raises(ConfigError, match="must be a JSON object"):
+        AgentConfig.from_env({"AGENT_MCP_CONFIG": str(config)})
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GITHUB_TOKEN",
+        "API_KEY",
+        "OPENAI_APIKEY",
+        "CLIENT_SECRET",
+        "DB_PASSWORD",
+        "DB_PASSWD",
+        "GCP_CREDENTIALS",
+        "GH_PAT",
+        "MCP_AUTH",
+        "BASIC_AUTH",
+        "AUTH",
+    ],
+)
+def test_from_env_rejects_a_literal_in_a_secret_named_mcp_env_value(key: str) -> None:
+    raw = json.dumps({"mcpServers": {"gh": {"command": "uvx", "env": {key: "ghp_literal"}}}})
+
+    with pytest.raises(ConfigError, match="looks like a credential"):
+        AgentConfig.from_env({"AGENT_MCP_CONFIG": raw})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("GITHUB_TOKEN", "${GITHUB_TOKEN}"),
+        ("AUTH_HEADER_KEY", "Bearer ${GH_PAT}"),
+        ("AUTH_TYPE", "bearer"),
+        ("AUTH_METHOD", "oauth2"),
+        ("NODE_ENV", "production"),
+        ("MAX_TOKENS", "4096"),
+        ("KEYSTONE_REGION", "us-east-1"),
+        ("TOKENIZER", "cl100k_base"),
+        ("DISPATCH_MODE", "async"),
+        ("PATH", "/usr/local/bin:/usr/bin"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp/service-account.json"),
+        ("SSH_KEY_PATH", "keys/id_ed25519"),
+        ("TOKEN_FILE", "token.txt"),
+        ("AUTH_URL", "https://auth.example.com"),
+        ("CREDENTIALS_DIR", "creds"),
+        ("API_KEY", ""),
+    ],
+)
+def test_from_env_accepts_references_and_non_secret_literals(key: str, value: str) -> None:
+    raw = json.dumps({"mcpServers": {"gh": {"command": "uvx", "env": {key: value}}}})
+
+    cfg = AgentConfig.from_env({"AGENT_MCP_CONFIG": raw})
+
+    assert cfg.capabilities.mcp_servers[0].env == ((key, value),)
+
+
+def test_from_env_undecodable_mcp_config_file_raises_config_error(tmp_path: Path) -> None:
+    config = tmp_path / "bench-mcp.json"
+    config.write_bytes(b'{"mcpServers": {"a": {"command": "\xff\xfe"}}}')
+
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        AgentConfig.from_env({"AGENT_MCP_CONFIG": str(config)})
