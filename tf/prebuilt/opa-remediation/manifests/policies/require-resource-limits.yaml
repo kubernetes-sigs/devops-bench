@@ -4,6 +4,9 @@ apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
   name: require-resource-limits
+  # See disallow-privileged.yaml for why the safeguard selects by label.
+  labels:
+    devops-bench.io/policy: require-resource-limits
 spec:
   validationFailureAction: Audit
   background: true
