@@ -74,6 +74,7 @@ module "cluster" {
   node_count            = var.node_count
   machine_type          = var.machine_type
   node_image            = var.node_image
+  registry_mirrors      = var.registry_mirrors
   kubeconfig_path       = var.kubeconfig_path
   host_kubeconfig_path  = var.host_kubeconfig_path
   host_kubecontext      = var.host_kubecontext

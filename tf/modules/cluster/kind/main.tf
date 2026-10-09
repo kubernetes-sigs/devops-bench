@@ -21,6 +21,25 @@ terraform {
   }
 }
 
+locals {
+  # One containerd patch per mirrored host. A map iterates in lexical key order,
+  # so the rendered list is stable across plans and adding a second host never
+  # shows up as a diff on the first. Host and endpoint both go through
+  # jsonencode: TOML and Go-template quoting are not the same, and an endpoint
+  # carrying a quote or a backslash must not be able to break out of the string.
+  #
+  # registry.mirrors is the form containerd 1.x reads, which is what the pinned
+  # node image ships. containerd 2.x deprecates it for a hosts.toml config_path;
+  # that migration belongs with the node-image bump, not here.
+  registry_mirror_patches = [
+    for host, endpoints in var.registry_mirrors :
+    <<-EOT
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors.${jsonencode(host)}]
+      endpoint = [${join(", ", [for endpoint in endpoints : jsonencode(endpoint)])}]
+    EOT
+  ]
+}
+
 resource "kind_cluster" "default" {
   name            = var.cluster_name
   node_image      = var.node_image
@@ -32,6 +51,8 @@ resource "kind_cluster" "default" {
   kind_config {
     kind        = "Cluster"
     api_version = "kind.x-k8s.io/v1alpha4"
+
+    containerd_config_patches = local.registry_mirror_patches
 
     # pod_subnet matches Calico's default pool; with kind's 10.244.0.0/16 Calico
     # would hand out addresses kube-proxy does not expect.
