@@ -26,11 +26,29 @@ from devops_bench.core.context import RunContext
 
 __all__ = [
     "ChaosResult",
+    "ENV_LOCAL_PORT",
+    "ENV_SKIP_PORT_FORWARD",
+    "ENV_TARGET_DEPLOYMENT",
+    "ENV_TARGET_NAMESPACE",
     "Fault",
     "Trigger",
     "FAULTS",
     "TRIGGERS",
 ]
+
+# ``RunContext.env`` keys naming the workload a fault targets. The harness
+# writes them before :meth:`Fault.inject`; a fault that needs cluster
+# connectivity reads them and decides its own transport. Keeping the contract
+# here — rather than in one fault's module — lets the harness stay agnostic
+# about which fault it is scheduling.
+ENV_TARGET_DEPLOYMENT = "CHAOS_TARGET_DEPLOYMENT"
+ENV_TARGET_NAMESPACE = "CHAOS_TARGET_NAMESPACE"
+#: Set when the caller has no reachable cluster (smoke / unit runs), telling a
+#: fault to run against whatever target it already carries.
+ENV_SKIP_PORT_FORWARD = "CHAOS_SKIP_PORT_FORWARD"
+#: Per-run local port the harness allocates so concurrent runs do not contend
+#: on the local side of a port-forward.
+ENV_LOCAL_PORT = "CHAOS_LOCAL_PORT"
 
 #: Registry of concrete :class:`Fault` subclasses, keyed by their ``type``.
 #: ``entry_point_group`` lets external packages register a fault without
