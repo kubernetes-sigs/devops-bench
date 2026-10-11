@@ -454,6 +454,63 @@ def test_converge_none_round_bounds_mid_round_by_deadline() -> None:
     assert result.children[1].reason == "deadline exhausted before evaluation"
 
 
+# --- a skipped child keeps the verdict an earlier round already observed -------
+
+
+def test_converge_any_carries_an_earlier_rounds_verdict_past_the_deadline() -> None:
+    """A child skipped in the final round keeps the verdict earlier rounds observed.
+
+    ``poll_until`` clamps its last sleep to the time remaining and then polls
+    once more, so the final round of a never-converging entry always starts at
+    (or just past) the deadline: child 0 runs under the always-at-least-one
+    contract and every later child is skipped. Recording those as "error"
+    discarded every round that *had* observed them, so an ``any`` objective
+    whose children were all seen to fail reported "error" (never observed)
+    rather than "fail" -- which drops the entry out of the correctness
+    rollup instead of scoring it as the miss it was.
+    """
+    agent = VerifierAgent()
+    result = agent.wait_for_condition(
+        {"type": "any", "checks": [_leaf(False, "a"), _leaf(False, "b")]},
+        timeout_sec=0.3,
+    )
+
+    assert result.status == "fail"
+    assert [c.status for c in result.children] == ["fail", "fail"]
+    assert "carried forward" in result.children[1].reason
+
+
+def test_converge_none_carries_an_earlier_rounds_verdict_past_the_deadline() -> None:
+    """Mirrors the ``any`` case for ``none``.
+
+    A ``none`` round stops at the first child that passes, so reaching the
+    later children at all takes an earlier child that fails. Here round one
+    observes both; the final round re-runs "a", skips "b", and must keep
+    "b" as the observed pass that makes the group a definite "fail".
+    """
+    agent = VerifierAgent()
+    result = agent.wait_for_condition(
+        {"type": "none", "checks": [_leaf(False, "a"), _leaf(True, "b")]},
+        timeout_sec=0.3,
+    )
+
+    assert result.status == "fail"
+    assert [c.status for c in result.children] == ["fail", "pass"]
+    assert "carried forward" in result.children[1].reason
+
+
+def test_converge_any_does_not_carry_forward_an_earlier_error() -> None:
+    """An earlier "error" is no more of an observation than the skip itself."""
+    agent = VerifierAgent()
+    result = agent.wait_for_condition(
+        {"type": "any", "checks": [_leaf(False, "a"), _error_leaf("b")]},
+        timeout_sec=0.3,
+    )
+
+    assert result.status == "error"
+    assert result.children[1].status == "error"
+
+
 def test_assert_mode_any_evaluates_exactly_one_round() -> None:
     entry = _assert_entry({"type": "any", "checks": [_leaf(False, "a"), _leaf(False, "b")]})
     result = VerifierAgent().run_entry(entry, timeout_sec=30)
