@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: txn-db-tls
+  namespace: payment-processing
+  labels:
+    app: txn-processor
+type: Opaque
+data:
+  cert-status: ZXhwaXJlZA==
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJrVENCK3dJSkFMUmlNTEFoMExzd01BMEdDU3FHU0liM0RRRUJDd1VBTUJFeER6QU5CZ05WQkFNTUJuUjQKYmkxa1lqQWVGdzB5TmpBeE1ERXdNREF3TURCYUZ3MHlOakE1TVRJd01EQXdNREJhTUJFeER6QU5CZ05WQkFNTQpCblI0Ymkxa1lqQmNNQTBHQ1NxR1NJYjNEUUVCQVFVQUZ3QXdTd0pFQUxSMkI0eFZaMlc4c25GRTMwVkQyRWZOClhRSkRBRUVBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUIKQWdNQkFBRXdEUVlKS29aSWh2Y05BUUVMQlFBRFFRQmNBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0=
+  tls.key: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlCb2dJQkFBSkJBTFIyQjR4VloyVzhzbkZFMzBWRDJFZk5YUUpEQUVFQUFBQUFBQUFBQUFBQUFBQUFBQUFBCkFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUIKQWdNQkFBRUNRQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBPQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQ==
+  ca.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJqVENCOXdJSkFLUmlLS0FnMEtzd01BMEdDU3FHU0liM0RRRUJDd1VBTUJFeER6QU5CZ05WQkFNTUJtTmgKTFhKdmIzUXdIaGNOTWpVd01UQXhNREF3TURBd1doY05Namd3TVRBeE1EQXdNREF3V2pBUk1ROHdEUVlEVlFRRApEQVpqWVMxeWIyOTBNRnd3RFFZSktvWklodmNOQVFFQkJRQURTd0F3U0FKQkFNRnVCNHhWWjJXOHNuRkUzMFZECkFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUIKQWdNQkFBRXdEUVlKS29aSWh2Y05BUUVMQlFBRFFRQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0=
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: txn-processor-config
+  namespace: payment-processing
+  labels:
+    app: txn-processor
+data:
+  config.yaml: |
+    database_host: txn-db.payment-processing.svc
+    database_port: "5432"
+    tls_enabled: "true"
+    tls_cert_path: /etc/tls/client/tls.crt
+    tls_key_path: /etc/tls/client/tls.key
+    tls_ca_path: /etc/tls/client/ca.crt
+    # database_host: txn-db-v2.payment-processing.svc
+    max_connections: "50"
+    connection_timeout: "30s"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-procedures
+  namespace: payment-processing
+data:
+  procedure: |
+    PCI-DSS Incident Response Procedure (Rev 4.2)
+    ================================================
+
+    When a payment processing incident is detected:
+
+    1. Identify the affected services and capture the correlation ID from
+       the error output of the failing service.
+
+    2. Document the incident by creating a ConfigMap named "incident-record"
+       in the payment-processing namespace with the following fields:
+       - correlation-id: The PCI incident correlation ID from the error logs
+       - root-cause: A description of the root cause
+       - affected-services: Comma-separated list of affected service names
+       - remediation: Description of the remediation action taken
+
+    3. Apply the remediation and verify all affected services have recovered.
+
+    Note: Some services write extended diagnostic data to sidecar-accessible
+    shared storage (emptyDir volumes). If log output appears truncated after
+    container restarts, check for diagnostic files before applying fixes that
+    would destroy pod-local storage.
+
+    4. Notify the PCI compliance team via the #pci-incidents channel.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-cr-0821
+  namespace: payment-processing
+  labels:
+    type: incident-record
+data:
+  correlation-id: "PCI-INC-2026-08-0821"
+  root-cause: "Memory limit misconfigured for batch processing workload"
+  affected-services: "txn-processor,settlement-worker"
+  remediation: "Increased memory limit from 128Mi to 256Mi"
+  status: "resolved"
+  timestamp: "2026-08-21T15:30:00Z"
