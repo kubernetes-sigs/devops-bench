@@ -20,6 +20,7 @@ import importlib
 import logging
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -1825,3 +1826,12 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
     assert exempt == ["secret-rotation"]
+
+
+def test_resolve_model_name_prefers_the_judges_own_label() -> None:
+    """The judge's own label wins over its client's; no judge resolves to None."""
+    resolve = harness_default._resolve_model_name  # noqa: SLF001
+    client = SimpleNamespace(model_name="client-m")
+    assert resolve(SimpleNamespace(_model_name="judge-m", client=client)) == "judge-m"
+    assert resolve(SimpleNamespace(client=client)) == "client-m"
+    assert resolve(None) is None

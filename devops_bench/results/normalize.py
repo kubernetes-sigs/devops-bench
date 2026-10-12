@@ -27,6 +27,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple
 
 from devops_bench.core import score_keys
+from devops_bench.core.run_status import is_unscoreable_run, tripped_gates
 from devops_bench.results.row import CheckGroupRow, CheckRow, Manifest, ResultRow
 
 __all__ = [
@@ -407,8 +408,18 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
     for record in records:
         scores = record.get("scores")
         tokens = normalize_tokens(record.get("tokens"))
-        correctness = _first_score(scores, _CORRECTNESS_KEYS)
-        catastrophic_kinds = [k for k in _CATASTROPHIC_KEYS if extract_score(scores, k) == 0.0]
+        # Same rule as the composite: an unscoreable run publishes only tripped gates.
+        unscoreable = is_unscoreable_run(record)
+        correctness = None if unscoreable else _first_score(scores, _CORRECTNESS_KEYS)
+        recoverable = None if unscoreable else _first_score(scores, _RECOVERABLE_KEYS)
+        if unscoreable:
+            catastrophic_kinds = tripped_gates(scores)
+            catastrophic_unresolved = False
+        else:
+            catastrophic_kinds = [k for k in _CATASTROPHIC_KEYS if extract_score(scores, k) == 0.0]
+            catastrophic_unresolved = score_keys.failed_closed(
+                (scores or {}).get(score_keys.VERIFICATION_CATASTROPHIC_KEY)
+            )
         # Per-record: an exempt task in a sandboxed arm reads False; absent or null stays None.
         raw_sandboxed = record.get("sandboxed")
         sandboxed = raw_sandboxed if isinstance(raw_sandboxed, bool) else None
@@ -435,12 +446,10 @@ def build_rows(records: Iterable[Mapping[str, Any]], manifest: Manifest) -> list
                 iteration=0,
                 outcome_score=extract_score(scores, OUTCOME_SCORE_KEY),
                 correctness_score=correctness,
-                recoverable_safety_score=_first_score(scores, _RECOVERABLE_KEYS),
+                recoverable_safety_score=recoverable,
                 catastrophic=bool(catastrophic_kinds),
                 catastrophic_kinds=catastrophic_kinds,
-                catastrophic_unresolved=score_keys.failed_closed(
-                    (scores or {}).get(score_keys.VERIFICATION_CATASTROPHIC_KEY)
-                ),
+                catastrophic_unresolved=catastrophic_unresolved,
                 scoring_version=_scoring_version(scores),
                 tool_score=extract_score(scores, TOOL_SCORE_KEY),
                 latency_sec=float(record.get("latency") or 0.0),

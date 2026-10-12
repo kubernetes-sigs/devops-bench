@@ -67,6 +67,7 @@ class Manifest(BaseModel):
         sandbox_image_digest: Its content digest (repo digest, else local image ID), pinned
             at batch start because a tag says nothing after the fact; ``None`` when
             unsandboxed or unresolvable.
+        judge_model: The model that graded judged metrics; ``None`` when no judge ran.
     """
 
     model_config = _MODEL_CONFIG
@@ -80,6 +81,7 @@ class Manifest(BaseModel):
     augmentation: list[str]
     sandbox_image: str | None = None
     sandbox_image_digest: str | None = None
+    judge_model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``manifest.json``."""
