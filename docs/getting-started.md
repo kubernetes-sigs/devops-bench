@@ -28,6 +28,20 @@ The Gemini SDK (`google-genai`) is a core dependency — it's always installed. 
 
 Extras matter for runtime-only installs (e.g. `uv sync --no-dev --extra anthropic`); the `dev` group already includes both, so a plain `uv sync` covers them.
 
+### Harness extras
+
+Two more extras back the `adk` agent harness rather than a provider. Neither is in the `dev` group, so a plain `uv sync` does *not* install them:
+
+| Extra | Pulls | Needed for |
+| --- | --- | --- |
+| `adk` | `google-adk` | Running the `adk` harness at all. |
+| `a2a` | `adk`, `google-adk[a2a]`, `a2a-sdk[grpc]` | Reaching a *remote* ADK agent over A2A. |
+
+`a2a` is separate from `adk` because it adds `grpcio`, which builds from source wherever no wheel is published. Install it with `uv sync --extra a2a` — that covers `adk` too.
+
+> [!IMPORTANT]
+> Installing `google-adk[a2a]` on its own is not enough. It resolves `a2a-sdk` without `grpcio`, which sits behind that SDK's *own* `grpc` extra. `ClientFactory` registers the gRPC binding only when the transport imported, so on an HTTP-only install asking for gRPC raises `To use GrpcClient, its dependencies must be installed` when the client is built — an install-time gap that only surfaces at run time. The `a2a` extra names `a2a-sdk[grpc]` explicitly to close it.
+
 ### Console script
 
 Installing the package exposes the `devops-bench` console script, which maps to `devops_bench.cli:main` (`python -m devops_bench` is equivalent). Run it through uv:
