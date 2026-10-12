@@ -13,6 +13,8 @@ debris and removes it **after explicit confirmation**.
 
 - "Before any retry" local checklist (don't duplicate it — run it) →
   [`../../../docs/appendix/known_issues.md`](../../../docs/appendix/known_issues.md)
+- Destroy a crashed run's stack through its own tofu state →
+  [`../../../scripts/cleanup/destroy-leaked-stack.sh`](../../../scripts/cleanup/destroy-leaked-stack.sh)
 
 The cloud half of this skill is written against **GCP**, since that is where the
 eval projects live. The shape generalizes: discover by run-token prefix, list,
@@ -22,7 +24,33 @@ confirm, delete in dependency order.
 
 ## Flow
 
-### 1. Local wipe first
+### 1. Destroy through the run's own state — before wiping anything
+
+If the failed run reached `tofu apply`, its state file is the only complete
+record of what got created, and destroying through it removes strictly more
+than the name-matched sweep below can find. Do this **first**:
+
+```bash
+scripts/cleanup/destroy-leaked-stack.sh --list                    # find the run
+scripts/cleanup/destroy-leaked-stack.sh --run-id <id> --stack prebuilt/<task>
+# review the dry run, then:
+scripts/cleanup/destroy-leaked-stack.sh --run-id <id> --stack prebuilt/<task> --yes
+```
+
+The script points tofu at the run's own `TF_DATA_DIR` / `CLOUDSDK_CONFIG` /
+`KUBECONFIG`, drops in-cluster resources (helm releases, `kubernetes_*`) from
+state so a dead API server cannot stall the destroy, and then destroys the
+cloud resources underneath. It derives `infra_provider` and `cluster_name`
+from the state, and refuses rather than half-destroying if some other required
+variable cannot be resolved.
+
+> **Order matters.** The local wipe in step 2 deletes
+> `/tmp/devops-bench-runs/*` — which is where that state file lives. Wiping
+> first throws away the run's own record of its cloud resources and leaves you
+> with only the name-prefix sweep in step 3. Destroy through state first, wipe
+> second.
+
+### 2. Local wipe
 
 Most "instant fresh failure" cases are local stale state, not cloud leaks. Run the
 **"Before any retry"** checklist in
@@ -32,7 +60,7 @@ containers (which `kind get clusters` does not track), and kills stale
 `devops_bench` / agent processes from a prior launch. Do this on the host the run
 actually ran on. Don't restate the commands here — follow the checklist.
 
-### 2. Cloud discovery (sandbox project only, list mode)
+### 3. Cloud discovery (sandbox project only, list mode)
 
 Confirm the active project is the **sandbox / eval project** before touching
 anything. Then *list* (never delete yet) the resources a failed teardown leaks.
@@ -41,16 +69,20 @@ Match on run-token prefixes so you never sweep shared infra.
 ```bash
 # Fill these in, then paste the block.
 PROJECT="my-sandbox-project"        # verify: gcloud config get-value project
-CLUSTER=""                          # set in step 1 below
+CLUSTER=""                          # set in the step below
 
-# Step 1 lists CANDIDATE clusters across all runs — it is not yet scoped to one.
-# RunEnv names a cluster c<blake2s digest of the run id>. Pick the aborted run's
-# cluster from the output; run-scoped filtering begins once CLUSTER is set below, and
-# each later filter is anchored to that exact name so a resource that merely
-# contains the token (shared-$CLUSTER-net) never matches.
+# This lists CANDIDATE clusters across all runs — it is not yet scoped to one.
+# RunEnv builds the token as ("c" + blake2s(run_id)) truncated to 8 characters
+# TOTAL, so it is a literal 'c' followed by SEVEN hex digits — not eight.
+# ``{8}`` here matches nothing this harness has ever created; keep it at {7}.
+# (devops_bench/core/run_env.py, _CLUSTER_TOKEN_LEN.)
+# Pick the aborted run's cluster from the output; run-scoped filtering begins
+# once CLUSTER is set below, and each later filter is anchored to that exact
+# name so a resource that merely contains the token (shared-$CLUSTER-net)
+# never matches.
 gcloud container clusters list --project "$PROJECT" \
-  --filter="name~'^c[0-9a-f]{8}-'" --format="table(name,location,status)"
-CLUSTER="cbd827e1-bench-opa"        # <- copy the aborted run's cluster from that list
+  --filter="name~'^c[0-9a-f]{7}-'" --format="table(name,location,status)"
+CLUSTER="cbd827e-bench-opa"         # <- copy the aborted run's cluster from that list
 
 # The node SA account_id is derived, not the cluster name:
 #   gke-nodes-<first 9 of the slugified cluster>-<first 6 of md5(cluster)>
@@ -78,7 +110,7 @@ several days to disappear, and name reuse after deletion is not guaranteed to
 be immediate. Neither matters if the instance name carries the run token, which
 is what the task-review checklist requires.
 
-### 3. LIST findings, then get explicit confirmation
+### 4. LIST findings, then get explicit confirmation
 
 Deletion here is **destructive and outward-facing** — it removes real cloud
 resources. Present the discovered list to the operator and get an explicit
@@ -88,7 +120,7 @@ Only sweep resources whose names carry the run-token prefix of the aborted run(s
 **Never** touch shared or long-lived infra, and never operate outside the sandbox
 project.
 
-### 4. Delete (only after confirmation)
+### 5. Delete (only after confirmation)
 
 ```bash
 # Substitute the names the listing returned; run them one at a time and confirm
@@ -110,10 +142,10 @@ gcloud artifacts repositories delete <name> --location <loc> --project "$PROJECT
 ```
 
 Delete in dependency order: the cluster before its node SA, and a VPC's
-dependents before the VPC. After deleting, re-run the discovery in step 2 and
+dependents before the VPC. After deleting, re-run the discovery in step 3 and
 confirm it returns nothing for this run's token.
 
-### 5. Report
+### 6. Report
 
 Report what was found, what was deleted (with names), what was deliberately left,
 and confirm the discovery list is now empty so a re-run won't `409`.
