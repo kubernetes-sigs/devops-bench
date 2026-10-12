@@ -14,7 +14,7 @@
 
 """Unit tests for devops_bench.agents.result."""
 
-from devops_bench.agents.result import AgentResult, ToolCall
+from devops_bench.agents.result import ROOT_ACTOR, AgentResult, ToolCall
 
 
 def test_tool_call_to_dict_round_trip() -> None:
@@ -31,6 +31,39 @@ def test_tool_call_defaults() -> None:
     call = ToolCall(name="x", args={})
     assert call.result is None
     assert call.status == "called"
+    assert call.actor is None
+    assert call.call_id is None
+    assert call.parent_id is None
+
+
+def test_tool_call_omits_unset_attribution_fields() -> None:
+    """A single-agent harness serializes exactly the four original keys.
+
+    The trajectory is re-serialized into the judge's prompt downstream, so a key
+    written as ``None`` on every entry would perturb the scores of every run that
+    has no fleet to attribute.
+    """
+    assert ToolCall(name="x", args={}).to_dict().keys() == {"name", "args", "result", "status"}
+
+
+def test_tool_call_carries_set_attribution_fields() -> None:
+    call = ToolCall(name="x", args={}, actor="cluster", call_id="c1", parent_id="p1")
+    assert call.to_dict() == {
+        "name": "x",
+        "args": {},
+        "result": None,
+        "status": "called",
+        "actor": "cluster",
+        "call_id": "c1",
+        "parent_id": "p1",
+    }
+
+
+def test_tool_call_omits_only_the_attribution_fields_left_unset() -> None:
+    """A top-level call in a delegated run: labeled, but with no parent to name."""
+    entry = ToolCall(name="x", args={}, actor=ROOT_ACTOR, call_id="c1").to_dict()
+    assert entry["actor"] == "root"
+    assert "parent_id" not in entry
 
 
 def test_agent_result_defaults_to_empty_collections() -> None:

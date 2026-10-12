@@ -626,7 +626,11 @@ class AdkAgent(base.AgentHarness):
             events, run_errors = _drive(prepared, prompt, self.config.timeout_sec)
         errors.extend(run_errors)
 
-        output, trajectory, tokens, parse_errors = parsing.parse_event_stream(events)
+        # The prepared copy carries the same name as the imported agent, and it
+        # is the one ADK stamps as ``author`` on the root's own events.
+        output, trajectory, tokens, parse_errors = parsing.parse_event_stream(
+            events, root_name=getattr(prepared, "name", None)
+        )
         errors.extend(parse_errors)
         metadata["event_count"] = len(events)
 

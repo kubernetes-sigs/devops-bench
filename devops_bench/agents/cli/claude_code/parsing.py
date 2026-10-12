@@ -19,6 +19,12 @@ Folds the ``tool_use`` / ``tool_result`` content blocks into the canonical
 terminal ``result`` event. ``thinking`` / ``redacted_thinking`` blocks are
 dropped so the trajectory matches the tool-calls-only shape the other CLI
 harnesses emit.
+
+Calls a delegated subagent made are attributed to it rather than merged into
+the top-level agent's, via the ``parent_tool_use_id`` the CLI tags them with,
+and named from the ``subagent_type`` it stamps alongside (see
+:data:`_SUBAGENT_TYPE_FIELD` for the three naming sources and their authority
+order, and :func:`_attribute_actors` for how an unnameable delegate is handled).
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
-from devops_bench.agents.result import ToolCall, empty_tokens
+from devops_bench.agents.result import ROOT_ACTOR, SUBAGENT_ACTOR, ToolCall, empty_tokens
 
 __all__ = ["parse_stream_json"]
 
@@ -108,6 +114,80 @@ def _normalize_tool_name(name: str) -> str:
 _MCP_FAILED_STATUSES = frozenset({"failed", "error", "disconnected", "needs-auth", "needs_auth"})
 
 
+# Claude Code interleaves a delegated subagent's turns into the same stream as
+# the top-level agent's, tagging every envelope from inside a delegation with
+# ``parent_tool_use_id`` — the id of the spawning tool call. Nothing else marks
+# them, so without reading that field a subagent's tool calls land in the
+# trajectory indistinguishable from the top-level agent's own, and a metric
+# cannot tell which agent in the fleet did what.
+_PARENT_ID_FIELD = "parent_tool_use_id"
+
+# The delegate's role name. It reaches the stream three ways, in descending
+# order of authority:
+#
+# 1. Stamped by the CLI on each delegated envelope, beside ``parent_tool_use_id``.
+# 2. Stamped by the CLI on the ``task_*`` lifecycle events, keyed by the
+#    spawning call's ``tool_use_id``.
+# 3. Supplied by the *model* as an argument on the spawning call (``Task``'s
+#    ``subagent_type``).
+#
+# The first two are the CLI's own bookkeeping and agree with each other; the
+# third is model-authored tool input and is only consulted last, since a label
+# the agent under test chose is the one an agent could misreport.
+_SUBAGENT_TYPE_FIELD = "subagent_type"
+
+# ``tool_use_id`` on a ``task_*`` lifecycle event points at the spawning call,
+# which is what a delegated entry's ``parent_id`` holds.
+_TOOL_USE_ID_FIELD = "tool_use_id"
+
+
+def _label_from(event: dict) -> str | None:
+    """Return the stripped :data:`_SUBAGENT_TYPE_FIELD` on ``event``, if usable."""
+    label = event.get(_SUBAGENT_TYPE_FIELD)
+    return label.strip() if isinstance(label, str) and label.strip() else None
+
+
+def _attribute_actors(
+    trajectory: list[ToolCall],
+    stamped_labels: dict[str, str],
+    arg_labels: dict[str, str],
+) -> None:
+    """Stamp :attr:`ToolCall.actor` on every entry of a delegated run, in place.
+
+    A run with no delegation is left completely untouched — including the
+    ``call_id`` / ``parent_id`` collected along the way, which are cleared. That
+    keeps a single-agent trajectory serializing byte-identically to what this
+    parser emitted before attribution existed, so scores for the many runs that
+    never delegate cannot move (see :class:`~devops_bench.agents.result.ToolCall`).
+
+    Args:
+        trajectory: Parsed calls in emission order, mutated in place.
+        stamped_labels: Spawning ``call_id`` -> delegate role name, as stamped by
+            the CLI. Authoritative.
+        arg_labels: Spawning ``call_id`` -> delegate role name, as supplied by the
+            model on the spawning call. Consulted only where the CLI stamped none.
+    """
+    if not any(call.parent_id for call in trajectory):
+        for call in trajectory:
+            call.call_id = None
+            call.parent_id = None
+        return
+    # Distinct anonymous delegates must not collapse onto one label: two workers
+    # sharing an ``actor`` reads as one agent making every call, which is the
+    # same misattribution as folding them into the root, one level down.
+    anonymous: dict[str, str] = {}
+    for call in trajectory:
+        if call.parent_id is None:
+            call.actor = ROOT_ACTOR
+            continue
+        label = stamped_labels.get(call.parent_id) or arg_labels.get(call.parent_id)
+        if label is None:
+            # Known to come from *some* delegate — never folded back into the
+            # root, which would assert the top-level agent made this call.
+            label = anonymous.setdefault(call.parent_id, f"{SUBAGENT_ACTOR}-{len(anonymous) + 1}")
+        call.actor = label
+
+
 def _iter_events(stdout: str) -> Iterator[tuple[object, str | None]]:
     """Yield ``(event, error)`` pairs from the stream, one populated per item.
 
@@ -153,11 +233,17 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
 
     | Event type    | Handling                                                  |
     |---------------|-----------------------------------------------------------|
-    | ``system``    | ``init`` MCP statuses checked; other metadata ignored     |
+    | ``system``    | ``init`` MCP statuses checked; ``task_*`` lifecycle names |
+    |               | the delegate; other metadata ignored                      |
     | ``assistant`` | ``tool_use`` → pending ToolCalls; ``text`` → output;      |
-    |               | ``thinking`` / ``redacted_thinking`` dropped              |
+    |               | ``thinking`` / ``redacted_thinking`` dropped;             |
+    |               | ``parent_tool_use_id`` → subagent attribution             |
     | ``user``      | ``tool_result`` blocks matched to pending ToolCalls       |
     | ``result``    | terminal: authoritative answer, token usage, failure flag |
+
+    Every envelope, whatever its type, is also scanned for the ``subagent_type``
+    the CLI stamps on a delegation, so a delegated call is named even when the
+    spawning ``tool_use`` block never arrived (a truncated stream).
 
     The accumulated assistant ``text`` doubles as a fallback answer when no
     terminal ``result`` event arrives (a truncated pipe) or when it carries an
@@ -172,7 +258,10 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
 
     Returns:
         A ``(output, trajectory, tokens, errors)`` tuple. ``trajectory`` is a
-        list of ``ToolCall.to_dict()`` mappings ordered as emitted.
+        list of ``ToolCall.to_dict()`` mappings ordered as emitted. On a run
+        that delegated, every entry additionally carries ``actor`` /
+        ``call_id`` / ``parent_id``; on a run that did not, the entries are
+        exactly what this parser produced before attribution existed.
     """
     text_parts: list[str] = []
     result_output: str | None = None
@@ -186,6 +275,10 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
     # than the second call silently overwriting the first.
     pending: dict[str, list[ToolCall]] = {}
     trajectory: list[ToolCall] = []
+    # Spawning ``call_id`` -> delegate role name. Two maps, by authority: the
+    # CLI's own stamp beats the label the model passed as a tool argument.
+    stamped_labels: dict[str, str] = {}
+    arg_labels: dict[str, str] = {}
 
     for event, error in _iter_events(stdout):
         if error is not None:
@@ -193,6 +286,18 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
             continue
         if not isinstance(event, dict):
             continue
+
+        # Harvest the CLI's delegate naming before the per-type dispatch: it
+        # rides on envelopes of every type (each delegated turn) and on the
+        # ``task_*`` lifecycle events, keyed by the spawning call either way.
+        # First stamp wins — they agree, and a late degenerate one cannot
+        # rewrite an actor already established for the delegation.
+        stamped = _label_from(event)
+        if stamped is not None:
+            for key_field in (_PARENT_ID_FIELD, _TOOL_USE_ID_FIELD):
+                key = event.get(key_field)
+                if key:
+                    stamped_labels.setdefault(str(key), stamped)
 
         etype = event.get("type")
         if etype == "system":
@@ -238,15 +343,23 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
                 elif btype == "tool_use":
                     args = block.get("input")
                     raw_name = block.get("name")
+                    call_id = block.get("id")
+                    parent_id = event.get(_PARENT_ID_FIELD)
                     call = ToolCall(
                         name=_normalize_tool_name(raw_name if isinstance(raw_name, str) else ""),
                         args=args if isinstance(args, dict) else {},
                         status="called",
+                        call_id=str(call_id) if call_id else None,
+                        parent_id=str(parent_id) if parent_id else None,
                     )
                     trajectory.append(call)
-                    call_id = block.get("id")
                     if call_id:
                         pending.setdefault(str(call_id), []).append(call)
+                        # Lowest-authority naming source: a label the model
+                        # itself passed to the spawning tool.
+                        arg_label = _label_from(call.args)
+                        if arg_label is not None:
+                            arg_labels.setdefault(str(call_id), arg_label)
         elif etype == "user":
             message = event.get("message")
             content = message.get("content") if isinstance(message, dict) else None
@@ -298,6 +411,7 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
     # recognized usage — a terminal event that reported genuine zeros is trusted.
     if not result_usage_seen and acc_usage:
         tokens = _usage_tokens(acc_usage)
+    _attribute_actors(trajectory, stamped_labels, arg_labels)
     return output, [call.to_dict() for call in trajectory], tokens, errors
 
 

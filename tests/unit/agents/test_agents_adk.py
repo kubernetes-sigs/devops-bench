@@ -41,6 +41,7 @@ from devops_bench.agents import base, capabilities
 from devops_bench.agents import config as agents_config
 from devops_bench.agents.adk import agent as adk_mod
 from devops_bench.agents.adk import parsing
+from devops_bench.agents.result import ROOT_ACTOR
 
 # The dev group deliberately omits the ``adk`` extra, so every test that reaches
 # the SDK carries this marker. It is a marker rather than a module-level
@@ -476,6 +477,126 @@ def test_parse_event_stream_still_folds_tool_calls_on_an_a2a_event() -> None:
     assert [(entry["name"], entry["status"]) for entry in trajectory] == [
         ("scale_deployment", "completed")
     ]
+
+
+# --------------------------------------------------------------------------
+# Sub-agent attribution
+# --------------------------------------------------------------------------
+
+
+def _call_by(author: str, name: str) -> dict:
+    """Return a ``function_call`` event stamped with ``author``."""
+    return {
+        "content": {"parts": [{"function_call": {"args": {}, "name": name}}], "role": "model"},
+        "author": author,
+    }
+
+
+def _actors(trajectory: list[dict]) -> list[str | None]:
+    return [entry.get("actor") for entry in trajectory]
+
+
+def test_parse_event_stream_omits_attribution_for_a_single_agent() -> None:
+    # ADK stamps ``author`` even when there is only one agent, so the parser has
+    # a name available here and must still decline to use it: writing ``actor``
+    # would change what the judge is shown for every non-delegating run.
+    _, trajectory, _, _ = parsing.parse_event_stream(
+        [CALL_EVENT, RESPONSE_EVENT, FINAL_EVENT], root_name="spike_agent"
+    )
+
+    assert trajectory == [
+        {
+            "name": "scale_deployment",
+            "args": {"name": "web", "replicas": 3},
+            "result": '{"replicas": 3, "scaled": "web"}',
+            "status": "completed",
+        }
+    ]
+
+
+def test_parse_event_stream_attributes_calls_to_their_sub_agent() -> None:
+    # A SequentialAgent tree: the sub-agents run one after another with no
+    # transfer_to_agent between them, so ``author`` is the only delegation
+    # signal in the stream.
+    events = [
+        _call_by("triage_agent", "list_pods"),
+        _call_by("diagnostic_agent", "describe_pod"),
+    ]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events, root_name="pathfinder")
+
+    assert _actors(trajectory) == ["triage_agent", "diagnostic_agent"]
+
+
+def test_parse_event_stream_reports_the_driven_agent_as_root() -> None:
+    events = [
+        _call_by("coordinator", "transfer_to_agent"),
+        _call_by("triage_agent", "list_pods"),
+    ]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events, root_name="coordinator")
+
+    assert _actors(trajectory) == [ROOT_ACTOR, "triage_agent"]
+
+
+def test_parse_event_stream_attributes_a_lone_sub_agent_doing_every_call() -> None:
+    # One distinct author, but it is not the agent the harness drove. Counting
+    # distinct authors alone would read this as a single-agent run and silently
+    # credit the root with work a delegate did.
+    events = [_call_by("worker", "list_pods"), _call_by("worker", "delete_pod")]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events, root_name="coordinator")
+
+    assert _actors(trajectory) == ["worker", "worker"]
+
+
+def test_parse_event_stream_names_delegates_without_a_root_name() -> None:
+    # No root name: the parser can still see two agents, but must not guess
+    # which one the harness drove.
+    events = [_call_by("triage_agent", "list_pods"), _call_by("diagnostic_agent", "describe_pod")]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events)
+
+    assert _actors(trajectory) == ["triage_agent", "diagnostic_agent"]
+    assert ROOT_ACTOR not in _actors(trajectory)
+
+
+def test_parse_event_stream_leaves_a_remote_agent_unattributed() -> None:
+    # RemoteA2aAgent stamps its own name on every converted event, so its
+    # sub-agents are invisible in ``author``. Reporting one actor is the honest
+    # outcome; recovering the real ones needs the A2A artifact metadata.
+    events = [_call_by("pathfinder", "list_pods"), _call_by("pathfinder", "describe_pod")]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events, root_name="pathfinder")
+
+    assert _actors(trajectory) == [None, None]
+
+
+def test_parse_event_stream_attributes_without_claiming_nesting() -> None:
+    # ``author`` says who made a call, not which delegation it was made inside,
+    # so the ids that would assert a parent/child link stay unset.
+    events = [_call_by("coordinator", "transfer_to_agent"), _call_by("worker", "list_pods")]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events, root_name="coordinator")
+
+    assert all("call_id" not in entry and "parent_id" not in entry for entry in trajectory)
+
+
+def test_parse_event_stream_skips_a_call_whose_event_has_no_author() -> None:
+    events = [
+        _call_by("triage_agent", "list_pods"),
+        {
+            "content": {
+                "parts": [{"function_call": {"args": {}, "name": "orphan"}}],
+                "role": "model",
+            }
+        },
+        _call_by("diagnostic_agent", "describe_pod"),
+    ]
+
+    _, trajectory, _, _ = parsing.parse_event_stream(events, root_name="pathfinder")
+
+    assert _actors(trajectory) == ["triage_agent", None, "diagnostic_agent"]
 
 
 # --------------------------------------------------------------------------
@@ -920,12 +1041,82 @@ _AGENT_FIXTURE = textwrap.dedent(
 )
 
 
+_TREE_FIXTURE = textwrap.dedent(
+    '''
+    """A SequentialAgent tree: sub-agents run in order, with no transfer call.
+
+    This is the shape that carries no delegation marker at all beyond the
+    ``author`` ADK stamps on each event.
+    """
+
+    from google.adk.agents import LlmAgent, SequentialAgent
+    from google.adk.models import BaseLlm, LlmResponse
+    from google.genai import types
+
+
+    def list_pods() -> dict:
+        """List the pods in the namespace."""
+        return {"pods": ["web-0"]}
+
+
+    def describe_pod(name: str) -> dict:
+        """Describe one pod."""
+        return {"pod": name, "phase": "CrashLoopBackOff"}
+
+
+    class StubLlm(BaseLlm):
+        model: str = "stub-model"
+        tool: str = ""
+        tool_args: dict = {}
+        turn: int = 0
+
+        async def generate_content_async(self, llm_request, stream=False):
+            self.turn += 1
+            if self.turn == 1:
+                part = types.Part.from_function_call(name=self.tool, args=self.tool_args)
+                yield LlmResponse(content=types.Content(role="model", parts=[part]))
+            else:
+                yield LlmResponse(
+                    content=types.Content(
+                        role="model", parts=[types.Part(text=f"{self.tool} done.")]
+                    )
+                )
+
+
+    root_agent = SequentialAgent(
+        name="pathfinder",
+        sub_agents=[
+            LlmAgent(
+                name="triage_agent",
+                model=StubLlm(tool="list_pods"),
+                tools=[list_pods],
+            ),
+            LlmAgent(
+                name="diagnostic_agent",
+                model=StubLlm(tool="describe_pod", tool_args={"name": "web-0"}),
+                tools=[describe_pod],
+            ),
+        ],
+    )
+    '''
+)
+
+
 @pytest.fixture
 def agent_dir(tmp_path: pathlib.Path) -> pathlib.Path:
     """Write an ADK agent directory laid out the way ADK expects."""
     directory = tmp_path / "fixture_agent"
     directory.mkdir()
     (directory / "agent.py").write_text(_AGENT_FIXTURE, encoding="utf-8")
+    return directory
+
+
+@pytest.fixture
+def tree_dir(tmp_path: pathlib.Path) -> pathlib.Path:
+    """Write a two-sub-agent SequentialAgent directory."""
+    directory = tmp_path / "tree_agent"
+    directory.mkdir()
+    (directory / "agent.py").write_text(_TREE_FIXTURE, encoding="utf-8")
     return directory
 
 
@@ -1118,6 +1309,27 @@ def test_execute_drives_a_real_adk_agent_end_to_end(agent_dir: pathlib.Path) -> 
     assert result.latency > 0
     assert result.metadata["agent_name"] == "fixture_agent"
     assert result.metadata["event_count"] == 3
+
+
+@requires_adk
+def test_execute_attributes_a_real_tree_to_its_sub_agents(tree_dir: pathlib.Path) -> None:
+    """Prove ADK really stamps sub-agent names, end to end through the harness.
+
+    The parser tests assert against hand-written events; this one drives a real
+    ``SequentialAgent`` so a change in how ADK populates ``author`` — the single
+    field all of this rests on — fails here rather than silently degrading every
+    tree to an unattributed trajectory.
+    """
+    config = agents_config.AgentConfig(target=str(tree_dir), model=None)
+
+    result = adk_mod.AdkAgent(config).run("triage the namespace")
+
+    assert result.errors == []
+    assert [entry["name"] for entry in result.trajectory] == ["list_pods", "describe_pod"]
+    assert [entry["actor"] for entry in result.trajectory] == [
+        "triage_agent",
+        "diagnostic_agent",
+    ]
 
 
 @requires_adk
