@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: accounts-quota
+  namespace: accounts
+spec:
+  hard:
+    requests.memory: "1Gi"
