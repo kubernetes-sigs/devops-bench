@@ -124,6 +124,19 @@ _CHAOS_ACTIVE_WAIT_SEC = 45
 _SCENARIO_JOIN_SEC = VERIFICATION_TIMEOUT_SEC + 60
 
 
+def _resolve_model_name(judge: Any) -> str | None:
+    """Return the model name behind a built judge, preferring its own label over its client's."""
+    if judge is None:
+        return None
+    for attr in ("_model_name", "model_name"):
+        name = getattr(judge, attr, None)
+        if isinstance(name, str) and name:
+            return name
+    client = getattr(judge, "client", None)
+    name = getattr(client, "model_name", None)
+    return name if isinstance(name, str) and name else None
+
+
 def _ensure_builtin_agents_registered() -> None:
     """Import the builtin agent modules so their registrations fire (re-imports are no-ops).
 
@@ -234,6 +247,8 @@ class DefaultEvalHarness(Harness):
         self.project_id = project_id
         self.cluster_name = cluster_name
         self._judge_model = judge_model
+        # Recorded on the manifest; re-resolved at scoring time.
+        self._judge_model_name: str | None = _resolve_model_name(judge_model)
         self.results_root = results_root
         resolved_agent_type = (
             agent_type
@@ -904,6 +919,7 @@ class DefaultEvalHarness(Harness):
             # Pinned at batch start; a mutable tag alone is not provenance.
             sandbox_image=sandbox.image if sandbox is not None else None,
             sandbox_image_digest=sandbox.image_digest if sandbox is not None else None,
+            judge_model=self._judge_model_name,
         )
         rows = build_rows(detailed_results, manifest)
         self.reporter.write_rows(run_dir, [row.to_dict() for row in rows])
@@ -1541,4 +1557,7 @@ class DefaultEvalHarness(Harness):
             # judge, so a judge outage must not leave a cheating run ungated.
             _log.exception("judge unavailable; scoring deterministic metrics only")
             judge_model = None
+        # Read off the built judge, not JUDGE_MODEL, so the agent-model fallback is recorded too.
+        self._judge_model_name = _resolve_model_name(judge_model)
+        _log.info("scoring with judge model %r", self._judge_model_name)
         evaluate_metrics_batch(scorable, judge_model, use_mcp=self.use_mcp)

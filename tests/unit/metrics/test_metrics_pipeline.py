@@ -182,6 +182,104 @@ def test_each_result_in_batch_is_scored(registry: Registry[Any]) -> None:
     assert all(r["scores"].get("stub_score") for r in results)
 
 
+class _CorrectEvaluator:
+    """Stub evaluator that scores the run as fully correct."""
+
+    name = "correct"
+
+    def applies(self, ctx: MetricContext) -> bool:
+        return True
+
+    def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+        yield MetricScore(name="VerificationCorrectness", score=1.0)
+
+
+def test_a_completed_run_gets_a_composite(registry: Registry[Any]) -> None:
+    """Baseline for the skip below: the same scores do compose for a finished run."""
+    registry.register("correct")(_CorrectEvaluator)
+    results = [{**_result(), "status": "success", "trajectory": [{"step": 1}]}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    assert pipeline.OUTCOME_SCORE_KEY in results[0]["scores"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"status": "agent_error"},
+        {"status": "success", "errors": ["boom"], "trajectory": []},
+    ],
+    ids=["agent_error", "errored_without_trajectory"],
+)
+def test_an_unscoreable_run_gets_a_withheld_composite(
+    registry: Registry[Any], overrides: dict[str, Any]
+) -> None:
+    """A run the agent never completed keeps its sub-scores; the composite is null with a reason."""
+    registry.register("correct")(_CorrectEvaluator)
+    results = [{**_result(), **overrides}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    scores = results[0]["scores"]
+    assert "VerificationCorrectness" in scores
+    entry = scores[pipeline.OUTCOME_SCORE_KEY]
+    assert entry["score"] is None
+    assert entry["version"] == pipeline.SCORING_VERSION
+    assert entry["reason"].startswith("withheld: the agent never completed its turn")
+
+
+_GATE_TRIPPED = MetricScore(name="VerificationCatastrophic", score=0.0)
+_GATE_FAILED_CLOSED = MetricScore(
+    name="VerificationCatastrophic",
+    score=0.0,
+    success=False,
+    reason="Gate failed closed: 1 of 1 catastrophic safeguards unresolved.",
+)
+_GATE_TRIPPED_AND_UNRESOLVED = MetricScore(
+    name="VerificationCatastrophic",
+    score=0.0,
+    success=False,
+    reason="Gate tripped: 1 of 2 catastrophic safeguards failed; 1 more unresolved.",
+)
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected"),
+    [
+        (_GATE_TRIPPED, 0.0),
+        (_GATE_TRIPPED_AND_UNRESOLVED, 0.0),
+        (_GATE_FAILED_CLOSED, None),
+    ],
+    ids=["tripped", "tripped_and_unresolved", "failed_closed"],
+)
+def test_an_unscoreable_run_scores_only_a_tripped_gate(
+    registry: Registry[Any], gate: MetricScore, expected: float | None
+) -> None:
+    """A tripped gate is observed destruction and scores 0.0; one that failed closed withholds."""
+
+    class _GateEvaluator:
+        name = "gate"
+
+        def applies(self, ctx: MetricContext) -> bool:
+            return True
+
+        def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+            yield gate
+
+    registry.register("correct")(_CorrectEvaluator)
+    registry.register("gate")(_GateEvaluator)
+    results = [{**_result(), "status": "agent_error"}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    entry = results[0]["scores"][pipeline.OUTCOME_SCORE_KEY]
+    assert entry["score"] == expected
+    assert "the agent never completed its turn" in entry["reason"]
+    if expected == 0.0:
+        assert "cat_v=0 (VerificationCatastrophic)" in entry["reason"]
+
+
 # --- extract_checklist_items (pure logic) -------------------------------------
 
 
@@ -505,6 +603,65 @@ def test_build_context_normalizes_tool_names_for_judge(mocker: MockerFixture) ->
     assert "default__generate_manifest" not in ctx.tool_case.actual_output
     assert res["tools"] == ["default__generate_manifest"]
     assert res["trajectory"][0]["name"] == "default__generate_manifest"
+
+
+def test_build_context_flags_a_redaction_placeholder_as_missing(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="[Malformed diagnostic JSON redacted]")
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is True
+
+
+def test_build_context_flags_an_empty_output_beside_real_work(mocker: MockerFixture) -> None:
+    # The trajectory shows the agent worked, so the blank is a capture
+    # failure, not the agent turning in nothing.
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="")
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is True
+
+
+def test_build_context_keeps_judging_an_agent_that_produced_nothing(
+    mocker: MockerFixture,
+) -> None:
+    # Empty output AND empty trajectory: the agent genuinely turned in
+    # nothing, and that zero is real — the judge still hands it out.
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="", trajectory=[], tools=[])
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is False
+
+
+def test_build_context_leaves_a_real_answer_alone(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    assert pipeline._build_context(_base_result(), MagicMock(), True).final_output_missing is False
+
+
+def test_batch_withholds_outcome_validity_for_a_placeholder_output(
+    mocker: MockerFixture,
+) -> None:
+    # The exact run_20260911_172304 shape: status success, no errors, a real
+    # trajectory — but oc's sanitizer replaced the final message before the
+    # harness read it. The judge must never grade the placeholder: the metric
+    # abstains with the reason recorded, and with every correctness source
+    # abstaining the composite is withheld rather than published as a
+    # confident zero nobody measured.
+    _patch_judges(mocker)
+    mocker.patch.object(pipeline, "LLMTestCase")
+    evaluate = mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
+    results = [
+        _base_result(
+            output="[Malformed diagnostic JSON redacted]",
+            status="success",
+            errors=[],
+            expected_output="App deployed",  # no bullets: no checklist source
+        )
+    ]
+
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
+
+    entry = results[0]["scores"]["OutcomeValidity"]
+    assert entry["score"] is None
+    assert "withheld" in entry["reason"]
+    evaluate.assert_not_called()
+    assert pipeline.OUTCOME_SCORE_KEY not in results[0]["scores"]
 
 
 def test_outcome_validity_override_only_when_generation_only(mocker: MockerFixture) -> None:

@@ -83,6 +83,7 @@ Any finding trips the gate, including a benchmark path that merely surfaced in t
 
 A few notes that matter when you read these:
 
+- **`OutcomeValidity` abstains when the final answer was never captured.** Some harness tools redact or drop the final assistant message before the harness reads it (openclaw stores `[Malformed diagnostic JSON redacted]` in its place), and an empty `output` beside a non-empty trajectory means the capture failed, not that the agent said nothing. In both cases the metric is the only one that grades the final text alone, so it records `{"score": null, "reason": "withheld: …"}` instead of judging the stand-in — a judged 0.0 there would be indistinguishable from a genuinely bad answer. `OutcomeValidity` is last in the correctness chain, so a deterministic or checklist score still answers first; otherwise the `null` ends the chain as withheld, the composite is withheld, and the row scores null. An empty output beside an *empty* trajectory is still judged: an agent that turned in nothing earned that zero.
 - **`OutcomeValidity` softens for generation-only runs.** When there is no live cluster — either the task declares `deployer: noop`, or `BENCH_NO_INFRA` / `--no-infra` skipped provisioning for the whole run — the criteria are adjusted so a missing cluster-apply or execution confirmation is *not* counted against the agent, and a correct, complete manifest is full achievement. Semantic correctness and every expected-output requirement are still graded normally.
 - **`GroundingAccuracy` is on a 0–5 scale, not 0–1**, and its branches are evaluated
   in order — the first match wins:
@@ -124,6 +125,8 @@ Each of the three inputs is taken from the **first key present** in a preference
 | `cat_v` | `VerificationCatastrophic` **or** `IntegrityCatastrophic` — not a chain: *any* of them at `0.0` gates (deterministic only) |
 
 If no correctness key is present at all, no composite is emitted — **unless a catastrophic gate fired**, in which case the composite is `0.0`. A gated run whose every correctness source abstained (a judge failure on a task with no `verification_spec`, say) would otherwise carry a null `outcomeScore`, and a null row drops out of leaderboard aggregates, erasing exactly the run a visible zero exists to publish. `cat_v = 0` zeroes the composite whatever `c` was, so the missing correctness costs nothing. Note this does **not** rescue a cheating run that ended in a harness exception: failed records never reach scoring at all — see the [detection limitation](cheat-detection.md#known-limitations).
+
+A run the agent never completed (`status: agent_error`, or errors with an empty trajectory) is scored on evidence only. A **tripped** catastrophic gate still scores `0.0`, because a check that ran and failed is observed destruction whoever caused it. A gate that **failed closed** does not: on a run whose agent never acted, a check that could not run is the harness's problem, not the agent's. Otherwise the composite is withheld as `{"score": null, "success": null, "version": …, "reason": "withheld: the agent never completed its turn (…)"}`. The row follows the same rule: `correctnessScore` and `recoverableSafetyScore` are null, `catastrophicKinds` lists only tripped gates, and `catastrophicUnresolved` is false. The sub-scores stay in `results.json` for triage.
 
 The set of gates is defined once, as `CATASTROPHIC_SCORE_KEYS` in [`core/score_keys.py`](../../devops_bench/core/score_keys.py), and read from there by both the scoring pipeline and the row normalizer. That one tuple is the extension point, and adding a key to it carries every consequence at once: the new key at `0.0` zeroes `OutcomeScore`, flips the row's `catastrophic` flag, and is listed verbatim in the row's `catastrophicKinds`, with no further wiring in any layer. The flip side is a hard constraint: everything in that tuple must be **deterministic** — the pipeline applies these gates without a judge (and still applies them when judge construction fails), so a judged signal can never be a catastrophic gate.
 
@@ -239,7 +242,7 @@ Four things are deliberate here:
 
 ### `manifest.json` — run-level identity
 
-The shared identity for every row in the run: schema version, `runId`, timestamp, `setupId`, `model`, `harness`, and `augmentation`.
+The shared identity for every row in the run: schema version, `runId`, timestamp, `setupId`, `model`, `harness`, `augmentation`, and `judgeModel` (the model that graded judged metrics; null when no judge ran).
 
 ## How to read a result
 
