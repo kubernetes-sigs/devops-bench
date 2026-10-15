@@ -170,7 +170,7 @@ def extract_tokens(response: Any) -> dict:
       ``candidates_token_count`` / ``total_token_count``.
     * **Anthropic** — ``response.usage`` with ``input_tokens`` /
       ``output_tokens`` (no aggregated total; the sum is used).
-    * **OpenAI / Ollama** — ``response.usage`` with ``prompt_tokens`` /
+    * **OpenAI-compatible** — ``response.usage`` with ``prompt_tokens`` /
       ``completion_tokens`` / ``total_tokens``.
 
     The "output" field (``candidates_tokens``) absorbs whichever provider name
