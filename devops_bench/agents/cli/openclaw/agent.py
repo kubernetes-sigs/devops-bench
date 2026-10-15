@@ -53,6 +53,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 )
 from devops_bench.agents.shared.vertex_env import vertex_location, vertex_project
 from devops_bench.core import SubprocessError, get_logger
+from devops_bench.core.config import get_env
 from devops_bench.core.errors import ConfigError, SandboxError
 from devops_bench.core.model_providers import ProviderSpec, resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
@@ -196,6 +197,9 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
         "baseUrl": "https://aiplatform.googleapis.com",
         "apiKey": _VERTEX_CREDENTIALS_MARKER,
     },
+    "openai": {
+        "api": "openai-completions",
+    },
 }
 # node-fetch->native-fetch loader shim (see :func:`_write_node_fetch_shim`), under
 # the state dir so the artifact diff does not attribute it to the agent.
@@ -283,13 +287,17 @@ def _build_model_override(config: AgentConfig) -> dict:
     which would race across runs. The provider comes from the resolved model id,
     so one id works on any pinned backend; auth flows from the env, not from here.
 
+    An ``openai`` model is always registered when ``OPENAI_BASE_URL`` is set, with
+    that ``baseUrl``: a self-hosted server's model ids are never in oc's catalog.
+
     Returns an empty dict when no model is set or oc already knows it.
     """
     model_id = _oc_model_id(config)
     if not model_id:
         return {}
     provider, _, bare = model_id.partition("/")
-    if bare not in _CATALOG_OVERRIDES.get(provider, frozenset()):
+    base_url = get_env("OPENAI_BASE_URL") if provider == "openai" else None
+    if bare not in _CATALOG_OVERRIDES.get(provider, frozenset()) and not base_url:
         return {}
     # Fail loud rather than ship a transport-less entry (see _PROVIDER_TRANSPORT).
     if provider not in _PROVIDER_TRANSPORT:
@@ -299,6 +307,8 @@ def _build_model_override(config: AgentConfig) -> dict:
             f"{', '.join(sorted(_PROVIDER_TRANSPORT))})"
         )
     provider_entry: dict = dict(_PROVIDER_TRANSPORT[provider])
+    if base_url:
+        provider_entry["baseUrl"] = base_url.rstrip("/")
     provider_entry["models"] = [{"id": bare, "name": bare}]
     return {
         "models": {"providers": {provider: provider_entry}},
