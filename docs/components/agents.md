@@ -541,21 +541,14 @@ installs, and the supplement grants only `get`/`list`/`watch` on
 gets on a given CRD is therefore whatever that operator chose to aggregate into
 `edit`, which is usually nothing.
 
-`opa-remediation` is an example. Kyverno v1.12.7 ships
-`kyverno:rbac:view:policies` labelled `aggregate-to-view` and
-`kyverno:rbac:admin:policies` labelled `aggregate-to-admin`, with no
-`aggregate-to-edit` on either. Aggregation flows view into edit and edit into
-admin, so the agent can read `ClusterPolicy` objects and cannot write them. Two
-of that task's objectives ask it to flip both policies from `Audit` to
-`Enforce`, so **the task cannot be fully passed under the default scope** — one
-of its three deterministic objective groups is unreachable. Sandboxed and
-ambient scores are not comparable for it.
-
-Nothing in a trajectory says so. Neither agent that ran the task attempted the
-flip, so the run logs carry no `forbidden` — the objective simply goes
-unattempted and reads as an agent miss. Anything that grades sandboxed runs
-against ambient ones has to account for this class of gap explicitly rather
-than infer it from failures.
+A task whose objective writes an operator's CRD must grant that in its own
+stack. Kyverno, for example, aggregates its policy roles into `view` and
+`admin` only, so `opa-remediation` applies a `kyverno-policy-editor`
+ClusterRole labelled `aggregate-to-edit` with `update`/`patch` on `kyverno.io`
+policies (`tf/prebuilt/opa-remediation/manifests/rbac/`). Grant the task's
+minimum there rather than widening the harness supplement for every task; an
+objective the scope cannot reach fails silently, since agents rarely attempt a
+write they expect to be denied.
 
 ### Model credentials
 

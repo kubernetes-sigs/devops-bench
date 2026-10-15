@@ -1985,27 +1985,17 @@ def test_build_agent_config_rejects_a_spec_together_with_exempt(isolated_env: No
         )
 
 
-def test_secret_rotation_declares_requires_unsandboxed() -> None:
-    """Checked through the real loader: ``Task`` drops unknown keys silently, so a
-    raw-YAML assertion alone would stay green while the harness saw ``False``."""
-    import pathlib
-
-    import yaml as _yaml
-
+def test_secret_rotation_runs_sandboxed() -> None:
+    """Its cloud credential crosses by value; checked through the real loader, not raw YAML."""
     from devops_bench.tasks.loader import FileSystemTaskLoader
 
     tasks = FileSystemTaskLoader().load_tasks("tasks/gcp/secret-rotation/task.yaml")
     assert len(tasks) == 1
-    assert tasks[0].requires_unsandboxed is True
-
-    spec = _yaml.safe_load(
-        pathlib.Path("tasks/gcp/secret-rotation/task.yaml").read_text(encoding="utf-8")
-    )
-    assert spec.get("requires_unsandboxed") is True
+    assert tasks[0].requires_unsandboxed is False
 
 
-def test_no_other_task_opts_out_of_the_sandbox() -> None:
-    """Exactly one exemption; a second would need its own justification."""
+def test_no_task_opts_out_of_the_sandbox() -> None:
+    """No exemptions in tree; a new one would need its own justification."""
     import pathlib
 
     import yaml as _yaml
@@ -2015,4 +2005,4 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         for p in sorted(pathlib.Path("tasks").glob("*/*/task.yaml"))
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
-    assert exempt == ["secret-rotation"]
+    assert exempt == []
