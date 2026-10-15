@@ -48,8 +48,10 @@ identically across them. The `api` harness uses it to pick the adapter family an
 backend for `get_model(provider, model)` and runs the tool-use loop in-process.
 The CLI harnesses (`gemini`, `openclaw`) use it to route `AGENT_API_KEY` onto the
 binary's provider-specific env var(s) and pass the model through: the Gemini CLI
-gets `GEMINI_MODEL`, and openclaw gets a `--model provider/id` flag. Either way,
-the model is a runtime input, never baked into the harness.
+gets `GEMINI_MODEL`, and openclaw gets a `--model provider/id` flag. An
+`AGENT_MODEL` that is already a full `provider/id` names its own provider: openclaw
+routes auth by that segment and logs a warning when it ignores a disagreeing
+`AGENT_PROVIDER`. Either way, the model is a runtime input, never baked into the harness.
 
 `adk` sits outside that contract on purpose: model routing belongs to ADK, which
 resolves a model string (and its credentials) itself. So `AGENT_PROVIDER` and
@@ -95,7 +97,7 @@ each harness maps them onto its target.
 | --- | --- | --- |
 | `AGENT_MODEL` | unset | Model id; flows to the harness's target. See [agy model ids](#agy-model-ids) for the one harness that rewrites it. |
 | `AGENT_MODEL_EFFORT` | `high` | Reasoning tier for `antigravity`; ignored by every other harness. One of `low`, `medium`, `high` — an unknown value is rejected rather than passed through. Tiers vary by model; see [agy model ids](#agy-model-ids). |
-| `AGENT_PROVIDER` | unset | Provider key (e.g. `gemini`, `anthropic`, `google-vertex`). |
+| `AGENT_PROVIDER` | unset | Provider key (e.g. `gemini`, `anthropic`, `google-vertex`). For `openclaw`, a `provider/model` `AGENT_MODEL` takes precedence. |
 | `AGENT_API_KEY` | unset | Routed onto the provider's key env var(s) via the shared contract; omitted for keyless backends (Vertex/Bedrock ADC). |
 | `AGENT_TARGET` | unset | Path to the CLI binary (`gemini` / `oc`). For `adk`, the **import target** of the agent to run (see below); required there. Ignored by `api`. |
 | `AGENT_TIMEOUT_SEC` | `600` | Wall-clock budget for each external call. |
