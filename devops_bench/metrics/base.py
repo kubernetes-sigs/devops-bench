@@ -122,6 +122,8 @@ class MetricEvaluator(Protocol):
     Attributes:
         name: Identifier used in logs; per-score keys come from each
             :class:`MetricScore`'s ``name`` instead.
+        needs_judge: Optional; ``True`` when :meth:`evaluate` reads ``ctx.judge``.
+            Such families are skipped on a run the agent never completed.
     """
 
     name: str

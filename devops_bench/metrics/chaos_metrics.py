@@ -37,6 +37,18 @@ _log = get_logger("metrics.chaos_metrics")
 
 _DEFAULT_FAULT = "pod deletion"
 
+#: Bare-value performance passthroughs, keyed by the ``perf_report`` field each copies.
+_PERF_KEYS = {
+    "Workload_Deployment_Time_Seconds": "deployment_time_seconds",
+    "Workload_Uptime_Percentage": "uptime_percentage",
+    "Resource_Utilization_Efficiency": "resource_utilization_efficiency",
+}
+
+
+def perf_scores(perf_report: dict[str, Any]) -> dict[str, Any]:
+    """The three performance passthroughs, copied verbatim (``None`` when missing)."""
+    return {name: perf_report.get(field) for name, field in _PERF_KEYS.items()}
+
 
 def evaluate_chaos_metrics(
     all_test_case: LLMTestCase,
@@ -91,18 +103,16 @@ def evaluate_chaos_metrics(
     except Exception as e:  # noqa: BLE001 - scoring must survive a judge failure
         _log.error("Error evaluating chaos metrics: %s", e)
 
-    scores["Workload_Deployment_Time_Seconds"] = perf_report.get("deployment_time_seconds")
-    scores["Workload_Uptime_Percentage"] = perf_report.get("uptime_percentage")
-    scores["Resource_Utilization_Efficiency"] = perf_report.get("resource_utilization_efficiency")
+    scores.update(perf_scores(perf_report))
 
 
 @METRICS.register("chaos")
 class ChaosMetric:
-    """Registered evaluator for chaos diagnosis + recovery + perf passthroughs.
+    """Registered evaluator for the judged chaos diagnosis + recovery scores.
 
     Runs only when the result carries a ``chaos_spec``. Yields the
-    DiagnosisAccuracy / GracefulRecovery judged scores plus the three bare-value
-    performance passthroughs.
+    DiagnosisAccuracy / GracefulRecovery judged scores; the performance
+    passthroughs belong to :class:`ChaosPerfMetric`, which needs no judge.
 
     Attributes:
         name: Identifier for logging; per-score keys come from each yielded
@@ -110,13 +120,14 @@ class ChaosMetric:
     """
 
     name = "chaos"
+    needs_judge = True
 
     def applies(self, ctx: MetricContext) -> bool:
         """Run only when the harness recorded a chaos spec on the result."""
         return bool(ctx.result.get("chaos_spec"))
 
     def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
-        """Score diagnosis/recovery and pass perf numbers through verbatim."""
+        """Score diagnosis/recovery; the perf numbers are left to :class:`ChaosPerfMetric`."""
         scores: dict[str, Any] = {}
         evaluate_chaos_metrics(
             ctx.all_case,
@@ -125,18 +136,33 @@ class ChaosMetric:
             ctx.result.get("perf_report", {}),
             scores,
         )
-        out: list[MetricScore] = []
-        for name, entry in scores.items():
-            if isinstance(entry, dict):
-                out.append(
-                    MetricScore(
-                        name=name,
-                        score=entry.get("score"),
-                        success=entry.get("success"),
-                        reason=entry.get("reason"),
-                    )
-                )
-            else:
-                # Bare-value perf passthroughs (None when missing).
-                out.append(MetricScore(name=name, score=entry))
-        return out
+        return [
+            MetricScore(
+                name=name,
+                score=entry.get("score"),
+                success=entry.get("success"),
+                reason=entry.get("reason"),
+            )
+            for name, entry in scores.items()
+            if isinstance(entry, dict)  # the bare perf values are ChaosPerfMetric's
+        ]
+
+
+@METRICS.register("chaos_perf")
+class ChaosPerfMetric:
+    """Registered evaluator passing the harness's performance figures through, no judge needed.
+
+    Deterministic, so it still runs on a run the agent never completed: the
+    figures describe the workload under the fault, whoever was operating.
+    """
+
+    name = "chaos_perf"
+
+    def applies(self, ctx: MetricContext) -> bool:
+        """Run only when the harness recorded a chaos spec on the result."""
+        return bool(ctx.result.get("chaos_spec"))
+
+    def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+        """Copy the three performance numbers through verbatim."""
+        for name, value in perf_scores(ctx.result.get("perf_report", {})).items():
+            yield MetricScore(name=name, score=value)

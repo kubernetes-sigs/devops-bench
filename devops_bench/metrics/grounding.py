@@ -198,6 +198,7 @@ class GroundingMetric:
     """
 
     name = "grounding"
+    needs_judge = True
 
     def applies(self, ctx: MetricContext) -> bool:
         """Run only when the harness recorded mapped documentation."""

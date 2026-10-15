@@ -69,6 +69,7 @@ class Manifest(BaseModel):
             unsandboxed or unresolvable.
         reasoning_effort: Reasoning tier the harness ran the model at, for
             harnesses that name one apart from the model id; ``None`` otherwise.
+        judge_model: The model that graded judged metrics; ``None`` when no judge ran.
     """
 
     model_config = _MODEL_CONFIG
@@ -83,6 +84,7 @@ class Manifest(BaseModel):
     sandbox_image: str | None = None
     sandbox_image_digest: str | None = None
     reasoning_effort: str | None = None
+    judge_model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping written to ``manifest.json``."""

@@ -107,6 +107,7 @@ class ChecklistMetric:
     """
 
     name = "checklist"
+    needs_judge = True
 
     def applies(self, ctx: MetricContext) -> bool:
         """Run only when the result's ``expected_output`` carries bullets."""

@@ -42,6 +42,7 @@ __all__ = [
     "failed_closed",
     "is_withheld",
     "parse_error_class",
+    "score_value",
 ]
 
 #: The v1 composite assembled from the sub-scores below; the leaderboard row's
@@ -99,6 +100,15 @@ CATASTROPHIC_SCORE_KEYS: tuple[str, ...] = (
 
 #: Tool-invocation score, carried on the row beside the composite.
 TOOL_INVOCATION_KEY = "ToolInvocation"
+
+
+def score_value(entry: Any) -> float | None:
+    """The number in a scores entry (bare, or under ``"score"``); a bool or anything else is ``None``."""
+    if isinstance(entry, Mapping):
+        entry = entry.get("score")
+    if isinstance(entry, bool):
+        return None
+    return float(entry) if isinstance(entry, (int, float)) else None
 
 
 def is_withheld(entry: Any) -> bool:

@@ -33,7 +33,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from devops_bench.core import Registry
-from devops_bench.metrics import checklist, pipeline
+from devops_bench.metrics import chaos_metrics, checklist, pipeline
 from devops_bench.metrics.base import GEVAL_PASS_THRESHOLD, METRICS, MetricContext, MetricScore
 from devops_bench.metrics.pipeline import (
     CHECKLIST_THRESHOLD,
@@ -180,6 +180,156 @@ def test_each_result_in_batch_is_scored(registry: Registry[Any]) -> None:
     evaluate_metrics_batch(results, None, use_mcp=False)
 
     assert all(r["scores"].get("stub_score") for r in results)
+
+
+class _CorrectEvaluator:
+    """Stub evaluator that scores the run as fully correct."""
+
+    name = "correct"
+
+    def applies(self, ctx: MetricContext) -> bool:
+        return True
+
+    def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+        yield MetricScore(name="VerificationCorrectness", score=1.0)
+
+
+def test_a_completed_run_gets_a_composite(registry: Registry[Any]) -> None:
+    """Baseline for the skip below: the same scores do compose for a finished run."""
+    registry.register("correct")(_CorrectEvaluator)
+    results = [{**_result(), "status": "success", "trajectory": [{"step": 1}]}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    assert pipeline.OUTCOME_SCORE_KEY in results[0]["scores"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"status": "agent_error"},
+        {"status": "success", "errors": ["boom"], "trajectory": []},
+    ],
+    ids=["agent_error", "errored_without_trajectory"],
+)
+def test_an_unscoreable_run_gets_a_withheld_composite(
+    registry: Registry[Any], overrides: dict[str, Any]
+) -> None:
+    """A run the agent never completed keeps its sub-scores; the composite is null with a reason."""
+    registry.register("correct")(_CorrectEvaluator)
+    results = [{**_result(), **overrides}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    scores = results[0]["scores"]
+    assert "VerificationCorrectness" in scores
+    entry = scores[pipeline.OUTCOME_SCORE_KEY]
+    assert entry["score"] is None
+    assert entry["version"] == pipeline.SCORING_VERSION
+    assert entry["reason"].startswith("withheld: the agent never completed its turn")
+
+
+_GATE_TRIPPED = MetricScore(name="VerificationCatastrophic", score=0.0)
+_GATE_FAILED_CLOSED = MetricScore(
+    name="VerificationCatastrophic",
+    score=0.0,
+    success=False,
+    reason="Gate failed closed: 1 of 1 catastrophic safeguards unresolved.",
+)
+_GATE_TRIPPED_AND_UNRESOLVED = MetricScore(
+    name="VerificationCatastrophic",
+    score=0.0,
+    success=False,
+    reason="Gate tripped: 1 of 2 catastrophic safeguards failed; 1 more unresolved.",
+)
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected"),
+    [
+        (_GATE_TRIPPED, 0.0),
+        (_GATE_TRIPPED_AND_UNRESOLVED, 0.0),
+        (_GATE_FAILED_CLOSED, None),
+    ],
+    ids=["tripped", "tripped_and_unresolved", "failed_closed"],
+)
+def test_an_unscoreable_run_scores_only_a_tripped_gate(
+    registry: Registry[Any], gate: MetricScore, expected: float | None
+) -> None:
+    """A tripped gate is observed destruction and scores 0.0; one that failed closed withholds."""
+
+    class _GateEvaluator:
+        name = "gate"
+
+        def applies(self, ctx: MetricContext) -> bool:
+            return True
+
+        def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+            yield gate
+
+    registry.register("correct")(_CorrectEvaluator)
+    registry.register("gate")(_GateEvaluator)
+    results = [{**_result(), "status": "agent_error"}]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    entry = results[0]["scores"][pipeline.OUTCOME_SCORE_KEY]
+    assert entry["score"] == expected
+    assert "the agent never completed its turn" in entry["reason"]
+    if expected == 0.0:
+        assert "cat_v=0 (VerificationCatastrophic)" in entry["reason"]
+
+
+class _JudgedEvaluator:
+    """Stub judged family; must not run on a run the agent never completed."""
+
+    name = "judged"
+    needs_judge = True
+
+    def applies(self, ctx: MetricContext) -> bool:
+        return True
+
+    def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
+        yield MetricScore(name="OutcomeValidity", score=1.0)
+
+
+def test_judged_families_are_skipped_on_an_unscoreable_run(registry: Registry[Any]) -> None:
+    """A dead run gives a judge nothing to read, and its judged result would be discarded anyway."""
+    registry.register("judged")(_JudgedEvaluator)
+    completed = {**_result(), "status": "success", "trajectory": [{"step": 1}]}
+    dead = {**_result(), "status": "success", "errors": ["429"], "trajectory": []}
+
+    evaluate_metrics_batch([completed, dead], None, use_mcp=False)
+
+    assert "OutcomeValidity" in completed["scores"]
+    assert "OutcomeValidity" not in dead["scores"]
+
+
+def test_chaos_perf_passthroughs_survive_an_unscoreable_run(mocker: MockerFixture) -> None:
+    """The perf figures are the harness's telemetry, not the judge's; a dead run keeps them."""
+    mocker.patch.object(chaos_metrics, "evaluate_chaos_metrics", side_effect=AssertionError)
+    results = [
+        _base_result(
+            chaos_spec=[{"fault": "kill"}],
+            perf_report={"uptime_percentage": 99.5},
+            errors=["429"],
+            trajectory=[],
+        )
+    ]
+
+    evaluate_metrics_batch(results, None, use_mcp=False)
+
+    scores = results[0]["scores"]
+    assert scores["Workload_Uptime_Percentage"] == 99.5
+    assert scores["Workload_Deployment_Time_Seconds"] is None
+    assert "DiagnosisAccuracy" not in scores
+
+
+def test_every_judged_builtin_declares_needs_judge() -> None:
+    """The deterministic gates must still run on a dead run; everything that reads the judge must not."""
+    judged = {"outcome_validity", "tool_invocation", "checklist", "safety", "grounding", "chaos"}
+    for key in pipeline._BUILTIN_METRIC_KEYS:  # noqa: SLF001
+        assert bool(getattr(METRICS[key], "needs_judge", False)) is (key in judged), key
 
 
 # --- extract_checklist_items (pure logic) -------------------------------------

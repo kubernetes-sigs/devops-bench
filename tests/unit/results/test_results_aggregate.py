@@ -126,6 +126,7 @@ def _write_manifest(path: Path, **overrides: object) -> None:
         augmentation=["mcp"],
         sandboxImage="agent-sandbox:dev",
         sandboxImageDigest="sha256:aaaa",
+        judgeModel="judge-m",
     )
     base.update(overrides)
     path.write_text(json.dumps(base), encoding="utf-8")
@@ -142,7 +143,9 @@ def test_aggregate_carries_sandbox_provenance_from_per_task_manifests(tmp_path: 
     by_setup = {m["setupId"]: m for m in manifests}
     assert by_setup["m-h-mcp"]["sandboxImage"] == "agent-sandbox:dev"
     assert by_setup["m-h-mcp"]["sandboxImageDigest"] == "sha256:aaaa"
+    assert by_setup["m-h-mcp"]["judgeModel"] == "judge-m"
     assert by_setup["m-h"]["sandboxImageDigest"] is None  # no sibling manifest
+    assert by_setup["m-h"]["judgeModel"] is None
 
 
 def test_aggregate_blanks_a_digest_the_batch_disagrees_on(tmp_path: Path) -> None:
@@ -157,6 +160,18 @@ def test_aggregate_blanks_a_digest_the_batch_disagrees_on(tmp_path: Path) -> Non
     assert manifests[0]["sandboxImageDigest"] is None
 
 
+def test_aggregate_blanks_a_judge_the_batch_disagrees_on(tmp_path: Path) -> None:
+    """Two judges under one setup is not one grading; the combined manifest must not name either."""
+    _write_rows(tmp_path / "run_1" / "rows.json", [_row(taskFolder="a", taskName="a")])
+    _write_manifest(tmp_path / "run_1" / "manifest.json")
+    _write_rows(tmp_path / "run_2" / "rows.json", [_row(taskFolder="b", taskName="b")])
+    _write_manifest(tmp_path / "run_2" / "manifest.json", judgeModel="judge-other")
+
+    _, manifests = aggregate(discover_row_files(tmp_path), run_id="run_x", t="2026-06-01T12:00:00Z")
+    assert manifests[0]["sandboxImageDigest"] == "sha256:aaaa"
+    assert manifests[0]["judgeModel"] is None
+
+
 def test_aggregate_leaves_provenance_unknown_when_a_rows_file_has_no_manifest(
     tmp_path: Path,
 ) -> None:
@@ -168,6 +183,7 @@ def test_aggregate_leaves_provenance_unknown_when_a_rows_file_has_no_manifest(
     _, manifests = aggregate(discover_row_files(tmp_path), run_id="run_x", t="2026-06-01T12:00:00Z")
     assert manifests[0]["sandboxImage"] is None
     assert manifests[0]["sandboxImageDigest"] is None
+    assert manifests[0]["judgeModel"] is None
 
 
 def test_aggregate_collapses_per_task_runs_into_one_run(tmp_path):

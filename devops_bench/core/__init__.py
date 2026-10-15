@@ -39,6 +39,11 @@ from devops_bench.core.logging import configure_logging, get_logger
 from devops_bench.core.registry import Registry
 from devops_bench.core.results import Result, Status
 from devops_bench.core.run_env import RunEnv
+from devops_bench.core.run_status import (
+    UNSCOREABLE_RUN_STATUSES,
+    is_unscoreable_run,
+    tripped_gates,
+)
 
 __all__ = [
     "ClusterInfo",
@@ -53,7 +58,10 @@ __all__ = [
     "get_env",
     "require_env",
     "first_env",
+    "UNSCOREABLE_RUN_STATUSES",
     "get_bool",
+    "is_unscoreable_run",
+    "tripped_gates",
     "get_int",
     "resolve_tf_root",
     "DevOpsBenchError",

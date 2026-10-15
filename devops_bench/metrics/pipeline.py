@@ -21,7 +21,13 @@ from typing import Any
 
 from deepeval.test_case import LLMTestCase
 
-from devops_bench.core import get_bool, get_logger, score_keys
+from devops_bench.core import (
+    get_bool,
+    get_logger,
+    is_unscoreable_run,
+    score_keys,
+    tripped_gates,
+)
 
 # Imported for their @METRICS.register side effects.
 from devops_bench.metrics import (
@@ -98,6 +104,7 @@ _BUILTIN_METRIC_KEYS: tuple[str, ...] = (
     "safety",
     "grounding",
     "chaos",
+    "chaos_perf",
     "verification",
     "integrity",
 )
@@ -120,20 +127,6 @@ def _canonical_tool_name(name: str) -> str:
     return name.split("__", 1)[1] if "__" in name else name
 
 
-def _score_value(entry: Any) -> float | None:
-    """Return the numeric score from a ``res["scores"]`` entry, or ``None``.
-
-    Handles both shapes ``MetricScore.to_entry`` produces: a bare number or a
-    ``{"score": ...}`` dict. A boolean is treated as absent so a flag never
-    masquerades as a 0/1 score.
-    """
-    if isinstance(entry, dict):
-        entry = entry.get("score")
-    if isinstance(entry, bool):
-        return None
-    return float(entry) if isinstance(entry, (int, float)) else None
-
-
 def _resolve(scores: dict[str, Any], keys: tuple[str, ...]) -> tuple[float | None, bool]:
     """Walk a preference chain and return ``(score, withheld)``.
 
@@ -154,7 +147,7 @@ def _resolve(scores: dict[str, Any], keys: tuple[str, ...]) -> tuple[float | Non
     for key in keys:
         if key not in scores:
             continue
-        value = _score_value(scores[key])
+        value = score_keys.score_value(scores[key])
         if value is not None:
             return value, False
         if score_keys.is_withheld(scores[key]):
@@ -162,7 +155,18 @@ def _resolve(scores: dict[str, Any], keys: tuple[str, ...]) -> tuple[float | Non
     return None, False
 
 
-def _finalize_outcome_score(scores: dict[str, Any]) -> None:
+def _unscoreable_reason(res: dict[str, Any]) -> str | None:
+    """Why ``res`` cannot be attributed to the agent, or ``None`` for a completed run."""
+    if not is_unscoreable_run(res):
+        return None
+    return (
+        "the agent never completed its turn "
+        f"(status={res.get('status')!r}, errors={len(res.get('errors') or [])}, "
+        f"trajectory steps={len(res.get('trajectory') or [])})"
+    )
+
+
+def _finalize_outcome_score(scores: dict[str, Any], *, unscoreable: str | None = None) -> None:
     """Assemble the v1 composite ``OutcomeScore`` from the sub-scores, in place.
 
     Each signal is taken from the first key present in its preference chain, so
@@ -178,17 +182,31 @@ def _finalize_outcome_score(scores: dict[str, Any]) -> None:
     Args:
         scores: The per-metric score map for one record, mutated to add
             :data:`OUTCOME_SCORE_KEY`.
+        unscoreable: Why the agent never completed its turn, or ``None`` for a
+            completed run. Such a run is scored on evidence only: a tripped gate
+            still zeroes the composite, a gate that failed closed does not, and
+            otherwise the composite is withheld with this reason.
     """
-    fired = [k for k in _CATASTROPHIC_KEYS if _score_value(scores.get(k)) == 0.0]
+    if unscoreable is None:
+        fired = [k for k in _CATASTROPHIC_KEYS if score_keys.score_value(scores.get(k)) == 0.0]
+    else:
+        fired = tripped_gates(scores)
     fired_labels = [
         f"{k}: failed closed" if score_keys.failed_closed(scores.get(k)) else k for k in fired
     ]
     catastrophic = bool(fired)
 
-    measured_correctness, _ = _resolve(scores, _CORRECTNESS_KEYS)
+    measured_correctness, _ = (None, False) if unscoreable else _resolve(scores, _CORRECTNESS_KEYS)
     correctness = measured_correctness
     if correctness is None:
         if not catastrophic:
+            if unscoreable:
+                scores[OUTCOME_SCORE_KEY] = {
+                    "score": None,
+                    "success": None,
+                    "version": SCORING_VERSION,
+                    "reason": f"withheld: {unscoreable}",
+                }
             return
         # A gate fired on a run whose every correctness source abstained — a
         # judge failure on a task with no ``verification_spec``, say. (Not a
@@ -232,7 +250,9 @@ def _finalize_outcome_score(scores: dict[str, Any]) -> None:
             # this string is the record's only diagnostic surface.
             f"c={'n/a' if measured_correctness is None else format(correctness, '.3f')}, "
             f"rec_v={'n/a' if recoverable is None else format(recoverable, '.3f')}, "
-            f"cat_v={0 if catastrophic else 1}" + (f" ({', '.join(fired_labels)})" if fired else "")
+            f"cat_v={0 if catastrophic else 1}"
+            + (f" ({', '.join(fired_labels)})" if fired else "")
+            + (f"; {unscoreable}" if unscoreable else "")
             # Name the gate that fired, so a zero in results.json explains
             # itself without cross-referencing the per-metric scores.
         ),
@@ -365,10 +385,12 @@ def evaluate_metrics_batch(
     for res in detailed_results:
         ctx = _build_context(res, judge_model, use_mcp)
         scores: dict[str, Any] = {}
+        unscoreable = _unscoreable_reason(res)
         _log.debug("Evaluating metrics for: %s...", res.get("name"))
         for ev in evaluators:
             try:
-                if not ev.applies(ctx):
+                # A dead run gives a judge nothing to read; only the deterministic families run.
+                if (unscoreable and getattr(ev, "needs_judge", False)) or not ev.applies(ctx):
                     continue
                 for ms in ev.evaluate(ctx):
                     scores[ms.name] = ms.to_entry()
@@ -384,7 +406,9 @@ def evaluate_metrics_batch(
         # formula, and must cost this record its composite rather than abort the
         # remaining records in the batch.
         try:
-            _finalize_outcome_score(scores)
+            _finalize_outcome_score(scores, unscoreable=unscoreable)
         except Exception:  # noqa: BLE001 - one record must not abort the batch
             _log.exception("composite outcome score failed for %s", res.get("name"))
+        if unscoreable:
+            _log.warning("unscoreable run %s: %s", res.get("name"), unscoreable)
         res["scores"] = scores

@@ -46,8 +46,10 @@ __all__ = [
 # ``manifests.json`` is plural: the combined file may span several setups.
 _ROWS_FILENAME = "rows.json"
 _MANIFEST_FILENAME = "manifest.json"
-# Per setup: ``(sandbox_image, sandbox_image_digest)`` as the per-task manifests recorded them.
-Provenance = Mapping[str, tuple[str | None, str | None]]
+# Per-task manifest fields carried onto the combined manifests, by JSON name.
+_PROVENANCE_FIELDS = ("sandboxImage", "sandboxImageDigest", "judgeModel")
+# Per setup: each provenance field as the per-task manifests recorded it.
+Provenance = Mapping[str, Mapping[str, str | None]]
 _OUT_ROWS_FILENAME = "rows.json"
 _OUT_MANIFESTS_FILENAME = "manifests.json"
 
@@ -93,32 +95,35 @@ def load_rows(files: Iterable[Path]) -> list[dict]:
     return rows
 
 
-def _load_provenance(files: Iterable[Path]) -> dict[str, tuple[str | None, str | None]]:
-    """Per-setup ``(sandbox_image, sandbox_image_digest)`` from the sibling ``manifest.json`` files.
+def _load_provenance(files: Iterable[Path]) -> Provenance:
+    """Per-setup provenance fields from the sibling ``manifest.json`` files.
 
     A field the setup's manifests disagree on, or that a manifest-less rows file cannot
-    vouch for, becomes ``None``: the batch did not provably run on one image.
+    vouch for, becomes ``None``: the batch did not provably run on one image or one judge.
     """
-    seen: dict[str, tuple[set[str | None], set[str | None]]] = {}
+    seen: dict[str, dict[str, set[str | None]]] = {}
     for file in files:
         sibling = Path(file).with_name(_MANIFEST_FILENAME)
         parsed = json.loads(sibling.read_text(encoding="utf-8")) if sibling.is_file() else None
         if isinstance(parsed, dict):
             setups = {str(parsed.get("setupId", ""))}
-            image, digest = parsed.get("sandboxImage"), parsed.get("sandboxImageDigest")
+            values = {field: parsed.get(field) for field in _PROVENANCE_FIELDS}
         else:
-            # No manifest: this file's setups cannot borrow another file's image.
+            # No manifest: this file's setups cannot borrow another file's provenance.
             setups = {str(row.get("setupId", "")) for row in load_rows([file])}
-            image = digest = None
+            values = dict.fromkeys(_PROVENANCE_FIELDS)
         for setup in setups:
-            images, digests = seen.setdefault(setup, (set(), set()))
-            images.add(image)
-            digests.add(digest)
+            fields = seen.setdefault(setup, {field: set() for field in _PROVENANCE_FIELDS})
+            for field, value in values.items():
+                fields[field].add(value)
 
     def sole(values: set[str | None]) -> str | None:
         return next(iter(values)) if len(values) == 1 else None
 
-    return {setup: (sole(images), sole(digests)) for setup, (images, digests) in seen.items()}
+    return {
+        setup: {field: sole(values) for field, values in fields.items()}
+        for setup, fields in seen.items()
+    }
 
 
 def dedupe_latest(rows: Iterable[dict]) -> list[dict]:
@@ -185,7 +190,7 @@ def build_manifests(
         rows: Re-batched rows (all already carrying the batch ``run_id`` / ``t``).
         run_id: Batch run id, mirrored onto every manifest.
         t: Batch timestamp, mirrored onto every manifest.
-        provenance: Per-setup sandbox image and digest (see :func:`_load_provenance`).
+        provenance: Per-setup sandbox image, digest and judge model (see :func:`_load_provenance`).
 
     Returns:
         One manifest per setup, in first-seen order.
@@ -194,7 +199,7 @@ def build_manifests(
     for row in rows:
         if row.setup_id in manifests:
             continue
-        image, digest = (provenance or {}).get(row.setup_id, (None, None))
+        fields = (provenance or {}).get(row.setup_id, {})
         manifests[row.setup_id] = Manifest(
             schema_version=SCHEMA_VERSION,
             run_id=run_id,
@@ -203,9 +208,10 @@ def build_manifests(
             model=row.model,
             harness=row.harness,
             augmentation=list(row.augmentation),
-            sandbox_image=image,
-            sandbox_image_digest=digest,
+            sandbox_image=fields.get("sandboxImage"),
+            sandbox_image_digest=fields.get("sandboxImageDigest"),
             reasoning_effort=row.reasoning_effort,
+            judge_model=fields.get("judgeModel"),
         )
     return list(manifests.values())
 
@@ -215,7 +221,7 @@ def aggregate(files: Iterable[Path], *, run_id: str, t: str) -> tuple[list[dict]
 
     De-duplicates retried tasks (latest wins), re-batches the rows onto a single
     ``run_id`` / ``t``, and derives the per-setup manifests, carrying each
-    setup's sandbox image and digest over from the per-task ``manifest.json``.
+    setup's sandbox image, digest and judge model over from the per-task ``manifest.json``.
 
     Args:
         files: Per-task ``rows.json`` paths.

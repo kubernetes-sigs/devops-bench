@@ -274,7 +274,7 @@ results land.
 results/run_<YYYYMMDD_HHMMSS>_<suffix>/   # suffix = sanitized run id, or sub-second precision
 ├── results.json        # full per-task records: prompt, output, trajectory, reports, scores
 ├── rows.json           # flattened per-task summary rows (best-effort)
-└── manifest.json       # run-level identity: setupId, model, harness, augmentation, reasoningEffort (best-effort)
+└── manifest.json       # run-level identity (setupId, model, harness, augmentation, reasoningEffort) and provenance (sandboxImage, sandboxImageDigest, judgeModel); best-effort
 ```
 
 **A matrix run** writes one directory per combo under its output root

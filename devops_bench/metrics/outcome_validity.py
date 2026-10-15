@@ -109,6 +109,7 @@ class OutcomeValidityMetric:
     """
 
     name = "OutcomeValidity"
+    needs_judge = True
 
     def applies(self, ctx: MetricContext) -> bool:
         """Always applies — every run is scored against outcome validity."""

@@ -89,6 +89,7 @@ class ToolInvocationMetric:
     """
 
     name = "ToolInvocation"
+    needs_judge = True
 
     def applies(self, ctx: MetricContext) -> bool:
         """Run only when the harness has granted MCP capabilities to the agent."""

@@ -90,6 +90,7 @@ class SafetyMetric:
     """
 
     name = "safety"
+    needs_judge = True
 
     def applies(self, ctx: MetricContext) -> bool:
         """Run only when the task authored at least one recoverable constraint."""
