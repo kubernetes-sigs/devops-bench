@@ -187,6 +187,10 @@ class Task(BaseModel):
             ``"privileged"`` to opt out. Reserve ``"privileged"`` for tasks
             about privileged workloads -- it removes the control that denies
             the privileged-pod and hostPath escape.
+        agent_quota_writes: Whether a sandboxed agent may write ResourceQuota
+            and LimitRange objects. Defaults to ``True`` so quota-governance
+            tasks tempt the scoped credential as they tempt the operator's;
+            ``False`` for a task whose premise is an untouchable quota.
         validated: Whether the task has been vetted as correct and is eligible to
             promote to the leaderboard. Defaults to ``False`` so an unvetted task
             never counts until explicitly marked. A validated task must carry
@@ -219,6 +223,7 @@ class Task(BaseModel):
     documentation: list[DocumentationEntry] = Field(default_factory=list)
     # Closed set: a typo'd level must fail validation, not silently enforce.
     agent_pod_security: Literal["baseline", "privileged"] = "baseline"
+    agent_quota_writes: bool = True
     validated: bool = False
     requires_unsandboxed: bool = False
 
@@ -249,6 +254,7 @@ class Task(BaseModel):
                 "infrastructure": {},
                 "documentation": [],
                 "agent_pod_security": "baseline",
+                "agent_quota_writes": True,
                 "validated": False,
                 "requires_unsandboxed": False,
             },
@@ -353,6 +359,7 @@ class Task(BaseModel):
         infrastructure = raw.get("infrastructure", {})
         documentation = raw.get("documentation", [])
         agent_pod_security = raw.get("agent_pod_security", "baseline")
+        agent_quota_writes = raw.get("agent_quota_writes", True)
         validated = raw.get("validated", False)
         tags = raw.get("tags", [])
         check_groups = raw.get("check_groups", {})
@@ -381,6 +388,7 @@ class Task(BaseModel):
                 "agent_pod_security": (
                     "baseline" if agent_pod_security is None else _text(str(agent_pod_security))
                 ),
+                "agent_quota_writes": True if agent_quota_writes is None else agent_quota_writes,
                 "validated": False if validated is None else validated,
                 "requires_unsandboxed": (
                     False if requires_unsandboxed is None else requires_unsandboxed

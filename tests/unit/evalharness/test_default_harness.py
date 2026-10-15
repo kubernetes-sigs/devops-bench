@@ -1280,8 +1280,9 @@ def test_prepare_sandbox_spec_refuses_without_a_sandbox_opt_in(
         )
 
 
+@pytest.mark.parametrize("quota_writes", [True, False], ids=["granted", "declined"])
 def test_prepare_sandbox_spec_completes_the_skeletal_spec(
-    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quota_writes: bool
 ) -> None:
     from devops_bench.core import ClusterInfo, NetworkPlan
 
@@ -1310,14 +1311,22 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     provider = _StubProvider()
 
     def fake_provision(
-        got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str
+        got_plan: Any,
+        dest_dir: Path,
+        *,
+        token_ttl_sec: int,
+        pod_security: str,
+        quota_writes: bool,
     ) -> Path:
         assert got_plan is plan
         assert dest_dir == tmp_path / "creds"
         # Default 600s agent timeout plus slack: the token must outlast the run.
         assert token_ttl_sec == 1500
         assert pod_security == "baseline"
+        seen_quota_writes.append(quota_writes)
         return kubeconfig
+
+    seen_quota_writes: list[bool] = []
 
     plan_requests: list[tuple[Any, str]] = []
 
@@ -1341,9 +1350,16 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     workspace.mkdir()
     (tmp_path / "creds").mkdir()
     spec = harness._prepare_sandbox_spec(  # noqa: SLF001
-        workspace, tmp_path / "creds", ClusterInfo(name="c1"), provider, "baseline"
+        workspace,
+        tmp_path / "creds",
+        ClusterInfo(name="c1"),
+        provider,
+        "baseline",
+        quota_writes=quota_writes,
     )
 
+    # The task's quota decision reaches provisioning as given, not as the default.
+    assert seen_quota_writes == [quota_writes]
     # The sandbox home exists on the host before the agent runs (it is both
     # the container HOME mountpoint and the detection inventory root).
     assert (workspace / "home").is_dir()
@@ -1465,6 +1481,7 @@ def test_run_one_tears_down_sandbox_credentials_in_its_finally(
             pod_security: str,
             *,
             with_cluster: bool = True,
+            quota_writes: bool = True,
         ) -> Any:
             (workspace_path / "home").mkdir(parents=True, exist_ok=True)
             return replace(
@@ -1496,6 +1513,71 @@ def test_run_one_tears_down_sandbox_credentials_in_its_finally(
             assert record["sandbox_teardown_clean"] is False
     finally:
         AGENTS._items.pop("fake-sandbox-teardown", None)  # noqa: SLF001
+
+
+def test_run_one_hands_the_tasks_sandbox_decisions_to_the_spec(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declining task reaches ``_prepare_sandbox_spec`` as it declared itself, so
+    dropping either keyword from ``_run_one`` fails here rather than silently
+    re-granting readonly-quota's agent the quota."""
+    from dataclasses import replace
+
+    from devops_bench.core import NetworkPlan
+
+    class _SandboxReadyAgent(_WorkspaceWritingAgent):
+        supports_sandbox = True
+
+    AGENTS.register("fake-sandbox-decisions")(_SandboxReadyAgent)
+    try:
+        harness = _sandboxed_harness(
+            monkeypatch, tmp_path, agent_type="fake-sandbox-decisions", no_infra=True
+        )
+        seen: list[tuple[str, bool]] = []
+
+        def fake_prepare(
+            workspace_path: Path,
+            creds_dir: Path,
+            cluster_info: Any,
+            provider: Any,
+            pod_security: str,
+            *,
+            with_cluster: bool = True,
+            quota_writes: bool = True,
+        ) -> Any:
+            seen.append((pod_security, quota_writes))
+            (workspace_path / "home").mkdir(parents=True, exist_ok=True)
+            return replace(
+                harness.build_agent_config().sandbox,
+                network=NetworkPlan(kubectl_context="kind-c1"),
+                workspace=workspace_path,
+                kubeconfig=creds_dir / "kubeconfig",
+            )
+
+        monkeypatch.setattr(harness, "_prepare_sandbox_spec", fake_prepare)
+        monkeypatch.setattr(
+            harness_default.agent_credentials,
+            "teardown_agent_credentials",
+            lambda context=None: True,
+        )
+        task = Task.from_dict(
+            {
+                "task_id": "t",
+                "name": "demo",
+                "prompt": "p",
+                "agent_pod_security": "privileged",
+                "agent_quota_writes": False,
+            }
+        )
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        record, _ = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert seen == [("privileged", False)]
+    finally:
+        AGENTS._items.pop("fake-sandbox-decisions", None)  # noqa: SLF001
 
 
 def test_write_run_artifacts_records_sandbox_provenance(
@@ -2016,3 +2098,17 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
     assert exempt == ["secret-rotation"]
+
+
+def test_only_readonly_quota_declines_quota_writes() -> None:
+    """Loaded through the real loader so a dropped key cannot pass as the default."""
+    import pathlib
+
+    from devops_bench.tasks.loader import FileSystemTaskLoader
+
+    declining = [
+        p.parent.name
+        for p in sorted(pathlib.Path("tasks").glob("*/*/task.yaml"))
+        if not all(t.agent_quota_writes for t in FileSystemTaskLoader().load_tasks(str(p)))
+    ]
+    assert declining == ["readonly-quota"]

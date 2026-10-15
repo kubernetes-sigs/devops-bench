@@ -29,6 +29,8 @@ container reaches the apiserver the way a real run does.
 ``tests/e2e/test_sandbox_boundary.py`` drives this and asserts the exit code;
 it stays runnable standalone for the per-probe transcript. Unless ``--keep``
 is given, the run tears the boundary down and asserts nothing survived.
+``--decline-quota-writes`` provisions as a task that declines the quota grant,
+so both sides of ``agent_quota_writes`` get a live check.
 """
 
 from __future__ import annotations
@@ -71,6 +73,16 @@ spec:
     - name: host
       hostPath:
         path: /
+"""
+
+# Labelled, because the baseline namespace guard refuses a bare create; the bare one is a probe.
+_ORDINARY_NAMESPACE = """\
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bench-probe-ok
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
 """
 
 _PRIVILEGED_OVERRIDE = json.dumps(
@@ -212,6 +224,16 @@ def _namespace_exists(context: str, name: str) -> bool | None:
     return bool(completed.stdout.strip()) if completed.returncode == 0 else None
 
 
+def _wait_until_absent(context: str, name: str, timeout_sec: int = _HOST_CMD_TIMEOUT_SEC) -> bool:
+    """Wait out a namespace the previous run deleted with ``--wait=false``."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if _namespace_exists(context, name) is False:
+            return True
+        time.sleep(3)
+    return False
+
+
 def _create_legacy_pods(context: str) -> bool:
     """Build the pods that must predate provisioning, and wait until they are Running.
 
@@ -280,16 +302,22 @@ def _legacy_pod_still_running(context: str, name: str) -> bool:
 
 
 def _probes(
+    workspace_namespace_path: str,
     workspace_pod_path: str,
     exec_target: str | None,
     managed_setup: Callable[[], bool] | None,
     legacy_setup: Callable[[str], bool] | None,
+    *,
+    quota_writes: bool = True,
 ) -> list[Probe]:
     """Build the probe list: controls first, then the escapes, then the informational checks.
 
     ``exec_target``, ``managed_setup`` and ``legacy_setup`` are ``None`` when their
     precondition could not be built, which drops the probes that need it.
+    ``quota_writes`` mirrors the credential provisioned: the quota probe expects
+    the write to land when granted and to be refused by RBAC when declined.
     """
+    quota_argv = ["kubectl", "create", "quota", "bench-probe-quota", "-n", "bench-probe-ok"]
     return [
         # -- controls: prove the credential works before trusting any refusal --
         Probe(
@@ -307,8 +335,9 @@ def _probes(
         ),
         Probe(
             name="control:ordinary-namespace",
-            why="the namespace guard must deny reserved names, not all names",
-            argv=["kubectl", "create", "namespace", "bench-probe-ok"],
+            why="the namespace guard must deny reserved names and unlabelled creates, "
+            "not a labelled create of an ordinary name",
+            argv=["kubectl", "apply", "-f", workspace_namespace_path],
             expect_denied=False,
         ),
         Probe(
@@ -325,6 +354,23 @@ def _probes(
                 f"--overrides={_ORDINARY_POD}",
             ],
             expect_denied=False,
+        ),
+        (
+            Probe(
+                name="control:quota-write",
+                why="edit never writes quotas; without the grant landing, the quota "
+                "tasks measure the credential rather than the agent",
+                argv=[*quota_argv, "--hard=pods=10"],
+                expect_denied=False,
+            )
+            if quota_writes
+            else Probe(
+                name="review:quota-write-declined",
+                why="a declining task's credential must find the quota route closed, "
+                "and closed by RBAC: the binding was deleted, not merely skipped",
+                argv=[*quota_argv, "--hard=pods=10"],
+                expect_stderr="forbidden",
+            )
         ),
         # -- incident 1: privileged pod + hostPath, reading the host disk --
         Probe(
@@ -388,6 +434,13 @@ def _probes(
             expect_stderr="privileged",
         ),
         Probe(
+            name="review:bare-namespace",
+            why="a namespace without the PSA label escapes policy 2; the guard must "
+            "refuse the bare create and say which label to add",
+            argv=["kubectl", "create", "namespace", "bench-probe-bare"],
+            expect_stderr="pod-security.kubernetes.io/enforce",
+        ),
+        Probe(
             name="review:claim-exempt-namespace",
             why="exemptions are by name and several do not exist on every "
             "provider, so the agent could claim one and deploy there freely",
@@ -429,6 +482,28 @@ def _probes(
                 "--image=busybox",
             ],
             expect_stderr="may not run a workload",
+        ),
+        *(
+            [
+                Probe(
+                    name="review:exempt-namespace-quota",
+                    why="the quota grant is cluster-wide and the guard once knew only "
+                    "workloads and exec, so a LimitRange starving kube-system was one "
+                    "-n away. Unreachable when declined: RBAC refuses first",
+                    argv=[
+                        "kubectl",
+                        "create",
+                        "quota",
+                        "bench-probe-exempt-quota",
+                        "-n",
+                        "kube-system",
+                        "--hard=pods=1000",
+                    ],
+                    expect_stderr="change its quotas",
+                )
+            ]
+            if quota_writes
+            else []
         ),
         *(
             [
@@ -701,6 +776,11 @@ def main() -> int:
     parser.add_argument(
         "--keep", action="store_true", help="leave the probe namespace behind for inspection"
     )
+    parser.add_argument(
+        "--decline-quota-writes",
+        action="store_true",
+        help="provision as a task with agent_quota_writes: false; expect the quota write refused",
+    )
     args = parser.parse_args()
 
     provider, cluster = _provider_and_cluster(args)
@@ -722,6 +802,7 @@ def main() -> int:
         workspace = Path(tmp) / "workspace"
         (workspace / "home").mkdir(parents=True)
         (workspace / "probe-hostpath.yaml").write_text(_HOSTPATH_POD)
+        (workspace / "probe-namespace.yaml").write_text(_ORDINARY_NAMESPACE)
         creds_dir = Path(tmp) / "creds"
         creds_dir.mkdir()
 
@@ -729,6 +810,12 @@ def main() -> int:
         claimed_preexisted: bool | None = None
         # One finally from the first cluster write on: a raising probe must still reach cleanup.
         try:
+            # The previous run deleted its namespaces without waiting; Terminating refuses creates.
+            for namespace in ("bench-probe-ok", _LEGACY_NAMESPACE):
+                if not _wait_until_absent(context, namespace):
+                    print(f"    FAIL setup:namespace-terminating ({namespace} did not go away)")
+                    failures.append("setup:namespace-terminating")
+
             # Before provisioning: the PSA labeller must skip a namespace the cluster claims.
             print(f"==> creating the labelled namespace {_MANAGED_NAMESPACE}")
             managed_setup: Callable[[], bool] | None = functools.partial(
@@ -750,7 +837,10 @@ def main() -> int:
                 legacy_setup = None
 
             print(f"==> provisioning the agent credential against {context}")
-            kubeconfig = creds.provision_agent_credentials(plan, creds_dir, token_ttl_sec=3600)
+            quota_writes = not args.decline_quota_writes
+            kubeconfig = creds.provision_agent_credentials(
+                plan, creds_dir, token_ttl_sec=3600, quota_writes=quota_writes
+            )
             print(f"    kubeconfig: {kubeconfig}")
 
             print("==> checking the admission policies compiled")
@@ -777,7 +867,12 @@ def main() -> int:
                 print("    NOTE: no running kube-system pod; skipping the exec probe")
 
             for probe in _probes(
-                "/workspace/probe-hostpath.yaml", exec_target, managed_setup, legacy_setup
+                "/workspace/probe-namespace.yaml",
+                "/workspace/probe-hostpath.yaml",
+                exec_target,
+                managed_setup,
+                legacy_setup,
+                quota_writes=quota_writes,
             ):
                 passed, detail = _run_probe(executor, probe)
                 verdict = "PASS" if passed else "FAIL"
@@ -799,6 +894,7 @@ def main() -> int:
             for kind, name in (
                 ("pod", "bench-probe-exempt"),
                 ("deployment", "bench-probe-exempt-deploy"),
+                ("resourcequota", "bench-probe-exempt-quota"),
             ):
                 _kubectl(
                     context,
@@ -835,7 +931,7 @@ def main() -> int:
             )
 
             if not args.keep:
-                for namespace in ("bench-probe-ok", _MANAGED_NAMESPACE):
+                for namespace in ("bench-probe-ok", "bench-probe-bare", _MANAGED_NAMESPACE):
                     _kubectl(
                         context,
                         "delete",

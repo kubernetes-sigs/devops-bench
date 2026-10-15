@@ -62,17 +62,20 @@ kubeconfig, ADC, and the Docker socket do not exist inside.
 
 Provisioning (host-side, per run, pinned to the run's own kubectl context)
 creates a `bench-agent` ServiceAccount bound to `edit` plus a read-mostly
-cluster supplement, mints a token that expires just after the agent's
-timeout, applies PSA `baseline` labels, and installs ValidatingAdmissionPolicy
-backstops denying privileged pods, host namespaces, hostPath mounts, exempt-
-namespace writes, and shells into pre-existing non-conformant pods. A task
-whose subject matter *is* privileged workloads declares
-`agent_pod_security: privileged`. A task whose objective needs the ambient
-cloud identity itself declares `requires_unsandboxed: true` and runs outside
-the boundary — loudly, and with its record's `sandboxed` field reading `false`
-(the harness refuses to pair an exemption with a sandbox spec, so the two can
-never both apply to one task). Under vcluster the ServiceAccount lives inside
-the virtual cluster, so the token is cryptographically useless against the host.
+cluster supplement and a `ResourceQuota`/`LimitRange` write grant, mints a
+token that expires just after the agent's timeout, applies PSA `baseline`
+labels, and installs ValidatingAdmissionPolicy backstops denying privileged
+pods, host namespaces, hostPath mounts, exempt-namespace writes (workloads,
+exec, and quotas alike), and shells into pre-existing non-conformant pods. A
+task whose subject matter *is* privileged workloads declares
+`agent_pod_security: privileged`; one whose premise is that the operator cannot
+touch the quota declares `agent_quota_writes: false`. A task whose objective
+needs the ambient cloud identity itself declares `requires_unsandboxed: true`
+and runs outside the boundary — loudly, and with its record's `sandboxed` field
+reading `false` (the harness refuses to pair an exemption with a sandbox spec,
+so the two can never both apply to one task). Under vcluster the ServiceAccount
+lives inside the virtual cluster, so the token is cryptographically useless
+against the host.
 
 **Teardown mirrors provisioning**: at the end of every sandboxed task — and
 from provisioning's own failure paths — every policy, binding, label and RBAC

@@ -15,8 +15,9 @@
 """E2E: the sandbox boundary holds against a live cluster.
 
 Drives ``hack/sandbox_probe.py`` (controls, both observed escapes, every
-review-found hole, and a clean teardown) and asserts its exit code, so a
-boundary regression is a red build while the script stays runnable standalone.
+review-found hole, and a clean teardown) once per side of ``agent_quota_writes``
+and asserts its exit code, so a boundary regression is a red build while the
+script stays runnable standalone.
 
 Double-gated: outside ``tests/unit`` and skipped unless ``BENCH_E2E_SANDBOX=1``.
 Needs a docker daemon, a built sandbox image, and a disposable cluster (the
@@ -76,10 +77,12 @@ def _probe_argv() -> list[str]:
     return argv
 
 
-def test_boundary_probes_all_green() -> None:
+@pytest.mark.parametrize("decline_quota_writes", [False, True], ids=["granted", "declined"])
+def test_boundary_probes_all_green(decline_quota_writes: bool) -> None:
     """Controls admit, escapes deny, teardown leaves no trace; the transcript rides the failure."""
+    argv = _probe_argv() + (["--decline-quota-writes"] if decline_quota_writes else [])
     completed = subprocess.run(
-        _probe_argv(),
+        argv,
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
