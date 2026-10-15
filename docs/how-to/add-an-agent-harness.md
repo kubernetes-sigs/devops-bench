@@ -18,7 +18,7 @@ For the concepts (harness vs model, capabilities, configuration), read
 | Add the module to `_BUILTIN_AGENT_MODULES` | `devops_bench/evalharness/default.py` |
 | Route agent-owned subprocesses through `run_agent_cmd`, then set `supports_sandbox = True` | your new module |
 | Ship a sandbox image for your CLI | `docker/Dockerfile.<name>` |
-| Override `reasoning_effort(cls, config)` if your CLI exposes a reasoning tier, so each tier gets its own `setupId` | your new module |
+| Override `reasoning_effort(cls, config)` and `arm_model(cls, config)` if your CLI exposes a reasoning tier, so each tier gets its own `setupId` and a tier spelled inside the model id does not split one arm into several | your new module |
 
 ## Steps
 

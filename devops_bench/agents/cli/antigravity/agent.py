@@ -137,10 +137,11 @@ class _ModelSelection(NamedTuple):
     model: str
     effort: str | None  # --effort value; None when ``model`` names its own tier
     tier: str  # the tier in force, whichever spelling named it
+    arm_model: str  # the configured id with the tier lifted out; what the arm records as model
 
 
 def _resolve_model_name(model: str) -> _ModelSelection:
-    """Resolve a matrix model id to the ``(model, effort)`` pair ``agy`` expects.
+    """Resolve a matrix model id to what ``agy`` runs and what the arm records.
 
     ``AGENT_MODEL`` is one value shared by every arm and by the judge, and it is
     spelled for Vertex -- ``google/gemini-3.1-pro-preview``. Antigravity accepts
@@ -149,8 +150,9 @@ def _resolve_model_name(model: str) -> _ModelSelection:
     confines the quirk to the one harness that has it; respelling ``AGENT_MODEL``
     instead would desynchronize this arm's label from every other arm in the matrix.
 
-    e.g. ``"google/gemini-3.1-pro-preview"`` -> ``("gemini-3.1-pro", "high", "high")``,
-    and ``"Gemini 3.1 Pro (Low)"`` -> ``("Gemini 3.1 Pro (Low)", None, "low")``.
+    e.g. ``"google/gemini-3.1-pro-preview-low"`` ->
+    ``("gemini-3.1-pro", "low", "low", "google/gemini-3.1-pro-preview")``, and
+    ``"Gemini 3.1 Pro (Low)"`` -> ``("Gemini 3.1 Pro (Low)", None, "low", "Gemini 3.1 Pro")``.
 
     Args:
         model: The configured model id, optionally provider-qualified.
@@ -158,12 +160,16 @@ def _resolve_model_name(model: str) -> _ModelSelection:
     Returns:
         The id to pass as ``--model``, the tier to pass as ``--effort`` -- or
         ``None`` when the id already names its own, in which case ``--effort``
-        must be omitted or the CLI rejects the pair -- and the tier in force.
+        must be omitted or the CLI rejects the pair -- the tier in force, and the
+        configured id with that tier lifted out, which is what the arm records as
+        its model so one agent has one setup id however the tier was spelled.
     """
-    name = model.split("/")[-1].strip()
+    prefix, _, name = model.strip().rpartition("/")
+    name = name.strip()
     display = _DISPLAY_TIER_RE.search(name)
     if display:
-        return _ModelSelection(name, None, display.group(1).lower())
+        arm = _requalify(prefix, name[: display.start()].rstrip())
+        return _ModelSelection(name, None, display.group(1).lower(), arm)
     # The tier comes off first: a tier suffix would otherwise hide -preview
     # from the check below, and Antigravity rejects any id that still carries it.
     effort: str | None = None
@@ -171,10 +177,17 @@ def _resolve_model_name(model: str) -> _ModelSelection:
         if name.lower().endswith(f"-{tier}"):
             name, effort = name[: -len(tier) - 1], tier
             break
+    # The arm keeps the matrix spelling (prefix and -preview); only the tier is lifted out.
+    arm = _requalify(prefix, name)
     if name.endswith(_VERTEX_PREVIEW_SUFFIX):
         name = name[: -len(_VERTEX_PREVIEW_SUFFIX)]
     effort = effort or _default_effort()
-    return _ModelSelection(name, effort, effort)
+    return _ModelSelection(name, effort, effort, arm)
+
+
+def _requalify(prefix: str, name: str) -> str:
+    """Put the provider prefix back so the arm keeps the matrix spelling."""
+    return f"{prefix}/{name}" if prefix else name
 
 
 def _effective_effort(model: str) -> str | None:
@@ -290,6 +303,17 @@ class AgyCliAgent(base.AgentHarness):
     def reasoning_effort(cls, config: agents_config.AgentConfig) -> str | None:
         """The tier the run uses, whether it came from the id, ``--effort``, or the env default."""
         return _effective_effort(config.model) if config.model else None
+
+    @classmethod
+    def arm_model(cls, config: agents_config.AgentConfig) -> str | None:
+        """The configured id with its tier lifted out, in the matrix spelling the other arms use."""
+        if not config.model:
+            return None
+        try:
+            return _resolve_model_name(config.model).arm_model
+        except core.ConfigError:
+            # Same contract as reasoning_effort: never raise from manifest writing.
+            return config.model
 
     def _resolve_binary(self) -> str:
         """Resolve the absolute path to the ``agy`` binary."""

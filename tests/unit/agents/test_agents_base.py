@@ -100,6 +100,16 @@ def test_config_default_is_a_fresh_agent_config() -> None:
     assert a.config is not b.config
 
 
+def test_default_arm_identity_is_the_configured_model_with_no_tier() -> None:
+    class _Plain(AgentHarness):
+        def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+            return AgentResult(final_response="ok")
+
+    config = AgentConfig(model="m-low")
+    assert _Plain.arm_model(config) == "m-low"
+    assert _Plain.reasoning_effort(config) is None
+
+
 def test_third_party_can_register_with_no_central_edit() -> None:
     """A dummy agent registers via @AGENTS.register and resolves via .get."""
 
