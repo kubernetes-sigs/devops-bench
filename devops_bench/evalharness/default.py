@@ -62,6 +62,7 @@ from devops_bench.core.model_identity import judge_identity
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
+from devops_bench.evalharness.fixtures import FixtureError, check_prompt_fixtures
 from devops_bench.evalharness.hold import (
     HoldObservation,
     SafeguardMonitor,
@@ -1016,6 +1017,7 @@ class DefaultEvalHarness(Harness):
         sandbox_exempt = False
         agent_started = False
         verification_parse_errors: list[dict[str, str]] = []
+        fixture_problems: list[str] = []
         entries: list[VerificationEntry] = []
         # Tracked as computed so a failed record carries the same resolved strings.
         prompt: str | None = None
@@ -1070,6 +1072,13 @@ class DefaultEvalHarness(Harness):
             target_dep, ns = self._resolve_deployment_and_namespace(task)
 
             prompt = self.replace_placeholders(task.prompt, active_cluster_name, target_dep, ns)
+            # A missing promised fixture fails the run; with the requirement off it is recorded.
+            fixture_problems = check_prompt_fixtures(
+                prompt,
+                task.name,
+                home=(workspace_path / "home") if completed_spec is not None else None,
+                mounts=completed_spec.fixture_mounts if completed_spec is not None else None,
+            )
             # Resolved before the agent runs so a mid-run failure still records them.
             recoverable_safety = [
                 self.replace_placeholders(item, active_cluster_name, target_dep, ns)
@@ -1180,12 +1189,15 @@ class DefaultEvalHarness(Harness):
                 chaos_report=chaos_report,
                 perf_report=perf_report,
                 verification_parse_errors=verification_parse_errors,
+                fixture_problems=fixture_problems,
                 verification_report=verification_report,
                 verification_status=verification_status,
                 recoverable_safety=recoverable_safety,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
+            if isinstance(exc, FixtureError):
+                fixture_problems = list(exc.problems)
             _log.error("critical error during task %s: %s", task.name, exc)
             # The exception may predate the success path's stop(); stop() is idempotent.
             if safeguard_monitor is not None:
@@ -1219,6 +1231,7 @@ class DefaultEvalHarness(Harness):
                 expected_output=expected_output,
                 recoverable_safety=recoverable_safety,
                 verification_parse_errors=verification_parse_errors,
+                fixture_problems=fixture_problems,
                 verification_report=exception_verification_report,
                 verification_status=exception_verification_status,
             )
@@ -1365,6 +1378,7 @@ class DefaultEvalHarness(Harness):
         chaos_report: dict[str, Any],
         perf_report: dict[str, Any],
         verification_parse_errors: list[dict[str, str]] | None = None,
+        fixture_problems: list[str] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "evaluated",
         recoverable_safety: list[str] | None = None,
@@ -1408,6 +1422,7 @@ class DefaultEvalHarness(Harness):
                 "chaos_driver": dict(chaos_report.get("driver") or {}),
                 "perf_report": perf_report,
                 "verification_parse_errors": list(verification_parse_errors or []),
+                "fixture_problems": list(fixture_problems or []),
                 "verification_report": list(verification_report or []),
                 "verification_status": verification_status,
             }
@@ -1424,6 +1439,7 @@ class DefaultEvalHarness(Harness):
         expected_output: str | None = None,
         recoverable_safety: list[str] | None = None,
         verification_parse_errors: list[dict[str, str]] | None = None,
+        fixture_problems: list[str] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "not_evaluated",
     ) -> dict[str, Any]:
@@ -1437,6 +1453,7 @@ class DefaultEvalHarness(Harness):
             expected_output: The substituted expectation if computed, else the raw one.
             recoverable_safety: The substituted checklist if computed, else the raw one.
             verification_parse_errors: Any spec-parse errors collected so far.
+            fixture_problems: Promised home fixtures the pre-flight found unusable.
             verification_report: The report if verification ran on the exception path.
             verification_status: "evaluated", "not_evaluated", or "skipped_no_infra".
         """
@@ -1459,6 +1476,7 @@ class DefaultEvalHarness(Harness):
                 # A failed run never promotes, even on a vetted task.
                 "validated": False,
                 "verification_parse_errors": list(verification_parse_errors or []),
+                "fixture_problems": list(fixture_problems or []),
                 "verification_report": list(verification_report or []),
                 "verification_status": verification_status,
             }
@@ -1504,6 +1522,8 @@ class DefaultEvalHarness(Harness):
             "judge": {},
             "chaos_driver": {},
             "verification_parse_errors": [],
+            # Non-empty only when BENCH_REQUIRE_FIXTURES=0 let a run proceed without an input.
+            "fixture_problems": [],
             "verification_report": [],
             "verification_status": "",
             # No cluster, so the OutcomeValidity judge must not penalize "not applying".
