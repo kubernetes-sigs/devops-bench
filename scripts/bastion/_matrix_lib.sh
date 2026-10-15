@@ -300,7 +300,7 @@ matrix_dispatch() {
     }
   fi
 
-  local runner; runner="$(mktemp -t matrix-runner-XXXXXX.sh)"
+  local runner v; runner="$(mktemp -t matrix-runner-XXXXXX.sh)"
   trap 'rm -f "${runner}"' RETURN
   {
     echo '#!/usr/bin/env bash'
@@ -312,6 +312,10 @@ matrix_dispatch() {
     echo "export PROJECT_ID='${PROJECT_ID}' CLUSTER_NAME='${CLUSTER_NAME}'"
     echo "export GCP_LOCATION='${GCP_LOCATION}'"
     echo "export AGENT_TIMEOUT_SEC='${AGENT_TIMEOUT_SEC}'"
+    # Per-launch knobs set locally override the bastion's env file; %q keeps quotes intact.
+    for v in AGENT_EXTRA_FLAGS AGENT_MODEL_EFFORT; do
+      [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"
+    done
     echo "export BENCH_PARALLEL=true"
     if [ -n "${BENCH_AGENT_SANDBOX:-}" ]; then
       # The runner's env is only what this script bakes in; a workstation-only export

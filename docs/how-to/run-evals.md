@@ -240,7 +240,8 @@ Defaults live in `scripts/bastion/_matrix_lib.sh` and `run_matrix.sh`.
 |---|---|
 | `MATRIX_TASKS` | Space-separated `task.yaml` paths, or `ALL` to enumerate every task under `tasks/` (default `tasks/common/opa-remediation/task.yaml`). |
 | `MATRIX_MODELS` | Space-separated model ids (default `gemini-3.1-pro-preview`). |
-| `MATRIX_AGENT_CONFIGS` | Agent-config presets, each `<oc\|gcli>[+mcp][+skills]` — `oc` = openclaw, `gcli` = gemini (default `oc+mcp+skills`). |
+| `MATRIX_AGENT_CONFIGS` | Agent-config presets, each `<oc\|gcli\|agy\|cc>[+mcp][+skills]` — `oc` = openclaw, `gcli` = gemini, `agy` = antigravity, `cc` = claude (default `oc+mcp+skills`). `cc` sets its own `AGENT_PROVIDER` (`anthropic`, or `anthropic-vertex` under `BENCH_VERTEX`) and does not run under `BENCH_AGENT_SANDBOX`, which refuses the batch. |
+| `AGENT_EXTRA_FLAGS`, `AGENT_MODEL_EFFORT` | Forwarded to every combo when set on the launching host, so one launch can differ from the bastion's env file (e.g. an agy effort arm). The sandbox knobs `BENCH_AGENT_SANDBOX`, `BENCH_SANDBOX_IMAGE` and `BENCH_AGENT_FIXTURES` are forwarded the same way. |
 | `PROJECT_ID` | Cloud project id; required unless `DRY_RUN`. |
 | `MAX_PARALLEL` | Max combos running at once (default 3). |
 | `AGENT_TIMEOUT_SEC` | Per-agent-call timeout. The matrix default is 1200s; the bare harness default is 600s (`devops_bench/agents/config.py`). |
