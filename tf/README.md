@@ -8,7 +8,7 @@ This directory contains the OpenTofu modules and prebuilt configurations used to
 
 - `modules/`: Reusable infrastructure components.
   - **`cluster/`**: The provider-neutral cluster router. It conditionally delegates to:
-    - `cluster/gke/`: Google Kubernetes Engine (GCP) implementation.
+    - `cluster/gke/`: Google Kubernetes Engine (GCP) implementation. Its [README](modules/cluster/gke/README.md) covers zonal capacity and Kubernetes version drift.
     - `cluster/kind/`: Local Kubernetes in Docker (KinD) implementation.
 - `prebuilt/`: Standard and task-specific environment configurations.
   - **Provider-Neutral (GKE or KinD)**:
@@ -42,6 +42,7 @@ To avoid duplicating stacks for different cloud or local environments, tasks cal
 | `gpu_count` | `number` | `1` | Number of GPUs per node (if `gpu_type` is set) |
 | `project_id` | `string` | `""` | GCP Project ID (GCP-only) |
 | `kubeconfig_path` | `string` | `"~/.kube/config"` | Local kubeconfig path (KinD-only) |
+| `registry_mirrors` | `map(list(string))` | `{}` | Registry mirror endpoints keyed by upstream host (KinD-only); empty means pull from upstream |
 
 ---
 
