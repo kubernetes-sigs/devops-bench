@@ -47,17 +47,22 @@ To avoid duplicating stacks for different cloud or local environments, tasks cal
 
 ## 3. How to Run Stacks on Different Providers
 
-When executing a task via the `devops-bench` runner, you specify the target provider using the `INFRA_PROVIDER` environment variable.
+A task names its own target in the `provider:` key of its `infrastructure:` block, so the `devops-bench` runner already knows which provider a stack needs — you do not select one per run.
 
 ### Running on GCP (GKE)
+`tasks/gcp/deploy-hello-app` declares `provider: "gcp"`, so it needs a real project:
 ```bash
-INFRA_PROVIDER=gcp devops-bench tasks/gcp/deploy-hello-app/task.yaml
+devops-bench tasks/gcp/deploy-hello-app/task.yaml --project my-project --cluster bench
 ```
 
 ### Running Locally (KinD)
+`tasks/common/opa-remediation` declares `provider: "kind"`, which bills nothing, so no `--project` is needed:
 ```bash
-INFRA_PROVIDER=kind devops-bench tasks/common/opa-remediation/task.yaml
+devops-bench tasks/common/opa-remediation/task.yaml --cluster bench
 ```
+
+> [!CAUTION]
+> The `INFRA_PROVIDER` environment variable overrides the task's key for every task in the run. **Do not export it**: an export outlives the command that set it, and the next run silently inherits a provider it was never written for. Change the task's `provider:` key instead. See [infrastructure](../docs/components/infra.md#cloud-providers).
 
 ---
 

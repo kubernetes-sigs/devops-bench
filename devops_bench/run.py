@@ -39,6 +39,13 @@ __all__ = ["BenchmarkConfig", "BenchmarkResult", "run_benchmark"]
 
 _log = get_logger("run")
 
+# Placeholders for the identifiers a run still has to name but never uses.
+_NO_INFRA_PROJECT = "no-infra-project"
+_NO_INFRA_CLUSTER = "no-infra-cluster"
+# Stand-in project id for a run that provisions only local clusters. Matches
+# the default the kind stacks already carry for their ignored project_id.
+_LOCAL_PROJECT_ID = "local-kind"
+
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
@@ -46,7 +53,8 @@ class BenchmarkConfig:
 
     Attributes:
         source: Tasks directory or task spec file (``.yaml`` / ``.yml`` / ``.json``).
-        project_id: Cloud project id; required unless infra is disabled.
+        project_id: Cloud project id; required only when a task in the run
+            resolves to a provider that bills to one.
         cluster_name: Name of the target Kubernetes cluster; required unless
             infra is disabled.
         limit: Optional cap on the number of tasks to run (slice from the front).
@@ -130,6 +138,69 @@ class BenchmarkResult:
     manifest_path: Path
 
 
+def _cloud_task_names(tasks: list[Any]) -> list[str]:
+    """Name the tasks in ``tasks`` whose provider bills to a cloud project.
+
+    Args:
+        tasks: Loaded task specs.
+
+    Returns:
+        The names of the cloud-backed tasks, in load order.
+    """
+    from devops_bench.deployers.factory import needs_cloud_project
+
+    return [task.name for task in tasks if needs_cloud_project(task.infrastructure or {})]
+
+
+def _resolve_project_and_cluster(config: BenchmarkConfig, tasks: list[Any]) -> tuple[str, str]:
+    """Validate the run's project / cluster settings and fill in the defaults.
+
+    The cluster name is always required with infra on: every provider
+    provisions a cluster and names it. The project id is required only when a
+    task in the run actually targets a cloud -- a run of kind-only tasks bills
+    nothing to a project, so demanding one is a barrier with no purpose behind
+    it. Local-only runs get :data:`_LOCAL_PROJECT_ID`, which is what the kind
+    stacks already default their (ignored) ``project_id`` variable to.
+
+    The survey resolves each task's provider exactly the way provisioning
+    later will, so validation and the deployer can never disagree about
+    whether a cloud is involved. That includes an ambient ``INFRA_PROVIDER``
+    export, which the factory honours and warns about; the point of the check
+    is to spare a task that declares a local provider, not to second-guess the
+    resolution.
+
+    Args:
+        config: Resolved run configuration.
+        tasks: The tasks this run will execute, already limited.
+
+    Returns:
+        The ``(project_id, cluster_name)`` pair to hand the harness.
+
+    Raises:
+        ConfigError: If infra is enabled and the cluster name is missing, or a
+            cloud-backed task is in the run and the project id is missing.
+    """
+    if config.no_infra:
+        return (config.project_id or _NO_INFRA_PROJECT, config.cluster_name or _NO_INFRA_CLUSTER)
+
+    if not config.cluster_name:
+        raise ConfigError("CLUSTER_NAME must be set (or pass --no-infra / BENCH_NO_INFRA=true)")
+
+    cloud_tasks = _cloud_task_names(tasks)
+    if cloud_tasks and not config.project_id:
+        raise ConfigError(
+            "PROJECT_ID must be set: "
+            f"{', '.join(cloud_tasks)} target a cloud provider "
+            "(or pass --no-infra / BENCH_NO_INFRA=true)"
+        )
+    if not cloud_tasks and not config.project_id:
+        _log.info(
+            "no task in this run targets a cloud provider; using project id %r",
+            _LOCAL_PROJECT_ID,
+        )
+    return (config.project_id or _LOCAL_PROJECT_ID, config.cluster_name)
+
+
 def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     """Run the benchmark pipeline described by ``config``.
 
@@ -143,19 +214,25 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         ``results.json`` path.
 
     Raises:
-        ConfigError: If infrastructure is enabled but project id / cluster name
-            are missing, or if ``config.source`` does not exist.
+        ConfigError: If ``config.source`` does not exist, if infrastructure is
+            enabled and no cluster name is set, or if a task in the run targets
+            a cloud provider and no project id is set.
     """
+    from devops_bench.tasks import FileSystemTaskLoader
+
+    # Load the tasks before validating the run, because what a run requires is
+    # a property of the tasks in it: only a task whose provider bills to a
+    # cloud needs a project id. Slice to ``limit`` first so the survey covers
+    # the tasks that will actually run.
+    tasks = FileSystemTaskLoader().load_tasks(config.source)
+    if config.limit is not None:
+        tasks = tasks[: config.limit]
+
     # The config is authoritative: env resolution happens only in
     # ``BenchmarkConfig.from_env``, so validation and the harness always
     # observe the same values and an explicit setting is never overridden
     # by ambient environment variables.
-    if not config.no_infra and (not config.project_id or not config.cluster_name):
-        raise ConfigError(
-            "PROJECT_ID and CLUSTER_NAME must be set (or pass --no-infra / BENCH_NO_INFRA=true)"
-        )
-    project_id = config.project_id or "no-infra-project"
-    cluster_name = config.cluster_name or "no-infra-cluster"
+    project_id, cluster_name = _resolve_project_and_cluster(config, tasks)
 
     # Establish per-run isolation BEFORE any provisioning so every gcloud /
     # kubectl / tofu / agent subprocess inherits the run-scoped kubeconfig,
@@ -169,17 +246,12 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     # KUBECONFIG / etc. into a later serial call from the same process.
     try:
         from devops_bench.evalharness import DefaultEvalHarness, ResultReporter
-        from devops_bench.tasks import FileSystemTaskLoader
 
         judge = None
         if config.judge_provider or config.judge_model:
             from devops_bench.metrics import get_judge_model
 
             judge = get_judge_model(provider=config.judge_provider, model_name=config.judge_model)
-
-        tasks = FileSystemTaskLoader().load_tasks(config.source)
-        if config.limit is not None:
-            tasks = tasks[: config.limit]
 
         # An explicitly supplied run id names the artifacts even in serial
         # mode; the auto-generated id stays out of serial dir names so the

@@ -66,7 +66,7 @@ The `dev` group includes the provider extras, so the full adapter test suite run
 The CLI takes a tasks directory or a single `task.yaml` and runs each task through the pipeline: optionally provision infrastructure, run the agent under test against the task prompt, verify and score the result, then tear the infrastructure down. Two tasks ship on main today:
 
 - `tasks/common/opa-remediation` — policy remediation on a local **kind** cluster; no cloud account involved.
-- `tasks/gcp/deploy-hello-app` — a cloud-backed deployment task targeting the GCP provider. It isn't runnable yet — the task doesn't declare a `provider:` key; [known issues](./appendix/known_issues.md) tracks this.
+- `tasks/gcp/deploy-hello-app` — a cloud-backed deployment task declaring `provider: gcp`. Running it needs a real GCP project and credentials.
 
 **Infrastructure** is provisioned by OpenTofu stacks under `tf/` (default stack: `prebuilt/kind`). `--no-infra` (or `BENCH_NO_INFRA=true`) skips infrastructure provisioning and runs against the NoOpDeployer — nothing is provisioned or torn down, whether you're running a plumbing check or targeting pre-existing infrastructure; model and judge credentials may still be required. `--infra` forces provisioning back on, and `--no-teardown` / `--teardown` control cleanup the same way. See [infrastructure](./components/infra.md).
 
@@ -89,7 +89,7 @@ The CLI takes a tasks directory or a single `task.yaml` and runs each task throu
 
 **The judge** that scores results is configured with `--judge-provider` / `--judge-model` (or `JUDGE_PROVIDER` / `JUDGE_MODEL`). Leaving both unset is fine: the harness builds a default judge from the models layer, which follows `AGENT_PROVIDER` and defaults to the Gemini adapter — authenticated via `AGENT_API_KEY`, or keylessly through the Vertex AI backend when `GCP_PROJECT_ID` and ambient cloud credentials are available. For a fully local judge, point it at Ollama (`JUDGE_PROVIDER=ollama`, endpoint via `OLLAMA_BASE_URL`).
 
-The run-level knobs also have env forms (`devops_bench/run.py`): `PROJECT_ID`, `CLUSTER_NAME`, `EVAL_LIMIT`, `RESULTS_ROOT`, `BENCH_NO_INFRA`, `BENCH_NO_TEARDOWN`, `BENCH_PARALLEL`, and `RUN_ID`. `--parallel` isolates a run (its own kubeconfig, cloud CLI config, and tofu data dir, plus a run-unique cluster name) so several runs can share one host.
+The run-level knobs also have env forms (`devops_bench/run.py`): `PROJECT_ID`, `CLUSTER_NAME`, `EVAL_LIMIT`, `RESULTS_ROOT`, `BENCH_NO_INFRA`, `BENCH_NO_TEARDOWN`, `BENCH_PARALLEL`, and `RUN_ID`. `PROJECT_ID` is demanded by the run's tasks, not by infra being on: the launcher resolves each task's provider before provisioning anything and asks for a project only if one of them targets a cloud, naming the task that does. `--parallel` isolates a run (its own kubeconfig, cloud CLI config, and tofu data dir, plus a run-unique cluster name) so several runs can share one host.
 
 ### Your first run — no cloud required
 
@@ -104,11 +104,10 @@ Then:
 
 ```bash
 export AGENT_API_KEY=...   # used by the agent's model provider and the default judge
-uv run devops-bench tasks/common/opa-remediation \
-  --project local-kind --cluster devops-bench-kind
+uv run devops-bench tasks/common/opa-remediation --cluster devops-bench-kind
 ```
 
-A project id and cluster name are required whenever infra is on — the kind provider ignores the project, so any placeholder works. Exit code 0 means no task failed, 1 means at least one did, 2 is a configuration error, and the results path is printed at the end.
+A cluster name is required whenever infra is on — every provider provisions a cluster and has to name it. A project id is required only when a task in the run resolves to a cloud provider; a kind-only run like this one bills nothing to a project, so `--project` can be left off and the run reports `local-kind`. Exit code 0 means no task failed, 1 means at least one did, 2 is a configuration error, and the results path is printed at the end.
 
 For a plumbing check without provisioning anything:
 
