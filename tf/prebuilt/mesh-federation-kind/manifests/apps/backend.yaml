@@ -1,0 +1,39 @@
+# Backend workload — applied to cluster-2 only. A tiny HTTP echo whose response
+# body is a fixed sentinel, so a successful cross-cluster call from cluster-1 is
+# observable without parsing anything. The task's `cross-cluster-call-restored`
+# objective matches on that string: keep it and the objective's `value` in step.
+# Sidecar is injected via the `sample` namespace's istio-injection label.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: sample
+  labels:
+    app: backend
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+    spec:
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-listen=:8080"
+            - "-text=hello from the peer-cluster backend"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

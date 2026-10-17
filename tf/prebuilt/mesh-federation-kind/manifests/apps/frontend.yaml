@@ -1,0 +1,48 @@
+# Client workload — applied to cluster-1 only. A long-lived curl pod the agent
+# (and the grader) use to probe `backend.sample.svc.cluster.local` cross-cluster.
+# Sidecar is injected via the `sample` namespace's istio-injection label, so the
+# call goes through the mesh (and, once STRICT mTLS is enforced, over mTLS).
+#
+# The client runs under its OWN ServiceAccount rather than `default`. Its mesh
+# identity is therefore 'cluster.local/ns/sample/sa/sleep', which is what the
+# backend cluster's AuthorizationPolicy evaluates. Under `default` the client
+# would be indistinguishable from every other workload in a `sample` namespace —
+# the trust domain is shared across both clusters, so the principal string
+# carries no cluster of origin — and an allow-list could not tell them apart.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sleep
+  namespace: sample
+  labels:
+    app: sleep
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sleep
+  namespace: sample
+  labels:
+    app: sleep
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sleep
+  template:
+    metadata:
+      labels:
+        app: sleep
+    spec:
+      serviceAccountName: sleep
+      containers:
+        - name: sleep
+          image: curlimages/curl:8.5.0
+          command: ["/bin/sleep", "infinity"]
+          resources:
+            requests:
+              cpu: "20m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
