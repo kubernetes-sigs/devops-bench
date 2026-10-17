@@ -53,6 +53,13 @@ _log = get_logger("deployers.tofu")
 
 _resolve_tf_root = resolve_tf_root
 
+# State addresses whose destroy needs a live Kubernetes API server. When the
+# cluster is already gone these are the resources that make ``tofu destroy``
+# fail, stranding the *billable* resources behind them (the cluster itself, its
+# node service account, secrets, load balancers, VPC). Matched on the resource
+# type segment so both root-level and module-nested addresses are found.
+_IN_CLUSTER_ADDRESS = re.compile(r"(^|\.)(helm_release|kubernetes_[a-z0-9_]+|kubectl_[a-z0-9_]+)\.")
+
 
 def _format_var(value: Any) -> str:
     """Format a Python value as an OpenTofu ``-var`` literal.
@@ -270,12 +277,82 @@ class TFDeployer(Deployer):
         ]
         run(cmd, cwd=self.work_dir, capture=False)
 
+    def _in_cluster_addresses(self) -> list[str]:
+        """Return the state addresses whose destroy needs a live API server.
+
+        Returns an empty list when the state cannot be read at all, so a missing
+        or unreadable state file degrades to "nothing to forget" rather than
+        raising from inside an error path.
+        """
+        result = run(
+            ["tofu", "state", "list", *self._state_flags()],
+            cwd=self.work_dir,
+            check=False,
+        )
+        if result.returncode != 0:
+            _log.warning("could not list stack state; not attempting a second destroy")
+            return []
+        return [
+            line.strip()
+            for line in (result.stdout or "").splitlines()
+            if _IN_CLUSTER_ADDRESS.search(line.strip())
+        ]
+
+    def _forget_in_cluster_state(self, addresses: list[str]) -> list[str]:
+        """Drop in-cluster addresses from state, one ``state rm`` per address.
+
+        One address per invocation on purpose: an address that is already gone
+        makes ``tofu state rm`` exit non-zero, and a batched call would abandon
+        every address after it.
+
+        Args:
+            addresses: State addresses to forget.
+
+        Returns:
+            The addresses actually removed from state.
+        """
+        forgotten: list[str] = []
+        for address in addresses:
+            result = run(
+                ["tofu", "state", "rm", *self._state_flags(), address],
+                cwd=self.work_dir,
+                check=False,
+            )
+            if result.returncode == 0:
+                forgotten.append(address)
+            else:
+                _log.warning("could not drop %s from state; continuing", address)
+        return forgotten
+
     def down(self) -> None:
         """Tear down the OpenTofu stack and run provider cleanup.
 
         Invokes ``tofu destroy`` to release provisioned infrastructure, and
         guarantees execution of ``provider.cleanup()`` via a ``finally`` block to
         clean up temporary scratch files and provider-specific resources.
+
+        When the destroy fails and the state still holds resources that need a
+        live Kubernetes API server (a Helm release, a ``kubernetes_*`` object),
+        those addresses are dropped from state and the destroy is retried once.
+        This is the failure that leaks clusters: the API server is unreachable —
+        the cluster was deleted out of band, or the apply died before it was
+        ready — so OpenTofu cannot destroy the objects *inside* it and gives up
+        before reaching the cluster, service accounts, secrets and
+        load-balancer parts that actually cost money and block the next run with
+        ``409 already exists``.
+
+        Forgetting those addresses is safe in the case that matters, because a
+        gone cluster took its contents with it. It is also the only move left in
+        the case that does not: the destroy has already failed, so the choice is
+        between a retry that can still release the billable resources and a
+        guaranteed leak. Every forgotten address is logged so an operator can
+        reconcile, and the retry destroys the cluster that held them anyway. If
+        the retry fails too, the original destroy error is raised — it is the
+        more diagnostic of the two.
+
+        This mirrors ``scripts/cleanup/destroy-leaked-stack.sh``, which is the
+        same recipe run by hand after the fact; doing it here is what stops the
+        leak from happening in the first place.
         """
         cluster_info = self._cluster_info
         if cluster_info is None:
@@ -310,7 +387,27 @@ class TFDeployer(Deployer):
                 *self._state_flags(),
                 *self._var_flags(),
             ]
-            run(cmd, cwd=self.work_dir, capture=False)
+            try:
+                run(cmd, cwd=self.work_dir, capture=False)
+            except Exception as exc:
+                addresses = self._in_cluster_addresses()
+                if not addresses:
+                    raise
+                _log.error(
+                    "destroy failed with %s resource(s) that need a live cluster still in "
+                    "state; dropping them and retrying so the billable resources are "
+                    "released: %s",
+                    len(addresses),
+                    exc,
+                )
+                for address in self._forget_in_cluster_state(addresses):
+                    _log.warning("dropped %s from state without destroying it", address)
+                try:
+                    run(cmd, cwd=self.work_dir, capture=False)
+                except Exception:
+                    # The first error describes why teardown started failing;
+                    # the second only says it failed again.
+                    raise exc from None
             destroy_success = True
         finally:
             self.provider.cleanup(cluster_info, variables=self.variables, success=destroy_success)

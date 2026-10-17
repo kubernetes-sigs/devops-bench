@@ -91,6 +91,8 @@ The CLI takes a tasks directory or a single `task.yaml` and runs each task throu
 
 The run-level knobs also have env forms (`devops_bench/run.py`): `PROJECT_ID`, `CLUSTER_NAME`, `EVAL_LIMIT`, `RESULTS_ROOT`, `BENCH_NO_INFRA`, `BENCH_NO_TEARDOWN`, `BENCH_PARALLEL`, and `RUN_ID`. `--parallel` isolates a run (its own kubeconfig, cloud CLI config, and tofu data dir, plus a run-unique cluster name) so several runs can share one host.
 
+`BENCH_KEEP_WORKSPACE=true` leaves the agent's scratch workspace on disk after a run instead of deleting it. It is a debugging opt-in, not a default: the workspace sits outside the run directory, so nothing else reclaims it, and it holds everything the agent wrote or copied in — credentials included. Clean it up yourself; the artifacts you normally want were already collected into the run directory.
+
 ### Your first run — no cloud required
 
 The `opa-remediation` task provisions its own local kind cluster, so a real end-to-end eval needs no cloud account. You need on `PATH`: `tofu`, Docker, the `kind` binary, `kubectl`, and the default agent's `gemini` CLI. On Linux, raise the `fs.inotify` limits for kind:
