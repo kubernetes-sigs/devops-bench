@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drift-poller
+  namespace: logistics
+  labels:
+    app: drift-poller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drift-poller
+  template:
+    metadata:
+      labels:
+        app: drift-poller
+    spec:
+      containers:
+      - name: poller
+        image: curlimages/curl:8.7.1
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            if curl -sf --max-time 3 http://shipment-api-svc.logistics.svc/; then
+              echo "$(date +%s) OK" >> /tmp/health.log
+            else
+              echo "$(date +%s) FAIL" >> /tmp/health.log
+            fi
+            sleep 5
+          done
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
