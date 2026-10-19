@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invoice-api
+  namespace: accounts
+spec:
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      containers:
+        - name: invoice-api
+          resources:
+            requests:
+              memory: "256Mi"
+            limits:
+              memory: "512Mi"
