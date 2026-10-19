@@ -23,16 +23,18 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 from collections.abc import Iterator
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from devops_bench import core
 from devops_bench.agents import base
 from devops_bench.agents import config as agents_config
 from devops_bench.agents import result as agents_result
-from devops_bench.agents.adk import parsing
+from devops_bench.agents.adk import a2a, parsing
 from devops_bench.agents.shared import cli_capabilities
 from devops_bench.agents.shared import skills as shared_skills
 
@@ -181,21 +183,36 @@ def _import_agent_module(spec: str) -> ModuleType:
     return _import_file(path / f"{_AGENT_SUBMODULE}.py", path.name)
 
 
-def _resolve_root_agent(target: str) -> Any:
+def _remote_agent_name(url: str) -> str:
+    """Derive an ADK node name from a remote agent card's URL.
+
+    ADK names identify a node in the tree, so the host is used rather than a
+    fixed literal: it keeps two remote agents in one tree distinguishable, and
+    it is the name that shows up as the event author.
+    """
+    host = urlparse(url).hostname or "remote"
+    name = re.sub(r"\W", "_", host).strip("_") or "remote"
+    return name if name[0].isalpha() or name[0] == "_" else f"a_{name}"
+
+
+def _resolve_root_agent(target: str, timeout_sec: float | None = None) -> Any:
     """Load the ADK agent named by ``AGENT_TARGET``.
 
-    Four spellings are accepted::
+    Five spellings are accepted::
 
         my_pkg.agent:root_agent   # explicit module + attribute
         my_pkg.agent              # module, attribute defaults to root_agent
         ~/agents/my_agent         # ADK agent directory (<dir>/agent.py)
         ~/agents/my_agent/agent.py
+        https://host/path         # a remote agent card, reached over A2A
 
     When the resolved attribute is a factory rather than an agent it is called
     with no arguments, so a team that builds its agent lazily needs no wrapper.
 
     Args:
         target: The configured target string.
+        timeout_sec: Wall-clock timeout threaded into a remote agent's HTTP
+            client. Ignored by the four local spellings.
 
     Returns:
         The ADK agent object.
@@ -203,8 +220,15 @@ def _resolve_root_agent(target: str) -> Any:
     Raises:
         ConfigError: When the target is empty, names nothing importable,
             or resolves to something that is not an ADK agent.
+        MissingDependencyError: When the target is remote and the ``a2a``
+            extra is not installed.
     """
     from google.adk.agents import BaseAgent
+
+    # Checked before the module/path split: a URL's "https:" would otherwise be
+    # partitioned into a module spec and an attribute name.
+    if a2a.is_remote_target(target):
+        return a2a.build_remote_agent(_remote_agent_name(target), target, timeout_sec=timeout_sec)
 
     spec, _, attr = target.partition(":")
     attr = attr or _ROOT_AGENT_ATTR
@@ -606,11 +630,12 @@ class AdkAgent(base.AgentHarness):
         if not target:
             return agents_result.AgentResult.errored(
                 "AGENT_TARGET must name the ADK agent to run "
-                "(e.g. 'my_pkg.agent:root_agent' or a path to an agent directory)"
+                "(e.g. 'my_pkg.agent:root_agent', a path to an agent directory, "
+                "or an https:// URL to a remote agent card)"
             )
 
         try:
-            root_agent = _resolve_root_agent(target)
+            root_agent = _resolve_root_agent(target, timeout_sec=self.config.timeout_sec)
         except (core.ConfigError, ImportError, AttributeError, TypeError) as exc:
             return agents_result.AgentResult.errored(
                 f"could not load the ADK agent at {target!r}: {type(exc).__name__}: {exc}"

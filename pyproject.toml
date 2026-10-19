@@ -48,6 +48,20 @@ dependencies = [
 # use. ``adk`` is needed by the ``adk`` agent harness, not by any provider.
 [project.optional-dependencies]
 adk = ["google-adk>=2.7.1"]
+# Reaching a remote ADK agent over A2A. Kept separate from ``adk`` because it
+# adds grpcio, which builds from source wherever no wheel is published.
+#
+# Both entries are load-bearing. ``google-adk[a2a]`` alone resolves a2a-sdk
+# without grpcio, which lives behind the sdk's *own* ``grpc`` extra — and
+# ``ClientFactory`` registers the GRPC binding only when that transport
+# imported, so asking for gRPC on an HTTP-only install fails at client
+# construction rather than at install time.
+a2a = [
+    "devops-bench[adk]",
+    "google-adk[a2a]",
+    # Matching google-adk's own range keeps the two from fighting the resolver.
+    "a2a-sdk[grpc]>=0.3.4,<2",
+]
 anthropic = ["anthropic>=0.104.1"]
 openai = ["openai>=1.0.0"]
 
