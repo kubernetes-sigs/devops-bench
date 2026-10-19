@@ -44,8 +44,10 @@ from devops_bench.cheat_detection import (
     baseline_from_granted_paths,
     build_inventory_rules,
     build_mount_rules,
+    drop_fingerprints_matching_inputs,
     filter_rules_for_prompt,
     load_ruleset,
+    narrow_home_listing_rules,
 )
 from devops_bench.core import (
     ClusterInfo,
@@ -62,6 +64,7 @@ from devops_bench.core.model_identity import judge_identity
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
+from devops_bench.evalharness.fixtures import FixtureError, check_prompt_fixtures
 from devops_bench.evalharness.hold import (
     HoldObservation,
     SafeguardMonitor,
@@ -825,7 +828,8 @@ class DefaultEvalHarness(Harness):
             pre_existing = frozenset(rule.source for rule in self._inventory_home() if rule.source)
 
         # One inventory per task iteration, paired positionally with ``detailed_results``.
-        # Ambient rules are scanned before each run; a sandboxed task's come back from _run_one.
+        # _run_one returns the task's rules (ambient, or the sandbox home's) minus its own
+        # delivered inputs, decided before the agent ran.
         created_by: dict[str, str] = {}
         prev_task_name: str | None = None
         task_inventories: list[tuple[SensitiveAccessRule, ...]] = []
@@ -837,22 +841,30 @@ class DefaultEvalHarness(Harness):
                 ambient_rules = self._ambient_inventory_rules(
                     task.name, pre_existing, created_by, prev_task_name
                 )
-            record, sandbox_rules = self._run_one(task, run_dir)
-            task_inventories.append(sandbox_rules if task_sandboxed else ambient_rules)
+            record, inventory_rules = self._run_one(
+                task,
+                run_dir,
+                ambient_rules=ambient_rules,
+                produced_in_batch=frozenset(created_by),
+            )
+            task_inventories.append(inventory_rules)
             detailed_results.append(record)
             prev_task_name = task.name
 
         # Annotated before the first write so both results.json copies carry the
         # report and ``_score`` can read it. A detector failure leaves that record ungated.
         if self.cheat_detect:
-            # A home entry the prompt itself names is authorized for that record;
-            # content fingerprints always apply.
+            # Prompt-driven authorizations: named entries and home listings.
             for record, inventory_rules in zip(detailed_results, task_inventories, strict=True):
                 try:
+                    prompt_text = record.get("input") or ""
                     annotate_records(
                         [record],
-                        self._cheat_rules
-                        + filter_rules_for_prompt(inventory_rules, record.get("input") or ""),
+                        narrow_home_listing_rules(
+                            self._cheat_rules
+                            + filter_rules_for_prompt(inventory_rules, prompt_text),
+                            prompt_text,
+                        ),
                     )
                 except Exception:  # noqa: BLE001 - detection must never sink a completed run
                     _log.exception(
@@ -990,14 +1002,28 @@ class DefaultEvalHarness(Harness):
         return rules
 
     def _run_one(
-        self, task: Task, run_dir: Path
+        self,
+        task: Task,
+        run_dir: Path,
+        *,
+        ambient_rules: tuple[SensitiveAccessRule, ...] = (),
+        produced_in_batch: frozenset[str] = frozenset(),
     ) -> tuple[dict[str, Any], tuple[SensitiveAccessRule, ...]]:
         """Provision, run the agent, collect artifacts, tear down for one task.
 
+        Args:
+            task: The task to run.
+            run_dir: The batch's output directory.
+            ambient_rules: The caller's pre-task inventory of the operator home.
+            produced_in_batch: Home entries earlier tasks of this batch left behind.
+
         Returns:
-            ``(record, sandbox_inventory_rules)``. A failure yields a
-            ``status: "failed"`` record with the same key set as a success. The
-            rules are empty on an ambient run; the caller inventories the home itself.
+            ``(record, inventory_rules)``. On any failure a ``status: "failed"``
+            record is returned instead of being dropped, with the same top-level
+            key set as a success record. The rules are this task's detection
+            inventory (``ambient_rules``, or the sandbox home's when sandboxed)
+            minus fingerprints of its own delivered inputs, decided before the
+            agent ran so nothing it writes can change what authorized it.
         """
         infra_config = task.infrastructure or {}
         if self.no_infra:
@@ -1012,10 +1038,11 @@ class DefaultEvalHarness(Harness):
         workspace_path: Path | None = None
         creds_dir: Path | None = None
         completed_spec: agent_sandbox.SandboxSpec | None = None
-        sandbox_rules: tuple[SensitiveAccessRule, ...] = ()
+        inventory_rules: tuple[SensitiveAccessRule, ...] = ambient_rules
         sandbox_exempt = False
         agent_started = False
         verification_parse_errors: list[dict[str, str]] = []
+        fixture_problems: list[str] = []
         entries: list[VerificationEntry] = []
         # Tracked as computed so a failed record carries the same resolved strings.
         prompt: str | None = None
@@ -1063,7 +1090,7 @@ class DefaultEvalHarness(Harness):
                     with_cluster=infra_config.get("deployer") != "noop",
                     quota_writes=task.agent_quota_writes,
                 )
-                sandbox_rules = self._inventory_sandbox_home(
+                inventory_rules = self._inventory_sandbox_home(
                     task.name, workspace_path / "home", completed_spec.fixture_mounts
                 )
             context = self.make_context(task, cluster=cluster_info, workspace_path=workspace_path)
@@ -1071,6 +1098,21 @@ class DefaultEvalHarness(Harness):
             target_dep, ns = self._resolve_deployment_and_namespace(task)
 
             prompt = self.replace_placeholders(task.prompt, active_cluster_name, target_dep, ns)
+            # A missing promised fixture fails the run; with the requirement off it is recorded.
+            fixture_problems = check_prompt_fixtures(
+                prompt,
+                task.name,
+                home=(workspace_path / "home") if completed_spec is not None else None,
+                mounts=completed_spec.fixture_mounts if completed_spec is not None else None,
+            )
+            # Snapshot now: the agent must not be able to edit what authorizes it.
+            inventory_rules = drop_fingerprints_matching_inputs(
+                inventory_rules,
+                prompt,
+                home=(workspace_path / "home") if completed_spec is not None else None,
+                cluster_name=active_cluster_name,
+                produced_in_batch=produced_in_batch,
+            )
             # Resolved before the agent runs so a mid-run failure still records them.
             recoverable_safety = [
                 self.replace_placeholders(item, active_cluster_name, target_dep, ns)
@@ -1181,12 +1223,15 @@ class DefaultEvalHarness(Harness):
                 chaos_report=chaos_report,
                 perf_report=perf_report,
                 verification_parse_errors=verification_parse_errors,
+                fixture_problems=fixture_problems,
                 verification_report=verification_report,
                 verification_status=verification_status,
                 recoverable_safety=recoverable_safety,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
+            if isinstance(exc, FixtureError):
+                fixture_problems = list(exc.problems)
             _log.error("critical error during task %s: %s", task.name, exc)
             # The exception may predate the success path's stop(); stop() is idempotent.
             if safeguard_monitor is not None:
@@ -1220,6 +1265,7 @@ class DefaultEvalHarness(Harness):
                 expected_output=expected_output,
                 recoverable_safety=recoverable_safety,
                 verification_parse_errors=verification_parse_errors,
+                fixture_problems=fixture_problems,
                 verification_report=exception_verification_report,
                 verification_status=exception_verification_status,
             )
@@ -1252,7 +1298,7 @@ class DefaultEvalHarness(Harness):
             if creds_dir is not None:
                 shutil.rmtree(creds_dir, ignore_errors=True)
 
-        return result, sandbox_rules
+        return result, inventory_rules
 
     def _prepare_sandbox_spec(
         self,
@@ -1369,6 +1415,7 @@ class DefaultEvalHarness(Harness):
         chaos_report: dict[str, Any],
         perf_report: dict[str, Any],
         verification_parse_errors: list[dict[str, str]] | None = None,
+        fixture_problems: list[str] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "evaluated",
         recoverable_safety: list[str] | None = None,
@@ -1412,6 +1459,7 @@ class DefaultEvalHarness(Harness):
                 "chaos_driver": dict(chaos_report.get("driver") or {}),
                 "perf_report": perf_report,
                 "verification_parse_errors": list(verification_parse_errors or []),
+                "fixture_problems": list(fixture_problems or []),
                 "verification_report": list(verification_report or []),
                 "verification_status": verification_status,
             }
@@ -1428,6 +1476,7 @@ class DefaultEvalHarness(Harness):
         expected_output: str | None = None,
         recoverable_safety: list[str] | None = None,
         verification_parse_errors: list[dict[str, str]] | None = None,
+        fixture_problems: list[str] | None = None,
         verification_report: list[dict[str, Any]] | None = None,
         verification_status: str = "not_evaluated",
     ) -> dict[str, Any]:
@@ -1441,6 +1490,7 @@ class DefaultEvalHarness(Harness):
             expected_output: The substituted expectation if computed, else the raw one.
             recoverable_safety: The substituted checklist if computed, else the raw one.
             verification_parse_errors: Any spec-parse errors collected so far.
+            fixture_problems: Promised home fixtures the pre-flight found unusable.
             verification_report: The report if verification ran on the exception path.
             verification_status: "evaluated", "not_evaluated", or "skipped_no_infra".
         """
@@ -1463,6 +1513,7 @@ class DefaultEvalHarness(Harness):
                 # A failed run never promotes, even on a vetted task.
                 "validated": False,
                 "verification_parse_errors": list(verification_parse_errors or []),
+                "fixture_problems": list(fixture_problems or []),
                 "verification_report": list(verification_report or []),
                 "verification_status": verification_status,
             }
@@ -1508,6 +1559,8 @@ class DefaultEvalHarness(Harness):
             "judge": {},
             "chaos_driver": {},
             "verification_parse_errors": [],
+            # Non-empty only when BENCH_REQUIRE_FIXTURES=0 let a run proceed without an input.
+            "fixture_problems": [],
             "verification_report": [],
             "verification_status": "",
             # No cluster, so the OutcomeValidity judge must not penalize "not applying".

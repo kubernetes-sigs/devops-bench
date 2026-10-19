@@ -25,10 +25,12 @@ from devops_bench.cheat_detection import (
     baseline_from_granted_paths,
     build_inventory_rules,
     build_mount_rules,
+    drop_fingerprints_matching_inputs,
     filter_rules_for_prompt,
+    narrow_home_listing_rules,
     scan_record,
 )
-from devops_bench.cheat_detection.rules import SCAN_FIELDS
+from devops_bench.cheat_detection.rules import DEFAULT_RULES, SCAN_FIELDS
 
 _STALE_REPORT = (
     "# Cluster Audit and Remediation Report\n"
@@ -421,3 +423,151 @@ def test_mid_batch_deliverable_flags_on_path_and_spares_the_honest_repeat(tmp_pa
 
     echoed = scan_record(_record([_exec("cat /tmp/mine.md", result=_STALE_REPORT)]), rules)
     assert echoed["status"] == "clean"
+
+
+def _listing_rule() -> Any:
+    return next(
+        r for r in DEFAULT_RULES if r.category == "harness-environment" and r.fields == SCAN_FIELDS
+    )
+
+
+def test_home_listing_rule_narrows_to_args_when_the_prompt_names_a_home_fixture(
+    tmp_path: Path,
+) -> None:
+    narrowed = narrow_home_listing_rules((_listing_rule(),), "Read ~/advisory.json.", tmp_path)
+    assert narrowed[0].fields == ("args",)
+
+
+def test_home_listing_rule_is_untouched_without_a_home_fixture(tmp_path: Path) -> None:
+    rule = _listing_rule()
+    assert narrow_home_listing_rules((rule,), "Fix the deployment.", tmp_path) == (rule,)
+
+
+def test_fingerprint_of_a_stale_delivered_input_is_dropped(tmp_path: Path) -> None:
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "advisory-c1.json").write_text(_STALE_REPORT)
+    rules = build_inventory_rules(stale)
+    (tmp_path / "advisory-c1.json").write_text(_STALE_REPORT)
+
+    kept = drop_fingerprints_matching_inputs(
+        rules, "Read ~/advisory-c1.json.", tmp_path, cluster_name="c1"
+    )
+
+    assert all(r.source for r in kept)  # path rule stays; fingerprint goes
+    assert len(kept) == len(rules) - 1
+
+
+def test_an_output_the_prompt_names_keeps_its_fingerprint(tmp_path: Path) -> None:
+    # No cluster token: the prompt names something to write, not a seeded input.
+    # A previous batch's copy must stay covered; its path rule is already gone.
+    (tmp_path / "shared-report.md").write_text(_STALE_REPORT)
+    rules = build_inventory_rules(tmp_path)
+
+    kept = drop_fingerprints_matching_inputs(
+        rules, "Write your findings to '~/shared-report.md'.", tmp_path, cluster_name="c1"
+    )
+
+    assert kept == rules
+
+
+def test_a_deliverable_quoting_one_input_line_loses_only_that_line(tmp_path: Path) -> None:
+    # A stale report quotes one advisory line. Reading the advisory must not flag,
+    # and reading the report must, on the lines the advisory does not hold.
+    shared = "CVE-2026-0001: remote code execution in the ingress controller"
+    advisory = f'{{"summary": "{shared}"}}\n'
+    (tmp_path / "advisory-c1.json").write_text(advisory)
+    (tmp_path / "report.md").write_text(
+        f"# Findings for the platform team\n{shared}\n"
+        "rotated the ingress controller service account token\n"
+        "pinned the ingress controller image to the patched digest\n"
+    )
+    rules = build_inventory_rules(tmp_path)
+    report_rule = next(r for r in rules if not r.source and "report.md" in r.description)
+    assert any(re.search(p, shared) for p in report_rule.patterns)
+
+    kept = drop_fingerprints_matching_inputs(
+        rules, "Read ~/advisory-c1.json.", tmp_path, cluster_name="c1"
+    )
+
+    stripped = next(r for r in kept if not r.source and "report.md" in r.description)
+    assert 0 < len(stripped.patterns) < len(report_rule.patterns)
+    assert not any(re.search(p, advisory) for p in stripped.patterns)
+    assert not any(not r.source and "advisory-c1.json" in r.description for r in kept)
+
+
+def test_lines_from_two_inputs_are_each_stripped(tmp_path: Path) -> None:
+    line_a = "set privileged to false on the team-alpha cache workload"
+    line_b = "removed the hostPath mount from the analytics deployment"
+    line_c = "rotated the analytics service account token after the audit"
+    (tmp_path / "old-report.md").write_text(f"{line_a}\n{line_b}\n{line_c}\n")
+    (tmp_path / "advisory-c1.json").write_text(f'{{"a": "{line_a}"}}\n')
+    (tmp_path / "inventory-c1.json").write_text(f'{{"b": "{line_b}"}}\n')
+    rules = build_inventory_rules(tmp_path)
+
+    kept = drop_fingerprints_matching_inputs(
+        rules, "Read ~/advisory-c1.json and ~/inventory-c1.json.", tmp_path, cluster_name="c1"
+    )
+
+    report = next(r for r in kept if not r.source and "old-report.md" in r.description)
+    assert len(report.patterns) == 1 and re.search(report.patterns[0], line_c)
+
+
+def test_static_rules_survive_an_input_that_matches_them(tmp_path: Path) -> None:
+    # An advisory citing the upstream repo must not silence the upstream-github rule.
+    (tmp_path / "advisory-c1.json").write_text(
+        '{"ref": "https://github.com/kubernetes-sigs/devops-bench/issues/1"}\n'
+    )
+    static = tuple(r for r in DEFAULT_RULES if r.category == "upstream-github")
+    assert static and any(
+        re.search(p, "github.com/kubernetes-sigs/devops-bench") for r in static for p in r.patterns
+    )
+
+    kept = drop_fingerprints_matching_inputs(
+        static, "Read ~/advisory-c1.json.", tmp_path, cluster_name="c1"
+    )
+
+    assert kept == static
+
+
+def test_path_rules_survive_an_input_that_names_their_entry(tmp_path: Path) -> None:
+    # An input mentioning another leftover by path keeps that leftover's path rule.
+    (tmp_path / "notes-c1.txt").write_text(f"see {tmp_path}/other-c1.git for the manifests\n")
+    (tmp_path / "other-c1.git").mkdir()
+    rules = build_inventory_rules(tmp_path)
+    path_rules = tuple(r for r in rules if r.source)
+
+    kept = drop_fingerprints_matching_inputs(
+        rules, "Read ~/notes-c1.txt.", tmp_path, cluster_name="c1"
+    )
+
+    assert all(r in kept for r in path_rules)
+
+
+def test_an_oversized_input_is_not_read_for_matching(tmp_path: Path) -> None:
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "advisory-c1.json").write_text(_STALE_REPORT)
+    rules = build_inventory_rules(stale)
+    (tmp_path / "advisory-c1.json").write_text(_STALE_REPORT + "x" * (64 * 1024))
+
+    kept = drop_fingerprints_matching_inputs(
+        rules, "Read ~/advisory-c1.json.", tmp_path, cluster_name="c1"
+    )
+
+    assert kept == rules  # same cap as the fingerprinter: nothing matched, nothing dropped
+
+
+def test_fingerprint_of_a_same_batch_deliverable_is_kept(tmp_path: Path) -> None:
+    (tmp_path / "report-c1.md").write_text(_STALE_REPORT)
+    rules = build_inventory_rules(tmp_path)
+
+    kept = drop_fingerprints_matching_inputs(
+        rules,
+        "Write ~/report-c1.md.",
+        tmp_path,
+        cluster_name="c1",
+        produced_in_batch=frozenset({"report-c1.md"}),
+    )
+
+    assert kept == rules
