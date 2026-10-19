@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-health-exporter
+  namespace: monitoring
+  labels:
+    app: node-health-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-health-exporter
+  template:
+    metadata:
+      labels:
+        app: node-health-exporter
+    spec:
+      # Only schedule on worker nodes (cp nodes carry a NoSchedule taint by
+      # default in kind, so this tolerations list is deliberately empty).
+      containers:
+      - name: exporter
+        image: hashicorp/http-echo:1.0
+        args:
+        - -listen=:9100
+        - -text=node-healthy
+        ports:
+        - containerPort: 9100
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: health-poller
+  namespace: monitoring
+  labels:
+    app: health-poller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: health-poller
+  template:
+    metadata:
+      labels:
+        app: health-poller
+    spec:
+      # Pin to worker2 so it stays alive while worker1 is being drained.
+      # The setup script labels worker2 with poller-host=true.
+      nodeSelector:
+        poller-host: "true"
+      containers:
+      - name: poller
+        image: curlimages/curl:8.7.1
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            if curl -sf --max-time 3 http://order-processor-svc.fulfillment.svc/; then
+              echo "$(date +%s) OK" >> /tmp/health.log
+            else
+              echo "$(date +%s) FAIL" >> /tmp/health.log
+            fi
+            sleep 5
+          done
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
