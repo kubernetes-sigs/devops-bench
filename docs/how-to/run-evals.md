@@ -239,7 +239,7 @@ Defaults live in `scripts/bastion/_matrix_lib.sh` and `run_matrix.sh`.
 | Variable | Meaning |
 |---|---|
 | `MATRIX_TASKS` | Space-separated `task.yaml` paths, or `ALL` to enumerate every task under `tasks/` (default `tasks/common/opa-remediation/task.yaml`). |
-| `MATRIX_MODELS` | Space-separated model ids (default `gemini-3.1-pro-preview`). |
+| `MATRIX_MODELS` | Space-separated model ids (default `gemini-3.1-pro-preview`). A full `provider/model` id routes openclaw by that provider; the arm then sets no `AGENT_PROVIDER`. |
 | `MATRIX_AGENT_CONFIGS` | Agent-config presets, each `<oc\|gcli>[+mcp][+skills]` — `oc` = openclaw, `gcli` = gemini (default `oc+mcp+skills`). |
 | `PROJECT_ID` | Cloud project id; required unless `DRY_RUN`. |
 | `MAX_PARALLEL` | Max combos running at once (default 3). |

@@ -102,8 +102,9 @@ final fallback.
 > adapter family and backend for `get_model()`; the CLI harnesses use it to route
 > `AGENT_API_KEY` onto the binary's provider-specific env var(s) (e.g. `google` →
 > `GEMINI_API_KEY` + `GOOGLE_API_KEY`, `google-vertex` → `GOOGLE_CLOUD_API_KEY`)
-> and, for openclaw, to pin the per-run model-catalog transport. A keyless
-> provider routes no key.
+> and, for openclaw, to pin the per-run model-catalog transport. For openclaw a
+> full `provider/model` `AGENT_MODEL` takes precedence over `AGENT_PROVIDER`. A
+> keyless provider routes no key.
 
 ## Configuration examples
 
