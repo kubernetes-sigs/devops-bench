@@ -85,6 +85,19 @@ def run(
             text=text,
             timeout=timeout,
             input=input,
+            # DEVNULL, not the default of None. `None` makes the child INHERIT this
+            # process's stdin, which in an interactive run is the operator's terminal.
+            # `capture_output` only redirects stdout and stderr, so it does not help.
+            #
+            # A CLI subprocess that finds an open, non-TTY stdin can block reading it
+            # indefinitely. Observed with an agent CLI that printed a terminal-
+            # capability warning and then hung until the run's timeout killed it,
+            # producing no output and looking exactly like a slow network call. No
+            # subprocess this harness launches has any reason to read the operator's
+            # keyboard, so close the channel here rather than rely on every child to.
+            #
+            # `input=` manages stdin itself, so only override when there is none.
+            stdin=subprocess.DEVNULL if input is None else None,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
