@@ -1,0 +1,51 @@
+# Per-node SLO probe. __PROBE_NAME__ / __NODE_NAME__ are substituted by
+# setup.sh — one probe deployment is pinned to each worker node via
+# nodeSelector, so the pair witnesses node-level disruption on either
+# worker. The probe log lives on an emptyDir: it survives container
+# restarts but not pod eviction/rescheduling.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __PROBE_NAME__
+  namespace: monitoring
+  labels:
+    app: __PROBE_NAME__
+    component: slo-probe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: __PROBE_NAME__
+  template:
+    metadata:
+      labels:
+        app: __PROBE_NAME__
+        component: slo-probe
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: __NODE_NAME__
+      containers:
+      - name: probe
+        image: curlimages/curl:8.7.1
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            if curl -sf --max-time 3 http://payment-gateway-svc.payments.svc/; then
+              echo "$(date +%s) OK" >> /tmp/probe.log
+            else
+              echo "$(date +%s) FAIL" >> /tmp/probe.log
+            fi
+            sleep 5
+          done
+        volumeMounts:
+        - name: probe-state
+          mountPath: /tmp
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+      volumes:
+      - name: probe-state
+        emptyDir: {}
