@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the Ollama (OpenAI-compatible) adapter."""
+"""Tests for the OpenAI-compatible adapter."""
 
 from __future__ import annotations
 
@@ -25,80 +25,100 @@ from unittest.mock import AsyncMock
 import pytest
 from pytest_mock import MockerFixture
 
-from devops_bench.core.errors import MissingDependencyError
-from devops_bench.models import ollama
+from devops_bench.core.errors import ConfigError, MissingDependencyError
+from devops_bench.models import openai
 from devops_bench.models.base import MODELS, get_model
-from devops_bench.models.ollama import OllamaClientAdapter
+from devops_bench.models.openai import OpenAIClientAdapter
 
 
 def _make_tool(name: str, description: str, input_schema: dict) -> SimpleNamespace:
     return SimpleNamespace(name=name, description=description, inputSchema=input_schema)
 
 
-# --- construction / client selection -----------------------------------------
-
-
-def test_init_uses_defaults(mocker: MockerFixture) -> None:
-    client_cls = mocker.patch.object(ollama, "AsyncOpenAI")
-    mocker.patch.dict(os.environ, {}, clear=True)
-
-    adapter = OllamaClientAdapter()
-
-    client_cls.assert_called_once_with(base_url="http://localhost:11434/v1", api_key="ollama")
-    assert adapter.model_name == "gemma4:2b"
+# --- construction -------------------------------------------------------------
 
 
 def test_init_reads_env(mocker: MockerFixture) -> None:
-    client_cls = mocker.patch.object(ollama, "AsyncOpenAI")
+    client_cls = mocker.patch.object(openai, "AsyncOpenAI")
     mocker.patch.dict(
         os.environ,
-        {"AGENT_MODEL": "llama3:8b", "OLLAMA_BASE_URL": "http://remote:11434/v1"},
+        {
+            "AGENT_MODEL": "qwen3",
+            "OPENAI_BASE_URL": "http://localhost:8000/v1",
+            "AGENT_MAX_TOKENS": "4096",
+        },
         clear=True,
     )
 
-    adapter = OllamaClientAdapter()
+    adapter = OpenAIClientAdapter()
 
-    client_cls.assert_called_once_with(base_url="http://remote:11434/v1", api_key="ollama")
-    assert adapter.model_name == "llama3:8b"
+    client_cls.assert_called_once_with(base_url="http://localhost:8000/v1", api_key="unused")
+    assert adapter.model_name == "qwen3"
+    assert adapter.max_tokens == 4096
+
+
+def test_init_defaults_to_openai_api_and_default_max_tokens(mocker: MockerFixture) -> None:
+    client_cls = mocker.patch.object(openai, "AsyncOpenAI")
+    mocker.patch.dict(os.environ, {"AGENT_MODEL": "gpt-5"}, clear=True)
+
+    adapter = OpenAIClientAdapter()
+
+    client_cls.assert_called_once_with(base_url=None, api_key="unused")
+    assert adapter.max_tokens == 16000
 
 
 def test_init_args_override_env(mocker: MockerFixture) -> None:
-    client_cls = mocker.patch.object(ollama, "AsyncOpenAI")
+    client_cls = mocker.patch.object(openai, "AsyncOpenAI")
     mocker.patch.dict(
         os.environ,
-        {"AGENT_MODEL": "llama3:8b", "OLLAMA_BASE_URL": "http://remote:11434/v1"},
+        {"AGENT_MODEL": "qwen3", "OPENAI_BASE_URL": "http://env/v1", "AGENT_MAX_TOKENS": "1"},
         clear=True,
     )
 
-    adapter = OllamaClientAdapter(model_name="mistral", base_url="http://override/v1")
+    adapter = OpenAIClientAdapter(model_name="gemma", base_url="http://arg/v1", max_tokens=2)
 
-    client_cls.assert_called_once_with(base_url="http://override/v1", api_key="ollama")
-    assert adapter.model_name == "mistral"
+    client_cls.assert_called_once_with(base_url="http://arg/v1", api_key="unused")
+    assert adapter.model_name == "gemma"
+    assert adapter.max_tokens == 2
 
 
-def test_init_uses_agent_api_key_when_set(mocker: MockerFixture) -> None:
-    client_cls = mocker.patch.object(ollama, "AsyncOpenAI")
-    mocker.patch.dict(os.environ, {"AGENT_API_KEY": "sk-remote"}, clear=True)
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"AGENT_API_KEY": "agent", "OPENAI_API_KEY": "vendor"}, "agent"),
+        ({"OPENAI_API_KEY": "vendor"}, "vendor"),
+    ],
+)
+def test_init_api_key_precedence(mocker: MockerFixture, env: dict[str, str], expected: str) -> None:
+    client_cls = mocker.patch.object(openai, "AsyncOpenAI")
+    mocker.patch.dict(os.environ, env, clear=True)
 
-    OllamaClientAdapter()
+    OpenAIClientAdapter(model_name="m")
 
-    # Ollama supports optional key-based auth (remote/hosted endpoints).
-    client_cls.assert_called_once_with(base_url="http://localhost:11434/v1", api_key="sk-remote")
+    assert client_cls.call_args.kwargs["api_key"] == expected
+
+
+def test_init_without_model_raises(mocker: MockerFixture) -> None:
+    mocker.patch.object(openai, "AsyncOpenAI")
+    mocker.patch.dict(os.environ, {}, clear=True)
+
+    with pytest.raises(ConfigError, match="AGENT_MODEL"):
+        OpenAIClientAdapter()
 
 
 def test_init_without_sdk_raises(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI", None)
+    mocker.patch.object(openai, "AsyncOpenAI", None)
 
     with pytest.raises(MissingDependencyError):
-        OllamaClientAdapter()
+        OpenAIClientAdapter(model_name="m")
 
 
 # --- format_tools -------------------------------------------------------------
 
 
 def test_format_tools_shape(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
     schema = {"type": "object", "properties": {}}
 
     result = adapter.format_tools([_make_tool("t", "d", schema)])
@@ -112,8 +132,8 @@ def test_format_tools_shape(mocker: MockerFixture) -> None:
 
 
 def test_extract_function_calls_parses_json_args(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     tool_call = SimpleNamespace(
         id="call-1", function=SimpleNamespace(name="fc", arguments='{"a": 1}')
@@ -128,8 +148,8 @@ def test_extract_function_calls_parses_json_args(mocker: MockerFixture) -> None:
 
 
 def test_extract_function_calls_invalid_json_falls_back_to_empty(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     tool_call = SimpleNamespace(id="c", function=SimpleNamespace(name="fc", arguments="not-json"))
     response = SimpleNamespace(
@@ -140,8 +160,8 @@ def test_extract_function_calls_invalid_json_falls_back_to_empty(mocker: MockerF
 
 
 def test_extract_function_calls_none(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=None))])
 
@@ -152,16 +172,16 @@ def test_extract_function_calls_none(mocker: MockerFixture) -> None:
 
 
 def test_get_text_content(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))])
     assert adapter.get_text_content(response) == "hello"
 
 
 def test_get_text_content_empty(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))])
     assert adapter.get_text_content(response) == ""
@@ -171,11 +191,11 @@ def test_get_text_content_empty(mocker: MockerFixture) -> None:
 
 
 def test_generate_content_passes_model_and_tools(mocker: MockerFixture) -> None:
-    client = mocker.patch.object(ollama, "AsyncOpenAI").return_value
+    client = mocker.patch.object(openai, "AsyncOpenAI").return_value
     create = AsyncMock(return_value="resp")
     client.chat.completions.create = create
 
-    adapter = OllamaClientAdapter()
+    adapter = OpenAIClientAdapter(model_name="m")
     tools = adapter.format_tools([_make_tool("t", "d", {"type": "object"})])
 
     result = asyncio.run(
@@ -185,17 +205,18 @@ def test_generate_content_passes_model_and_tools(mocker: MockerFixture) -> None:
     assert result == "resp"
     kwargs = create.await_args.kwargs
     assert kwargs["model"] == adapter.model_name
+    assert kwargs["max_completion_tokens"] == adapter.max_tokens
     assert kwargs["tools"] == tools
     assert kwargs["messages"][0] == {"role": "system", "content": "be helpful"}
     assert kwargs["messages"][1] == {"role": "user", "content": "hi"}
 
 
 def test_generate_content_omits_tools_when_empty(mocker: MockerFixture) -> None:
-    client = mocker.patch.object(ollama, "AsyncOpenAI").return_value
+    client = mocker.patch.object(openai, "AsyncOpenAI").return_value
     create = AsyncMock(return_value="resp")
     client.chat.completions.create = create
 
-    adapter = OllamaClientAdapter()
+    adapter = OpenAIClientAdapter(model_name="m")
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
 
     assert "tools" not in create.await_args.kwargs
@@ -205,8 +226,8 @@ def test_generate_content_omits_tools_when_empty(mocker: MockerFixture) -> None:
 
 
 def test_convert_messages_tool_calls_and_results(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     contents = [
         {"role": "user", "content": "do it"},
@@ -231,8 +252,8 @@ def test_convert_messages_tool_calls_and_results(mocker: MockerFixture) -> None:
 
 
 def test_convert_messages_synthesizes_tool_call_id(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     contents = [
         {
@@ -248,8 +269,8 @@ def test_convert_messages_synthesizes_tool_call_id(mocker: MockerFixture) -> Non
 
 
 def test_convert_messages_no_system_when_absent(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    adapter = OllamaClientAdapter()
+    mocker.patch.object(openai, "AsyncOpenAI")
+    adapter = OpenAIClientAdapter(model_name="m")
 
     messages = adapter._convert_to_openai_messages([{"role": "user", "content": "hi"}], None)
 
@@ -260,13 +281,13 @@ def test_convert_messages_no_system_when_absent(mocker: MockerFixture) -> None:
 
 
 def test_registered_in_models_registry() -> None:
-    assert MODELS.get("ollama") is OllamaClientAdapter
+    assert MODELS.get("openai") is OpenAIClientAdapter
 
 
-def test_get_model_builds_ollama_adapter(mocker: MockerFixture) -> None:
-    mocker.patch.object(ollama, "AsyncOpenAI")
-    mocker.patch.dict(os.environ, {}, clear=True)
+def test_get_model_builds_openai_adapter(mocker: MockerFixture) -> None:
+    mocker.patch.object(openai, "AsyncOpenAI")
+    mocker.patch.dict(os.environ, {"AGENT_MODEL": "m"}, clear=True)
 
-    client = get_model(provider="ollama")
+    client = get_model(provider="openai")
 
-    assert isinstance(client, OllamaClientAdapter)
+    assert isinstance(client, OpenAIClientAdapter)

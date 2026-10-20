@@ -24,7 +24,7 @@ The Gemini SDK (`google-genai`) is a core dependency — it's always installed. 
 | Extra | SDK | Powers |
 | --- | --- | --- |
 | `anthropic` | `anthropic` | The Claude model adapter. |
-| `openai` | `openai` | Installs the `openai` SDK. No OpenAI adapter ships yet; the Ollama adapter talks to its server through this client. |
+| `openai` | `openai` | The OpenAI-compatible model adapter (OpenAI API, SGLang, vLLM, Ollama). |
 
 Extras matter for runtime-only installs (e.g. `uv sync --no-dev --extra anthropic`); the `dev` group already includes both, so a plain `uv sync` covers them.
 
@@ -77,7 +77,7 @@ The CLI takes a tasks directory or a single `task.yaml` and runs each task throu
 | Variable | Purpose |
 | --- | --- |
 | `AGENT_MODEL` | Model id for the agent under test. |
-| `AGENT_PROVIDER` | Model provider key (`gemini` / `anthropic` / `ollama` / ...). |
+| `AGENT_PROVIDER` | Model provider key (`gemini` / `anthropic` / `openai` / ...). |
 | `AGENT_API_KEY` | API key, routed onto the provider-specific env vars each harness expects. |
 | `AGENT_TARGET` | Binary path for CLI harnesses. |
 | `AGENT_TIMEOUT_SEC` | Wall-clock cap per external call (default 600). |
@@ -87,7 +87,7 @@ The CLI takes a tasks directory or a single `task.yaml` and runs each task throu
 | `AGENT_SKILLS_PATHS` | CSV of skill directories granted to the agent. |
 | `AGENT_RULES_TEXT` | Rules text injected into the agent's context. |
 
-**The judge** that scores results is configured with `--judge-provider` / `--judge-model` (or `JUDGE_PROVIDER` / `JUDGE_MODEL`). Leaving both unset is fine: the harness builds a default judge from the models layer, which follows `AGENT_PROVIDER` and defaults to the Gemini adapter — authenticated via `AGENT_API_KEY`, or keylessly through the Vertex AI backend when `GCP_PROJECT_ID` and ambient cloud credentials are available. For a fully local judge, point it at Ollama (`JUDGE_PROVIDER=ollama`, endpoint via `OLLAMA_BASE_URL`).
+**The judge** that scores results is configured with `--judge-provider` / `--judge-model` (or `JUDGE_PROVIDER` / `JUDGE_MODEL`). Leaving both unset is fine: the harness builds a default judge from the models layer, which follows `AGENT_PROVIDER` and defaults to the Gemini adapter — authenticated via `AGENT_API_KEY`, or keylessly through the Vertex AI backend when `GCP_PROJECT_ID` and ambient cloud credentials are available. For a fully local judge, use `JUDGE_PROVIDER=openai` with `OPENAI_BASE_URL` pointing at any OpenAI-compatible server; `OPENAI_BASE_URL` is process-wide, so an `openai` agent uses the same server.
 
 The run-level knobs also have env forms (`devops_bench/run.py`): `PROJECT_ID`, `CLUSTER_NAME`, `EVAL_LIMIT`, `RESULTS_ROOT`, `BENCH_NO_INFRA`, `BENCH_NO_TEARDOWN`, `BENCH_PARALLEL`, and `RUN_ID`. `--parallel` isolates a run (its own kubeconfig, cloud CLI config, and tofu data dir, plus a run-unique cluster name) so several runs can share one host.
 

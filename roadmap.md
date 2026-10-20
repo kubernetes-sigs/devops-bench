@@ -90,7 +90,7 @@ Elevates the benchmark from single-agent scenarios to direct competition between
 * **Packaged Skills & Tasks** `✅ Completed`
   * Initial `tasks/` library and `skills/` runbooks for authoring and running evals.
 * **Model Inference Clients & CLI Agents** `✅ Completed`
-  * Claude, Gemini, and Ollama model clients; OpenClaw, Antigravity, and Gemini CLI agent adapters.
+  * Claude, Gemini, and OpenAI-compatible model clients; OpenClaw, Antigravity, and Gemini CLI agent adapters.
 * **Chaos & Verification Base Frameworks** `✅ Completed`
   * `devops_bench/chaos/` and `devops_bench/verification/` base interfaces.
 * **GEval Pipeline, Default Kind Stack & Eval Reporter** `✅ Completed`
