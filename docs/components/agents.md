@@ -544,21 +544,14 @@ installs, and the supplement grants only `get`/`list`/`watch` on
 gets on a given CRD is therefore whatever that operator chose to aggregate into
 `edit`, which is usually nothing.
 
-`opa-remediation` is an example. Kyverno v1.12.7 ships
-`kyverno:rbac:view:policies` labelled `aggregate-to-view` and
-`kyverno:rbac:admin:policies` labelled `aggregate-to-admin`, with no
-`aggregate-to-edit` on either. Aggregation flows view into edit and edit into
-admin, so the agent can read `ClusterPolicy` objects and cannot write them. Two
-of that task's objectives ask it to flip both policies from `Audit` to
-`Enforce`, so **the task cannot be fully passed under the default scope** — one
-of its three deterministic objective groups is unreachable. Sandboxed and
-ambient scores are not comparable for it.
-
-Nothing in a trajectory says so. Neither agent that ran the task attempted the
-flip, so the run logs carry no `forbidden` — the objective simply goes
-unattempted and reads as an agent miss. Anything that grades sandboxed runs
-against ambient ones has to account for this class of gap explicitly rather
-than infer it from failures.
+A task whose objective writes an operator's CRD must grant that in its own
+stack. Kyverno, for example, aggregates its policy roles into `view` and
+`admin` only, so `opa-remediation` applies a `kyverno-policy-editor`
+ClusterRole labelled `aggregate-to-edit` with `update`/`patch` on `kyverno.io`
+policies (`tf/prebuilt/opa-remediation/manifests/rbac/`). Grant the task's
+minimum there rather than widening the harness supplement for every task; an
+objective the scope cannot reach fails silently, since agents rarely attempt a
+write they expect to be denied.
 
 ### Model credentials
 
@@ -633,7 +626,11 @@ mints a short-lived credential for that identity host-side and injects it into
 the container; the operator's own credentials never cross. On GCP this is an
 impersonated access token (`CLOUDSDK_AUTH_ACCESS_TOKEN` /
 `GOOGLE_OAUTH_ACCESS_TOKEN`, with `CLOUDSDK_CORE_PROJECT` pinned to the task's
-project), requested with the same budget as the cluster token above. A mint
+project), requested with the same budget as the cluster token above. The mint
+runs as the host's active `gcloud` account, so the stack must grant that
+account `roles/iam.serviceAccountTokenCreator` on the identity (the in-tree
+stacks default it to the provisioning identity and take `token_creator_member`
+when that differs). A mint
 failure, a hung `gcloud`, or a provider that cannot mint for a named identity
 fails the run rather than letting the agent run without the credential its
 task depends on. A task that also declares `requires_unsandboxed` runs ambient
@@ -649,7 +646,7 @@ lost), it takes the hour and warns. If it does not, the run fails before the
 agent starts, naming the policy: grant it, or shorten the timeout. The
 alternative, serving the task identity through the metadata emulator so the
 container refreshes on its own, was deliberately not built: the emulator serves
-one identity and the container's `gcloud` reads the static token. Revisit it if
+one identity and the container's tooling reads the static token. Revisit it if
 a task genuinely needs more than an hour of cloud API access; today none does.
 
 ## Adding your own harness
