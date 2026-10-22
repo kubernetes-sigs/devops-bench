@@ -358,6 +358,7 @@ class TestResolveModelName:
             "gemini-3.1-pro",
             "high",
             "high",
+            "google/gemini-3.1-pro-preview",
         )
 
     def test_supplies_default_tier_when_id_names_none(self) -> None:
@@ -366,6 +367,7 @@ class TestResolveModelName:
             "gemini-3.8-flash",
             "high",
             "high",
+            "gemini-3.8-flash",
         )
 
     def test_splits_a_tier_spelled_into_the_slug(self) -> None:
@@ -373,6 +375,7 @@ class TestResolveModelName:
             "gemini-3.8-flash",
             "medium",
             "medium",
+            "gemini-3.8-flash",
         )
 
     def test_strips_preview_hidden_behind_a_tier_suffix(self) -> None:
@@ -382,6 +385,7 @@ class TestResolveModelName:
             "gemini-3.1-pro",
             "low",
             "low",
+            "google/gemini-3.1-pro-preview",
         )
 
     @pytest.mark.parametrize("tier", agy_mod._AGY_EFFORT_TIERS)
@@ -390,7 +394,7 @@ class TestResolveModelName:
         # name would get a second --effort, which agy rejects.
         display = f"Gemini 3.8 Flash ({tier.title()})"
 
-        assert agy_mod._resolve_model_name(display) == (display, None, tier)
+        assert agy_mod._resolve_model_name(display) == (display, None, tier, "Gemini 3.8 Flash")
 
     def test_display_name_keeps_its_own_tier_and_takes_no_effort_flag(self) -> None:
         # agy errors when --effort accompanies a parenthesised tier, so the
@@ -399,6 +403,7 @@ class TestResolveModelName:
             "Gemini 3.1 Pro (Low)",
             None,
             "low",
+            "Gemini 3.1 Pro",
         )
 
     def test_display_name_tier_match_is_case_insensitive(self) -> None:
@@ -406,6 +411,7 @@ class TestResolveModelName:
             "GEMINI 3.1 PRO (HIGH)",
             None,
             "high",
+            "GEMINI 3.1 PRO",
         )
 
 
@@ -461,6 +467,35 @@ class TestReasoningEffort:
         assert agy_mod.AgyCliAgent.reasoning_effort(agents_config.AgentConfig()) is None
         monkeypatch.setenv(agy_mod._EFFORT_ENV, "maximum")
         assert agy_mod.AgyCliAgent.reasoning_effort(agents_config.AgentConfig(model="m")) is None
+
+
+class TestArmModel:
+    """The arm records the configured id with the tier lifted out, in the matrix spelling."""
+
+    @pytest.mark.parametrize(
+        ("model", "want"),
+        [
+            # The two ways the matrix spells a tier collapse onto one model label.
+            ("google/gemini-3.1-pro-preview-low", "google/gemini-3.1-pro-preview"),
+            ("google/gemini-3.1-pro-preview", "google/gemini-3.1-pro-preview"),
+            ("gemini-3.8-flash-medium", "gemini-3.8-flash"),
+            ("Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro"),
+        ],
+    )
+    def test_lifts_the_tier_out_of_every_spelling(
+        self, monkeypatch: pytest.MonkeyPatch, model: str, want: str
+    ) -> None:
+        monkeypatch.delenv(agy_mod._EFFORT_ENV, raising=False)
+
+        assert agy_mod.AgyCliAgent.arm_model(agents_config.AgentConfig(model=model)) == want
+
+    def test_no_model_reports_none_and_bad_env_keeps_the_configured_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert agy_mod.AgyCliAgent.arm_model(agents_config.AgentConfig()) is None
+        # A bad tier already failed the run itself; the label must not raise on top of it.
+        monkeypatch.setenv(agy_mod._EFFORT_ENV, "maximum")
+        assert agy_mod.AgyCliAgent.arm_model(agents_config.AgentConfig(model="m")) == "m"
 
 
 @pytest.mark.parametrize(
