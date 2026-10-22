@@ -18,6 +18,8 @@ A single run, end to end:
 4. **Score** — LLM-as-judge metrics grade the outcome and the agent's tool use.
 5. **Teardown** — everything provisioned is cleaned up.
 
+See [docs/scoring.md](docs/scoring.md) for how benchmark runs are scored.
+
 ## What's supported
 
 **Agent harnesses** — choose with `BENCH_AGENT_TYPE` or `--agent-type` (default `gemini-cli`, an alias for `gemini`):
