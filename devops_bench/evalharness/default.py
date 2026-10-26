@@ -926,7 +926,6 @@ class DefaultEvalHarness(Harness):
         )
         # Canonical key, so an alias aggregates with it instead of as a second setup.
         harness = _canonical_agent_type(self.agent_type)
-        model = self._agent_config.model or self._agent_config.provider or harness
         # The tier is part of the arm: without it, runs of one model at two tiers
         # share a setup id and the aggregate's keep-newest dedupe merges them.
         _ensure_builtin_agents_registered()
@@ -935,6 +934,10 @@ class DefaultEvalHarness(Harness):
         reasoning_effort = (
             agent_cls.reasoning_effort(self._agent_config) if agent_cls is not None else None
         )
+        # A tier spelled inside the matrix id is lifted out of the model, so one agent
+        # has one setup id whether the tier came from the id suffix or the env.
+        arm_model = agent_cls.arm_model(self._agent_config) if agent_cls is not None else None
+        model = arm_model or self._agent_config.model or self._agent_config.provider or harness
         manifest = Manifest(
             schema_version=SCHEMA_VERSION,
             run_id=run_dir.name,

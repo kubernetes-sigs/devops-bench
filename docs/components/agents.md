@@ -132,7 +132,14 @@ run their model with no reasoning throttle. Override it with
 `AGENT_MODEL_EFFORT`. The tier a run used is recorded on its manifest and every
 row as `reasoningEffort`, and folded into `setupId` (`…-antigravity-effort-low`),
 so runs at different tiers are separate arms and a re-run at one tier cannot
-replace rows scored at another.
+replace rows scored at another. A tier spelled inside the id is lifted out of
+the recorded `model`: `google/gemini-3.1-pro-preview-low`, and
+`google/gemini-3.1-pro-preview` with `AGENT_MODEL_EFFORT=low`, both record
+`model: google/gemini-3.1-pro-preview`, `reasoningEffort: low`, and one `setupId`.
+Only the arm label lifts the tier: when `JUDGE_MODEL` or `CHAOS_MODEL` is unset,
+the judge and chaos driver fall back to the literal `AGENT_MODEL`, and a tier
+suffix is not a model Vertex serves. Set them explicitly, or spell the tier with
+`AGENT_MODEL_EFFORT`.
 
 Tiers vary by model, and the harness only checks `AGENT_MODEL_EFFORT` against
 the union of tiers across models. The Flash models take `low`, `medium`, and

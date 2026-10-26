@@ -89,6 +89,11 @@ class AgentHarness(ABC):
         """The reasoning tier a run of ``config.model`` uses, when the harness names one apart from the id."""
         return None
 
+    @classmethod
+    def arm_model(cls, config: AgentConfig) -> str | None:
+        """The model id the arm records: ``config.model`` with any tier the harness spells inside it lifted out."""
+        return config.model
+
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or AgentConfig()
 

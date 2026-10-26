@@ -31,6 +31,7 @@ from pytest_mock import MockerFixture
 from devops_bench.agents import AGENTS, AgentConfig, AgentHarness, AgentResult
 from devops_bench.core import NotRegisteredError
 from devops_bench.evalharness.default import DefaultEvalHarness
+from devops_bench.results import setup_id
 
 
 class _DummyAgent(AgentHarness):
@@ -193,19 +194,30 @@ def test_manifest_records_the_canonical_harness_key(tmp_path: Path, mocker: Mock
     assert "effort" not in manifest["setupId"]
 
 
+@pytest.mark.parametrize(
+    ("model", "effort_env"),
+    [("google/gemini-3.1-pro-preview-low", None), ("google/gemini-3.1-pro-preview", "low")],
+)
 def test_manifest_records_the_reasoning_effort_of_a_tiered_harness(
-    tmp_path: Path, mocker: MockerFixture, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    mocker: MockerFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    effort_env: str | None,
 ) -> None:
     """The tier is part of the arm: it lands on the manifest and in ``setupId``.
 
     Without it, ``low`` and ``high`` runs of one model share a ``setupId`` and
     the aggregate's keep-newest dedupe lets a re-run at one tier replace rows
-    scored at the other.
+    scored at the other. And a tier spelled inside the id is lifted out of the
+    model, so both spellings of one arm land on one ``setupId``.
     """
     monkeypatch.delenv("AGENT_MODEL_EFFORT", raising=False)
+    if effort_env:
+        monkeypatch.setenv("AGENT_MODEL_EFFORT", effort_env)
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
     harness.agent_type = "antigravity"
-    harness._agent_config.model = "google/gemini-3.1-pro-preview-low"  # noqa: SLF001
+    harness._agent_config.model = model  # noqa: SLF001
     write_manifest = mocker.patch.object(harness.reporter, "write_manifest")
     mocker.patch.object(harness.reporter, "write_rows")
 
@@ -213,8 +225,14 @@ def test_manifest_records_the_reasoning_effort_of_a_tiered_harness(
 
     manifest = write_manifest.call_args.args[1]
     assert manifest["reasoningEffort"] == "low"
-    assert manifest["setupId"].startswith("google-gemini-3-1-pro-preview-low-antigravity")
-    assert manifest["setupId"].endswith("-effort-low")
+    assert manifest["model"] == "google/gemini-3.1-pro-preview"
+    assert manifest["setupId"] == setup_id(
+        "google/gemini-3.1-pro-preview",
+        "antigravity",
+        manifest["augmentation"],
+        reasoning_effort="low",
+    )
+    assert "preview-low" not in manifest["setupId"]
 
 
 def test_manifest_is_still_written_for_an_unregistered_harness(
