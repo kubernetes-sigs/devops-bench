@@ -20,7 +20,12 @@ mounting the synced Secret at `/etc/db-credentials`.
 
 The agent's own principal must be able to add and destroy versions on the
 secret. Sandboxed runs impersonate the stack's `agent_cloud_identity` output,
-a run-unique service account holding only those roles.
+a run-unique service account holding only those roles. The host mints that
+token as its active `gcloud` account, which needs
+`roles/iam.serviceAccountTokenCreator` on the identity. The stack grants it to
+the provisioning ADC identity by default; when the `gcloud` account differs
+from ADC, set `TF_VAR_token_creator_member` to the `gcloud` account (`user:…`
+or `serviceAccount:…`) before provisioning.
 
 ## Grading
 

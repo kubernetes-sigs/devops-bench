@@ -2176,27 +2176,65 @@ def test_build_agent_config_rejects_a_spec_together_with_exempt(isolated_env: No
         )
 
 
-def test_secret_rotation_declares_requires_unsandboxed() -> None:
-    """Checked through the real loader: ``Task`` drops unknown keys silently, so a
-    raw-YAML assertion alone would stay green while the harness saw ``False``."""
-    import pathlib
+def test_run_one_hands_the_credential_bearing_spec_to_the_agent(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """execute_agent gets the completed spec, cloud credential included, not the skeletal one."""
+    from dataclasses import replace
 
-    import yaml as _yaml
+    from devops_bench.core import NetworkPlan
 
-    from devops_bench.tasks.loader import FileSystemTaskLoader
+    class _SandboxReadyAgent(_WorkspaceWritingAgent):
+        supports_sandbox = True
 
-    tasks = FileSystemTaskLoader().load_tasks("tasks/gcp/secret-rotation/task.yaml")
-    assert len(tasks) == 1
-    assert tasks[0].requires_unsandboxed is True
+    AGENTS.register("fake-sandbox-handoff")(_SandboxReadyAgent)
+    try:
+        harness = _sandboxed_harness(
+            monkeypatch, tmp_path, agent_type="fake-sandbox-handoff", no_infra=True
+        )
+        skeletal = harness.build_agent_config().sandbox
+        assert skeletal is not None
+        completed = replace(
+            skeletal,
+            network=NetworkPlan(kubectl_context="kind-c1"),
+            cloud_credential_env={"CLOUDSDK_AUTH_ACCESS_TOKEN": "run-token"},
+        )
 
-    spec = _yaml.safe_load(
-        pathlib.Path("tasks/gcp/secret-rotation/task.yaml").read_text(encoding="utf-8")
-    )
-    assert spec.get("requires_unsandboxed") is True
+        def fake_prepare(workspace_path: Path, *args: Any, **kwargs: Any) -> Any:
+            (workspace_path / "home").mkdir(parents=True, exist_ok=True)
+            return completed
+
+        monkeypatch.setattr(harness, "_prepare_sandbox_spec", fake_prepare)
+        monkeypatch.setattr(
+            harness_default.agent_credentials,
+            "teardown_agent_credentials",
+            lambda context=None: True,
+        )
+        seen: dict[str, Any] = {}
+
+        def fake_execute(prompt: str, ctx: Any, **kwargs: Any) -> AgentResult:
+            seen.update(kwargs)
+            return AgentResult(output="ok", trajectory=[])
+
+        monkeypatch.setattr(harness, "execute_agent", fake_execute)
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        record, _ = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["status"] == "success"
+        assert seen["sandbox_spec"] is completed
+        assert seen["sandbox_spec"].cloud_credential_env == {
+            "CLOUDSDK_AUTH_ACCESS_TOKEN": "run-token"
+        }
+        assert seen["sandbox_exempt"] is False
+    finally:
+        AGENTS._items.pop("fake-sandbox-handoff", None)  # noqa: SLF001
 
 
-def test_no_other_task_opts_out_of_the_sandbox() -> None:
-    """Exactly one exemption; a second would need its own justification."""
+def test_no_task_opts_out_of_the_sandbox() -> None:
+    """No exemptions in tree; a new one would need its own justification."""
     import pathlib
 
     import yaml as _yaml
@@ -2206,7 +2244,7 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         for p in sorted(pathlib.Path("tasks").glob("*/*/task.yaml"))
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
-    assert exempt == ["secret-rotation"]
+    assert exempt == []
 
 
 def test_only_readonly_quota_declines_quota_writes() -> None:

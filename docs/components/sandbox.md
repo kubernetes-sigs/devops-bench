@@ -70,10 +70,14 @@ exec, and quotas alike), and shells into pre-existing non-conformant pods. A
 task whose subject matter *is* privileged workloads declares
 `agent_pod_security: privileged`; one whose premise is that the operator cannot
 touch the quota declares `agent_quota_writes: false`. A task whose objective
-needs the ambient cloud identity itself declares `requires_unsandboxed: true`
-and runs outside the boundary — loudly, and with its record's `sandboxed` field
-reading `false` (the harness refuses to pair an exemption with a sandbox spec,
-so the two can never both apply to one task). Under vcluster the ServiceAccount
+needs a cloud identity has its stack name a run-scoped one in an
+`agent_cloud_identity` output and gets a short-lived credential for it inside
+the boundary (see [task cloud credentials](agents.md#task-cloud-credentials)).
+Only a task whose provider has no mint recipe declares
+`requires_unsandboxed: true` and runs outside the boundary — loudly, and with
+its record's `sandboxed` field reading `false` (the harness refuses to pair an
+exemption with a sandbox spec, so the two can never both apply to one task);
+no in-tree task does. Under vcluster the ServiceAccount
 lives inside the virtual cluster, so the token is cryptographically useless
 against the host.
 
