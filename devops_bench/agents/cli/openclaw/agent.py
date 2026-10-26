@@ -266,14 +266,57 @@ def _oc_model_id(config: AgentConfig) -> str:
     model = (config.model or "").strip()
     if not model:
         return ""
-    if "/" in model:  # already a full oc id; normalize the provider segment
-        wire, _, bare = model.partition("/")
-        try:
-            wire = resolve_provider(wire, default=wire).oc_provider
-        except ConfigError:
-            return model  # unknown wire: leave as-is, let oc validate
-        return f"{wire}/{bare}"
-    return f"{resolve_provider(config.provider).oc_provider}/{model}"
+    wire, bare = _split_wire(model)
+    if wire is None and "/" in model:
+        return model  # unknown wire: leave as-is, let oc validate
+    return f"{wire or resolve_provider(config.provider).oc_provider}/{bare}"
+
+
+def _split_wire(model: str | None) -> tuple[str | None, str]:
+    """Split ``provider/model`` into ``(oc provider id, bare model)``; else ``(None, model)``."""
+    model = (model or "").strip()
+    if "/" not in model:
+        return None, model
+    wire, _, bare = model.partition("/")
+    try:
+        return resolve_provider(wire, default=wire).oc_provider, bare
+    except ConfigError:
+        return None, model  # unknown wire: oc validates it
+
+
+def _effective_provider(config: AgentConfig) -> str | None:
+    """The provider the run's auth follows: a full ``provider/model`` id wins over ``config.provider``.
+
+    oc routes the call by the id's provider segment, so the key vars, the location,
+    the emulator and the auth profile follow it too; see :func:`_warn_provider_override`.
+
+    Raises:
+        ConfigError: ``config.provider`` is set and not a known provider.
+    """
+    wire, _ = _split_wire(config.model)
+    if wire is None:
+        return config.provider
+    if config.provider:
+        resolve_provider(config.provider)  # an unknown alias still fails loud
+    return wire
+
+
+def _warn_provider_override(config: AgentConfig) -> None:
+    """Log once when a full model id overrides a disagreeing ``config.provider``."""
+    wire, _ = _split_wire(config.model)
+    if wire is None or not config.provider:
+        return
+    try:
+        configured = resolve_provider(config.provider).oc_provider
+    except ConfigError:
+        return  # _build_env raises on it
+    if configured != wire:
+        _log.warning(
+            "model %r names provider %r; ignoring the configured provider %r",
+            config.model,
+            wire,
+            config.provider,
+        )
 
 
 def _build_model_override(config: AgentConfig) -> dict:
@@ -349,10 +392,10 @@ def _build_env(config: AgentConfig) -> dict[str, str]:
     sandboxed or not. The caller adds the ``OPENCLAW_*`` paths.
 
     Raises:
-        ConfigError: If ``config.provider`` is not a known provider.
+        ConfigError: If the configured provider is not a known provider.
     """
     # Resolve unconditionally so an unknown provider fails loud even keyless.
-    spec = resolve_provider(config.provider)
+    spec = resolve_provider(_effective_provider(config))
     overlay: dict[str, str] = {
         var: os.environ[var] for var in spec.api_key_envs if os.environ.get(var)
     }
@@ -391,7 +434,7 @@ def _sandbox_provider_env(config: AgentConfig, state_dir: Path) -> dict[str, str
         raise SandboxError("_sandbox_provider_env needs the task-completed sandbox spec")
     register = _write_node_fetch_shim(state_dir) / "register.mjs"
     overlay["NODE_OPTIONS"] = f"--import={sandbox.container_path(sandbox_spec.workspace, register)}"
-    spec = resolve_provider(config.provider)
+    spec = resolve_provider(_effective_provider(config))
     if spec.backend == "vertex" and not _vertex_key_present(config, spec):
         overlay.update(sandbox_credential_env(spec, project=vertex_project()))
     if spec.oc_provider == "anthropic-vertex":
@@ -421,7 +464,7 @@ def _vertex_auth_profile_provider(config: AgentConfig) -> str | None:
     A real key, configured or in the environment, gets no profile: it would be shadowed.
     """
     try:
-        spec = resolve_provider(config.provider)
+        spec = resolve_provider(_effective_provider(config))
     except ConfigError:
         return None
     if spec.backend != "vertex" or _vertex_key_present(config, spec):
@@ -486,6 +529,7 @@ class OpenClawAgent(AgentHarness):
     def __init__(self, config: AgentConfig | None = None, *, agent_name: str = "main") -> None:
         AgentHarness.__init__(self, config)
         self.agent_name = agent_name
+        _warn_provider_override(self.config)
         caps = self.config.capabilities
         self.rules = caps.rules
         self.mcp_servers = caps.mcp_servers

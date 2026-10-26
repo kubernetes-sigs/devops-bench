@@ -72,7 +72,9 @@ while IFS= read -r task; do
   for model in ${MATRIX_MODELS}; do
     for preset in ${MATRIX_AGENT_CONFIGS}; do
       cfg="$(agent_config_env "${preset}")" || exit 1
-      kvs="AGENT_MODEL=${model};AGENT_PROVIDER=${AGENT_PROVIDER};${cfg}$(task_extra_env "${task}")"
+      # A full provider/model id carries its own provider; a blank AGENT_PROVIDER reads as unset.
+      case "${model}" in */*) arm_provider="" ;; *) arm_provider="${AGENT_PROVIDER}" ;; esac
+      kvs="AGENT_MODEL=${model};AGENT_PROVIDER=${arm_provider};${cfg}$(task_extra_env "${task}")"
       rid="$(sanitize "${tname}")__$(sanitize "${model}")__$(sanitize "${preset}")"
       COMBOS+=("${rid}|${task}|${kvs}|refactored")
     done

@@ -32,7 +32,8 @@
 # RESUME_STAMP=<stamp>: skip launching; re-poll + pull an existing remote run.
 # BENCH_VERTEX=1: agents + judges use Vertex AI via the VM SA's ADC (API keys
 #   unset, location 'global'); legacy oc arm also needs AGENT_PROVIDER=google-vertex
-#   and oc's google-vertex provider registered once (configure-oc.sh --vertex).
+#   (or google-vertex/<model> ids in MATRIX_MODELS) and oc's google-vertex
+#   provider registered once (configure-oc.sh --vertex).
 # BENCH_REMOTE=1: run on the bastion over ssh; unset runs every combo locally.
 
 BASTION_VM="${BASTION_VM:-bench-bastion}"
