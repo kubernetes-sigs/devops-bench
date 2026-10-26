@@ -37,6 +37,7 @@ from devops_bench.agents.capabilities import (
 )
 from devops_bench.agents.cli.openclaw import OpenClawAgent, parse_trajectory_export
 from devops_bench.agents.cli.openclaw import agent as oc_mod
+from devops_bench.agents.cli.openclaw import parsing as parsing_mod
 from devops_bench.agents.cli.openclaw.agent import (
     _build_env,
     _build_local_command,
@@ -50,6 +51,7 @@ from devops_bench.agents.cli.openclaw.parsing import (
     _strip_ansi,
 )
 from devops_bench.agents.sandbox import SandboxSpec
+from devops_bench.core import is_placeholder_output
 from devops_bench.core.errors import ConfigError, SandboxError, SubprocessError
 
 
@@ -173,6 +175,149 @@ def test_parse_trajectory_export_output_falls_back_to_assistant_message() -> Non
     _trajectory, tokens, output, _errors = parse_trajectory_export(blob)
     assert tokens == {"input": 1, "output": 2}
     assert output == "done."
+
+
+def test_parse_trajectory_export_placeholder_final_text_falls_back() -> None:
+    """A redacted final answer (live shape from run_20260911_172304) yields its assistant.message."""
+    blob = _events(
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Deployed hello-app; 3/3 pods Ready."}],
+                }
+            },
+        },
+        {
+            "type": "model.completed",
+            "data": {
+                "usage": {"input": 1, "output": 2},
+                "assistantTexts": ["[Malformed diagnostic JSON redacted]"],
+            },
+        },
+    )
+    _trajectory, _tokens, output, errors = parse_trajectory_export(blob)
+    assert errors == []
+    assert output == "Deployed hello-app; 3/3 pods Ready."
+
+
+def test_parse_trajectory_export_redacted_turn_recovers_its_own_message_not_an_earlier_turn() -> (
+    None
+):
+    """A real earlier turn must not shadow the redacted final turn's assistant.message."""
+    blob = _events(
+        {"type": "model.completed", "data": {"assistantTexts": ["Applying the manifest now."]}},
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Deployed hello-app; 3/3 pods Ready."}],
+                }
+            },
+        },
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Malformed diagnostic JSON redacted]"]},
+        },
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == "Deployed hello-app; 3/3 pods Ready."
+
+
+def test_parse_trajectory_export_redacted_final_turn_does_not_promote_an_earlier_turn() -> None:
+    """A redacted last turn with nothing of its own is missing, not the previous turn's narration."""
+    blob = _events(
+        {"type": "model.completed", "data": {"assistantTexts": ["Applying the manifest now."]}},
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Oversized diagnostic JSON redacted]"]},
+        },
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == "[Oversized diagnostic JSON redacted]"
+
+
+def test_parse_trajectory_export_real_turn_after_a_redacted_one_wins() -> None:
+    blob = _events(
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Oversized diagnostic JSON redacted]"]},
+        },
+        {"type": "model.completed", "data": {"assistantTexts": ["Rollout complete."]}},
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == "Rollout complete."
+
+
+def test_parse_trajectory_export_all_placeholders_returns_the_placeholder() -> None:
+    """With nothing real to recover the placeholder stands, so the scoring layer withholds it."""
+    blob = _events(
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "[Malformed diagnostic JSON redacted]"}],
+                }
+            },
+        },
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Malformed diagnostic JSON redacted]"]},
+        },
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == "[Malformed diagnostic JSON redacted]"
+    assert is_placeholder_output(output)
+
+
+def test_parse_trajectory_export_filters_assistant_message_parts_individually() -> None:
+    """Placeholder parts are dropped before the message's parts are joined."""
+    blob = _events(
+        {
+            "type": "assistant.message",
+            "data": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "[Malformed diagnostic JSON redacted]"},
+                        {"type": "text", "text": "Rollout complete."},
+                        {"type": "text", "text": "[Oversized diagnostic JSON redacted]"},
+                    ],
+                }
+            },
+        },
+        {"type": "model.completed", "data": {"assistantTexts": []}},
+    )
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == "Rollout complete."
+
+
+def test_parse_trajectory_export_warns_once_per_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    warnings: list[str] = []
+    monkeypatch.setattr(parsing_mod._log, "warning", lambda msg, *args: warnings.append(msg % args))
+    blob = _events(
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Malformed diagnostic JSON redacted]"]},
+        },
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Oversized diagnostic JSON redacted]"]},
+        },
+    )
+    parse_trajectory_export(blob)
+    assert warnings == ["dropped 2 redaction placeholder(s) from the export bundle"]
+
+
+def test_parse_trajectory_export_answer_quoting_a_placeholder_is_kept() -> None:
+    """Only a whole-string placeholder is dropped; an answer about one survives."""
+    text = "Retried after seeing '[Malformed diagnostic JSON redacted]' in the log; done."
+    blob = _events({"type": "model.completed", "data": {"assistantTexts": [text]}})
+    _trajectory, _tokens, output, _errors = parse_trajectory_export(blob)
+    assert output == text
 
 
 def test_parse_trajectory_export_surfaces_decode_errors() -> None:
@@ -441,6 +586,28 @@ def test_execute_falls_back_to_stdout_when_bundle_has_no_answer(
 
     result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
     assert result.output == "bare stdout answer"
+
+
+def test_execute_keeps_the_placeholder_instead_of_falling_back_to_stdout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An all-redacted bundle must reach the record as the placeholder, not the debug stdout."""
+    events = _events(
+        _tool_call("1", "exec", {"command": "kubectl apply -f app.yaml"}),
+        _tool_result("1", "deployment created"),
+        {
+            "type": "model.completed",
+            "data": {"assistantTexts": ["[Malformed diagnostic JSON redacted]"]},
+        },
+    )
+    _install_oc_run(
+        monkeypatch,
+        lambda *a, **k: _make_subprocess_result(stdout="[DEBUG] starting oc...\n", returncode=0),
+        _bundle_writer(events),
+    )
+
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
+    assert is_placeholder_output(result.output)
 
 
 def test_execute_keeps_the_export_bundle_in_a_harness_workspace(
