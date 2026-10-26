@@ -24,6 +24,7 @@ from deepeval.test_case import LLMTestCase
 from devops_bench.core import (
     get_bool,
     get_logger,
+    is_placeholder_output,
     is_unscoreable_run,
 )
 
@@ -134,6 +135,11 @@ def _build_context(res: dict[str, Any], judge_model: Any, use_mcp: bool) -> Metr
     latency = res.get("latency")
     retrieval_context = res.get("retrieval_context")
 
+    # Empty output counts as missing only when the trajectory shows the agent did work.
+    final_output_missing = is_placeholder_output(actual_output) or (
+        not str(actual_output or "").strip() and bool(trajectory)
+    )
+
     # Tool names surface with an MCP server prefix (e.g. ``default__generate_manifest``);
     # expected-tool checks in tasks reference the canonical name (``generate_manifest``).
     # Normalize only for the judge test cases so tool-call matching isn't brittle;
@@ -168,7 +174,9 @@ def _build_context(res: dict[str, Any], judge_model: Any, use_mcp: bool) -> Metr
     all_context = {
         "tools_used": norm_tools,
         "execution_trace": norm_trajectory,
-        "text_output": actual_output if actual_output else "No response generated",
+        "text_output": "No response generated"
+        if final_output_missing or not actual_output
+        else actual_output,
     }
     all_case = LLMTestCase(
         input=prompt,
@@ -185,6 +193,7 @@ def _build_context(res: dict[str, Any], judge_model: Any, use_mcp: bool) -> Metr
         tool_case=tool_case,
         all_case=all_case,
         generation_only=bool(res.get("generation_only", False)),
+        final_output_missing=final_output_missing,
     )
 
 

@@ -22,12 +22,22 @@ it, which is how a dead agent published a perfect 1.0 in the first place.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
 from devops_bench.core import score_keys
 
-__all__ = ["UNSCOREABLE_RUN_STATUSES", "is_unscoreable_run", "tripped_gates"]
+__all__ = [
+    "UNSCOREABLE_RUN_STATUSES",
+    "is_placeholder_output",
+    "is_unscoreable_run",
+    "tripped_gates",
+]
+
+# Whole-string match for openclaw's sanitizer placeholders, e.g.
+# "[Malformed diagnostic JSON redacted]"; prose that merely mentions one never matches.
+_PLACEHOLDER_OUTPUT = re.compile(r"\[[^\]]* diagnostic JSON redacted\]")
 
 #: Statuses that say outright that the agent did not complete its turn.
 #: Historical records use these; see :func:`is_unscoreable_run` for why the
@@ -75,3 +85,8 @@ def tripped_gates(scores: Mapping[str, Any] | None) -> list[str]:
         if score_keys.score_value(entry) == 0.0 and not score_keys.failed_closed(entry):
             tripped.append(key)
     return tripped
+
+
+def is_placeholder_output(output: Any) -> bool:
+    """Whether ``output`` is a tool-side redaction placeholder rather than an answer."""
+    return isinstance(output, str) and _PLACEHOLDER_OUTPUT.fullmatch(output.strip()) is not None

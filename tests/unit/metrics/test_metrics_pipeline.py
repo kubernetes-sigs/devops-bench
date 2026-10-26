@@ -24,6 +24,7 @@ end to end with ``deepeval`` mocked.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -656,6 +657,66 @@ def test_build_context_normalizes_tool_names_for_judge(mocker: MockerFixture) ->
     assert "default__generate_manifest" not in ctx.tool_case.actual_output
     assert res["tools"] == ["default__generate_manifest"]
     assert res["trajectory"][0]["name"] == "default__generate_manifest"
+
+
+def test_build_context_flags_a_redaction_placeholder_as_missing(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="[Malformed diagnostic JSON redacted]")
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is True
+
+
+def test_build_context_flags_an_empty_output_beside_real_work(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="")
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is True
+
+
+def test_build_context_keeps_judging_an_agent_that_produced_nothing(
+    mocker: MockerFixture,
+) -> None:
+    # Empty output and empty trajectory: the agent genuinely turned in nothing.
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="", trajectory=[], tools=[])
+    assert pipeline._build_context(res, MagicMock(), True).final_output_missing is False
+
+
+def test_build_context_hides_a_placeholder_from_the_other_judges(mocker: MockerFixture) -> None:
+    # ChecklistScore, safety and grounding read all_case; they must not grade the stand-in.
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    res = _base_result(output="[Malformed diagnostic JSON redacted]")
+    ctx = pipeline._build_context(res, MagicMock(), True)
+    assert json.loads(ctx.all_case.actual_output)["text_output"] == "No response generated"
+    assert "redacted" not in ctx.all_case.actual_output
+
+
+def test_build_context_leaves_a_real_answer_alone(mocker: MockerFixture) -> None:
+    mocker.patch.object(pipeline, "LLMTestCase", side_effect=lambda **kw: SimpleNamespace(**kw))
+    assert pipeline._build_context(_base_result(), MagicMock(), True).final_output_missing is False
+
+
+def test_batch_withholds_outcome_validity_for_a_placeholder_output(
+    mocker: MockerFixture,
+) -> None:
+    # Status success, no errors, a real trajectory, but the final message was redacted.
+    _patch_judges(mocker)
+    mocker.patch.object(pipeline, "LLMTestCase")
+    evaluate = mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
+    results = [
+        _base_result(
+            output="[Malformed diagnostic JSON redacted]",
+            status="success",
+            errors=[],
+            expected_output="App deployed",  # no bullets: no checklist source
+        )
+    ]
+
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=False)
+
+    entry = results[0]["scores"]["OutcomeValidity"]
+    assert entry["score"] is None
+    assert "withheld" in entry["reason"] and "placeholder" in entry["reason"]
+    evaluate.assert_not_called()
+    assert pipeline.OUTCOME_SCORE_KEY not in results[0]["scores"]
 
 
 def test_outcome_validity_override_only_when_generation_only(mocker: MockerFixture) -> None:

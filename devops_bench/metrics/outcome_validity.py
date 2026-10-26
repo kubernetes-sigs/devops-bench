@@ -22,7 +22,7 @@ from typing import Any
 from deepeval.metrics import GEval
 from deepeval.test_case import SingleTurnParams
 
-from devops_bench.core import get_logger
+from devops_bench.core import get_logger, is_placeholder_output
 from devops_bench.metrics._skills import load_skill_text
 from devops_bench.metrics.base import (
     GEVAL_PASS_THRESHOLD,
@@ -116,7 +116,17 @@ class OutcomeValidityMetric:
         return True
 
     def evaluate(self, ctx: MetricContext) -> Iterable[MetricScore]:
-        """Score the outcome-validity GEval against the outcome test case."""
+        """Score the outcome-validity GEval, abstaining when no final answer was captured."""
+        if ctx.final_output_missing:
+            output = ctx.result.get("output")
+            cause = (
+                f"a redaction placeholder {output!r}"
+                if is_placeholder_output(output)
+                else f"empty output after {len(ctx.result.get('trajectory') or [])} trajectory steps"
+            )
+            reason = f"withheld: the final answer was not captured ({cause}), so there is nothing to judge"
+            _log.warning("OutcomeValidity %s for %s", reason, ctx.result.get("name"))
+            return [MetricScore(self.name, None, success=None, reason=reason)]
         return run_geval(
             ctx.outcome_case,
             [build_outcome_validity_metric(ctx.judge, generation_only=ctx.generation_only)],

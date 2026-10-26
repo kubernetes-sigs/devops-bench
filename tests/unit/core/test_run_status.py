@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from devops_bench.core import is_unscoreable_run
+from devops_bench.core import is_placeholder_output, is_unscoreable_run
 
 
 def test_an_explicit_agent_error_status_is_unscoreable() -> None:
@@ -41,3 +41,31 @@ def test_errors_alongside_real_work_are_ordinary() -> None:
 
 def test_a_clean_run_is_scoreable() -> None:
     assert is_unscoreable_run({"status": "success", "trajectory": [{"name": "kubectl"}]}) is False
+
+
+def test_the_observed_redaction_placeholders_are_placeholders() -> None:
+    assert is_placeholder_output("[Malformed diagnostic JSON redacted]") is True
+    assert is_placeholder_output("[Oversized diagnostic JSON redacted]") is True
+    assert is_placeholder_output("  [Malformed diagnostic JSON redacted]\n") is True
+
+
+def test_sibling_variants_of_the_sanitizer_family_are_placeholders() -> None:
+    assert is_placeholder_output("[Oversized (>64KB) diagnostic JSON redacted]") is True
+    assert is_placeholder_output("[Malformed: diagnostic JSON redacted]") is True
+
+
+def test_other_bracketed_redactions_are_answers() -> None:
+    # Only oc's "diagnostic JSON" family is a placeholder; an agent may legitimately answer this.
+    assert is_placeholder_output("[Credentials redacted]") is False
+    assert is_placeholder_output("[redacted]") is False
+
+
+def test_an_answer_mentioning_a_redaction_is_not_a_placeholder() -> None:
+    assert is_placeholder_output("The log line [secret redacted] was expected; done.") is False
+    assert is_placeholder_output("Saw '[Malformed diagnostic JSON redacted]' and retried.") is False
+
+
+def test_empty_and_non_string_outputs_are_not_placeholders() -> None:
+    assert is_placeholder_output("") is False
+    assert is_placeholder_output(None) is False
+    assert is_placeholder_output(["[Malformed diagnostic JSON redacted]"]) is False

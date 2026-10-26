@@ -612,12 +612,14 @@ class OpenClawAgent(AgentHarness):
             errors: list[str] = []
             metadata: dict = {}
 
+            failure: str | None = None
             if timed_out:
-                errors.append(f"oc agent timed out after {self.config.timeout_sec}s")
-                metadata["returncode"] = completed.returncode
+                failure = f"oc agent timed out after {self.config.timeout_sec}s"
             elif completed.returncode != 0:
                 stderr = (completed.stderr or "").strip()
-                errors.append(f"oc agent exited {completed.returncode}: {stderr or '<no stderr>'}")
+                failure = f"oc agent exited {completed.returncode}: {stderr or '<no stderr>'}"
+            if failure:
+                errors.append(failure)
                 metadata["returncode"] = completed.returncode
 
             trajectory, tokens, bundle_output, export_errors = self._extract_trajectory(
@@ -626,7 +628,10 @@ class OpenClawAgent(AgentHarness):
             errors.extend(export_errors)
 
         # Bundle text is clean; bash stdout carries debug noise — fall back only if empty.
-        output = bundle_output if bundle_output else stdout_text
+        # With neither, the agent's own failure is the answer, as in the sibling CLI agents.
+        output = bundle_output or stdout_text
+        if not output.strip() and failure:
+            output = f"Error: {failure}"
 
         return AgentResult(
             output=output,

@@ -41,6 +41,7 @@ from devops_bench.core.results import Result, Status
 from devops_bench.core.run_env import RunEnv
 from devops_bench.core.run_status import (
     UNSCOREABLE_RUN_STATUSES,
+    is_placeholder_output,
     is_unscoreable_run,
     tripped_gates,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "first_env",
     "UNSCOREABLE_RUN_STATUSES",
     "get_bool",
+    "is_placeholder_output",
     "is_unscoreable_run",
     "tripped_gates",
     "get_int",
