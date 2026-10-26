@@ -11,6 +11,7 @@ and [glossary](./components/glossary.md).
 ## How-to guides — get things done
 
 - [Run evals](./how-to/run-evals.md) — single runs and parallel matrices.
+- [Serve a local model](./how-to/serve-a-local-model.md) — host an open-weights model with SGLang on a GPU bastion.
 - [Add a task](./how-to/add-a-task.md) — author a new benchmark task.
 - [Add a model provider](./how-to/add-a-model-provider.md) — wire up a new LLM backend.
 - [Add an agent harness](./how-to/add-an-agent-harness.md) — plug in a new agent under test.
